@@ -101,6 +101,268 @@ impl RobinhoodClient {
     }
 }
 
+// Network-exercising tests for the endpoint methods. They build a client
+// pointed at a wiremock server and use the crate-internal `inject_test_auth`
+// (compiled under `cfg(test)`) to get past `require_auth`. These run on every
+// `cargo test` / `cargo nextest run` and count toward coverage.
+#[cfg(test)]
+mod endpoint_tests {
+    use crate::client::RobinhoodClient;
+    use crate::config::RhoodConfig;
+    use crate::models::dividend::Dividend;
+    use secrecy::SecretString;
+    use wiremock::matchers::{method, path, query_param, query_param_is_missing};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const INSTRUMENT_UUID: &str = "450dfc6d-5510-4d40-abfb-f633b7d9be3e";
+
+    /// Builds a client whose every base URL points at `base_url`, with an
+    /// injected authenticated session.
+    async fn client_for_server(base_url: &str) -> (tempfile::TempDir, RobinhoodClient) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = RhoodConfig::default();
+        config.auth.token_cache_path = dir
+            .path()
+            .join("nonexistent-token.json")
+            .to_str()
+            .unwrap()
+            .to_string();
+        config.api.base_url = base_url.to_string();
+        config.api.phoenix_url = base_url.to_string();
+        config.api.bonfire_url = base_url.to_string();
+        let client = RobinhoodClient::with_config(config).unwrap();
+        client
+            .inject_test_auth(
+                SecretString::from("access-token"),
+                "Bearer".to_string(),
+                SecretString::from("refresh-token"),
+            )
+            .await;
+        (dir, client)
+    }
+
+    fn instrument_url() -> String {
+        format!("https://api.robinhood.com/instruments/{INSTRUMENT_UUID}/")
+    }
+
+    #[tokio::test]
+    async fn get_dividends_without_since_omits_date_filter() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/dividends/"))
+            .and(query_param_is_missing("updated_at[gte]"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [
+                    {"id": "div-001", "amount": "1.25", "state": "paid"},
+                    {"id": "div-002", "amount": "0.50", "state": "pending"}
+                ],
+                "next": null,
+                "previous": null
+            })))
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server.uri()).await;
+
+        let dividends = client.get_dividends(None).await.unwrap();
+
+        assert_eq!(dividends.len(), 2);
+        assert_eq!(dividends[0].id.as_deref(), Some("div-001"));
+    }
+
+    #[tokio::test]
+    async fn get_dividends_with_since_sends_date_filter() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/dividends/"))
+            .and(query_param("updated_at[gte]", "2025-01-01"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [{"id": "div-003", "amount": "2.00", "state": "paid"}],
+                "next": null,
+                "previous": null
+            })))
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server.uri()).await;
+
+        let dividends = client.get_dividends(Some("2025-01-01")).await.unwrap();
+
+        assert_eq!(dividends.len(), 1);
+        assert_eq!(dividends[0].id.as_deref(), Some("div-003"));
+    }
+
+    #[tokio::test]
+    async fn get_dividends_enriches_missing_symbols() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/dividends/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [{
+                    "id": "div-004",
+                    "instrument": instrument_url(),
+                    "amount": "1.00",
+                    "state": "paid"
+                }],
+                "next": null,
+                "previous": null
+            })))
+            .mount(&server)
+            .await;
+        // Symbol resolution: the batched `/instruments/?ids=` lookup.
+        Mock::given(method("GET"))
+            .and(path("/instruments/"))
+            .and(query_param("ids", INSTRUMENT_UUID))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [{"id": INSTRUMENT_UUID, "symbol": "TSLA"}]
+            })))
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server.uri()).await;
+
+        let dividends = client.get_dividends(None).await.unwrap();
+
+        assert_eq!(dividends[0].symbol.as_deref(), Some("TSLA"));
+    }
+
+    #[tokio::test]
+    async fn get_dividends_returns_raw_when_enrichment_fails() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/dividends/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [{
+                    "id": "div-005",
+                    "instrument": instrument_url(),
+                    "amount": "1.00",
+                    "state": "paid"
+                }],
+                "next": null,
+                "previous": null
+            })))
+            .mount(&server)
+            .await;
+        // Symbol resolution fails — enrichment is best-effort and swallowed.
+        Mock::given(method("GET"))
+            .and(path("/instruments/"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server.uri()).await;
+
+        let dividends = client.get_dividends(None).await.unwrap();
+
+        assert_eq!(dividends.len(), 1);
+        assert_eq!(dividends[0].id.as_deref(), Some("div-005"));
+        assert!(dividends[0].symbol.is_none());
+    }
+
+    #[tokio::test]
+    async fn enrich_dividend_symbols_is_noop_without_unresolved_instruments() {
+        // No instrument URLs to resolve, so no `/instruments/` request is made.
+        let server = MockServer::start().await;
+        let (_dir, client) = client_for_server(&server.uri()).await;
+
+        let mut dividends = vec![Dividend {
+            id: Some("div-006".to_string()),
+            symbol: Some("EXISTING".to_string()),
+            ..Default::default()
+        }];
+        client
+            .enrich_dividend_symbols(&mut dividends)
+            .await
+            .unwrap();
+
+        assert_eq!(dividends[0].symbol.as_deref(), Some("EXISTING"));
+    }
+
+    #[tokio::test]
+    async fn enrich_dividend_symbols_resolves_via_instruments() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/instruments/"))
+            .and(query_param("ids", INSTRUMENT_UUID))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [{"id": INSTRUMENT_UUID, "symbol": "AAPL"}]
+            })))
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server.uri()).await;
+
+        let mut dividends = vec![Dividend {
+            id: Some("div-007".to_string()),
+            instrument: Some(instrument_url()),
+            symbol: None,
+            ..Default::default()
+        }];
+        client
+            .enrich_dividend_symbols(&mut dividends)
+            .await
+            .unwrap();
+
+        assert_eq!(dividends[0].symbol.as_deref(), Some("AAPL"));
+    }
+
+    #[tokio::test]
+    async fn get_total_dividends_sums_paid_and_reinvested() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/dividends/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [
+                    {"id": "d1", "amount": "0.07", "state": "paid"},
+                    {"id": "d2", "amount": "0.12", "state": "reinvested"},
+                    {"id": "d3", "amount": "5.00", "state": "pending"}
+                ],
+                "next": null,
+                "previous": null
+            })))
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server.uri()).await;
+
+        let total = client.get_total_dividends().await.unwrap();
+
+        assert_eq!(total, "0.19");
+    }
+
+    #[tokio::test]
+    async fn get_interest_payments_returns_all() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/accounts/sweeps/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [{
+                    "id": "int-001",
+                    "amount": {"amount": "2.99", "currency_code": "USD"},
+                    "direction": "credit",
+                    "payout_type": "eom_payment"
+                }],
+                "next": null,
+                "previous": null
+            })))
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server.uri()).await;
+
+        let payments = client.get_interest_payments().await.unwrap();
+
+        assert_eq!(payments.len(), 1);
+        assert_eq!(payments[0].display_id(), "int-001");
+    }
+
+    #[tokio::test]
+    async fn get_dividends_propagates_server_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/dividends/"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server.uri()).await;
+
+        assert!(client.get_dividends(None).await.is_err());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::models::dividend::{Dividend, InterestPayment};

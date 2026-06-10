@@ -144,9 +144,10 @@ impl RobinhoodClient {
     /// invocations of downstream consumers — doing so exposes a public
     /// method that can overwrite the client's authentication state.
     ///
-    /// Available only when the `test-helpers` feature is enabled. Used by
-    /// integration tests to bypass the full login flow.
-    #[cfg(feature = "test-helpers")]
+    /// Compiled in two cases: the crate's own unit tests (`cfg(test)`), and
+    /// when the `test-helpers` feature is enabled for external integration
+    /// tests. It is never present in a normal (non-test) build.
+    #[cfg(any(test, feature = "test-helpers"))]
     #[doc(hidden)]
     pub async fn inject_test_auth(
         &self,

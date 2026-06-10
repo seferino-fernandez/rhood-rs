@@ -156,6 +156,370 @@ impl RobinhoodClient {
     }
 }
 
+// Network-exercising tests for the endpoint methods. They build a client
+// pointed at a wiremock server and use the crate-internal `inject_test_auth`
+// (compiled under `cfg(test)`) to get past `require_auth`. These run on every
+// `cargo test` / `cargo nextest run` and count toward coverage.
+#[cfg(test)]
+mod endpoint_tests {
+    use crate::client::RobinhoodClient;
+    use crate::config::RhoodConfig;
+    use crate::models::recurring::{
+        CreateRecurringRequest, RecurringFrequency, RecurringInvestment, RecurringSource,
+        UpdateRecurringRequest,
+    };
+    use crate::{Result, RhoodError};
+    use secrecy::SecretString;
+    use wiremock::matchers::{body_string_contains, method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Builds a client whose every base URL points at `base_url`, with the
+    /// given read-only setting and an injected authenticated session.
+    async fn client_for_server(
+        base_url: &str,
+        read_only: bool,
+    ) -> (tempfile::TempDir, RobinhoodClient) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = RhoodConfig::default();
+        config.auth.token_cache_path = dir
+            .path()
+            .join("nonexistent-token.json")
+            .to_str()
+            .unwrap()
+            .to_string();
+        config.read_only = read_only;
+        config.api.base_url = base_url.to_string();
+        config.api.phoenix_url = base_url.to_string();
+        config.api.bonfire_url = base_url.to_string();
+        let client = RobinhoodClient::with_config(config).unwrap();
+        client
+            .inject_test_auth(
+                SecretString::from("access-token"),
+                "Bearer".to_string(),
+                SecretString::from("refresh-token"),
+            )
+            .await;
+        (dir, client)
+    }
+
+    /// A read-only client never reaches the network; its base URL is unused.
+    async fn read_only_client() -> (tempfile::TempDir, RobinhoodClient) {
+        client_for_server("https://unused.invalid", true).await
+    }
+
+    fn sample_create_request() -> CreateRecurringRequest {
+        CreateRecurringRequest {
+            symbol: "tsla".to_string(),
+            amount: 10.0,
+            frequency: RecurringFrequency::Weekly,
+            start_date: "2026-04-07".to_string(),
+            source_of_funds: RecurringSource::BuyingPower,
+        }
+    }
+
+    #[tokio::test]
+    async fn get_recurring_investments_returns_all_schedules() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/recurring_schedules/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [
+                    {"id": "sched-001", "frequency": "weekly", "state": "active"},
+                    {"id": "sched-002", "frequency": "monthly", "state": "paused"}
+                ],
+                "next": null,
+                "previous": null
+            })))
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server.uri(), true).await;
+
+        let schedules = client.get_recurring_investments().await.unwrap();
+
+        assert_eq!(schedules.len(), 2);
+        assert_eq!(schedules[0].id.as_deref(), Some("sched-001"));
+        assert_eq!(schedules[1].state.as_deref(), Some("paused"));
+    }
+
+    #[tokio::test]
+    async fn create_recurring_investment_blocked_in_read_only_mode() {
+        let (_dir, client) = read_only_client().await;
+        let err = client
+            .create_recurring_investment(&sample_create_request())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RhoodError::ReadOnlyMode));
+    }
+
+    #[tokio::test]
+    async fn create_recurring_investment_happy_path_posts_expected_payload() {
+        let server = MockServer::start().await;
+        // Symbol resolution.
+        Mock::given(method("GET"))
+            .and(path("/instruments/"))
+            .and(query_param("symbol", "TSLA"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [{"id": "inst-tsla", "symbol": "TSLA"}],
+                "next": null
+            })))
+            .mount(&server)
+            .await;
+        // Account discovery.
+        Mock::given(method("GET"))
+            .and(path("/accounts/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [{"account_number": "ACC-123"}],
+                "next": null
+            })))
+            .mount(&server)
+            .await;
+        // The actual create call. Assert the derived payload fields.
+        Mock::given(method("POST"))
+            .and(path("/recurring_schedules/"))
+            .and(query_param("account_number", "ACC-123"))
+            .and(body_string_contains("\"amount\":\"10.00\""))
+            .and(body_string_contains("\"frequency\":\"weekly\""))
+            .and(body_string_contains("\"asset_symbol\":\"TSLA\""))
+            .and(body_string_contains("\"asset_type\":\"equity\""))
+            .and(body_string_contains("\"source_of_funds\":\"buying_power\""))
+            .and(body_string_contains("\"is_backup_ach_enabled\":false"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "sched-new",
+                "account_number": "ACC-123",
+                "frequency": "weekly",
+                "state": "active"
+            })))
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server.uri(), false).await;
+
+        let created = client
+            .create_recurring_investment(&sample_create_request())
+            .await
+            .unwrap();
+
+        assert_eq!(created.id.as_deref(), Some("sched-new"));
+        assert_eq!(created.account_number.as_deref(), Some("ACC-123"));
+    }
+
+    #[tokio::test]
+    async fn create_recurring_investment_unknown_symbol_errors() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/instruments/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [],
+                "next": null
+            })))
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server.uri(), false).await;
+
+        let err = client
+            .create_recurring_investment(&sample_create_request())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, RhoodError::InvalidSymbol(symbol) if symbol == "tsla"));
+    }
+
+    #[tokio::test]
+    async fn create_recurring_investment_instrument_without_id_errors() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/instruments/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [{"symbol": "TSLA"}],
+                "next": null
+            })))
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server.uri(), false).await;
+
+        let err = client
+            .create_recurring_investment(&sample_create_request())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, RhoodError::InvalidSymbol(_)));
+    }
+
+    #[tokio::test]
+    async fn create_recurring_investment_missing_account_number_errors() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/instruments/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [{"id": "inst-tsla", "symbol": "TSLA"}],
+                "next": null
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/accounts/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [{"buying_power": "100.00"}],
+                "next": null
+            })))
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server.uri(), false).await;
+
+        let err = client
+            .create_recurring_investment(&sample_create_request())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, RhoodError::NotAuthenticated));
+    }
+
+    #[tokio::test]
+    async fn update_recurring_investment_blocked_in_read_only_mode() {
+        let (_dir, client) = read_only_client().await;
+        let req = UpdateRecurringRequest {
+            amount: Some(15.0),
+            frequency: None,
+            state: None,
+            start_date: None,
+        };
+        let err = client
+            .update_recurring_investment("sched-001", &req)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RhoodError::ReadOnlyMode));
+    }
+
+    #[tokio::test]
+    async fn update_recurring_investment_patches_only_set_fields() {
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/recurring_schedules/sched-001/"))
+            .and(body_string_contains("\"amount\":{\"amount\":\"20.00\""))
+            .and(body_string_contains("\"frequency\":\"biweekly\""))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "sched-001",
+                "frequency": "biweekly",
+                "state": "active"
+            })))
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server.uri(), false).await;
+
+        let req = UpdateRecurringRequest {
+            amount: Some(20.0),
+            frequency: Some(RecurringFrequency::Biweekly),
+            state: None,
+            start_date: None,
+        };
+        let updated = client
+            .update_recurring_investment("sched-001", &req)
+            .await
+            .unwrap();
+
+        assert_eq!(updated.frequency.as_deref(), Some("biweekly"));
+    }
+
+    #[tokio::test]
+    async fn update_recurring_investment_omits_unset_fields() {
+        let server = MockServer::start().await;
+        // An empty update serializes to `{}` because every field skips when None.
+        Mock::given(method("PATCH"))
+            .and(path("/recurring_schedules/sched-001/"))
+            .and(body_string_contains("{}"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "sched-001"
+            })))
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server.uri(), false).await;
+
+        let req = UpdateRecurringRequest {
+            amount: None,
+            frequency: None,
+            state: None,
+            start_date: None,
+        };
+        let updated = client
+            .update_recurring_investment("sched-001", &req)
+            .await
+            .unwrap();
+
+        assert_eq!(updated.id.as_deref(), Some("sched-001"));
+    }
+
+    #[tokio::test]
+    async fn cancel_recurring_investment_sends_deleted_state() {
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/recurring_schedules/sched-001/"))
+            .and(body_string_contains("\"state\":\"deleted\""))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "sched-001",
+                "state": "deleted"
+            })))
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server.uri(), false).await;
+
+        let cancelled = client
+            .cancel_recurring_investment("sched-001")
+            .await
+            .unwrap();
+
+        assert_eq!(cancelled.state.as_deref(), Some("deleted"));
+    }
+
+    #[tokio::test]
+    async fn cancel_recurring_investment_blocked_in_read_only_mode() {
+        let (_dir, client) = read_only_client().await;
+        let err = client
+            .cancel_recurring_investment("sched-001")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RhoodError::ReadOnlyMode));
+    }
+
+    #[tokio::test]
+    async fn get_next_investment_date_sends_frequency_and_start_date() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/recurring_schedules/equity/next_investment_date/"))
+            .and(query_param("frequency", "monthly"))
+            .and(query_param("start_date", "2026-06-01"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "frequency": "monthly",
+                "next_investment_date": "2026-06-01",
+                "start_date": "2026-06-01"
+            })))
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server.uri(), true).await;
+
+        let next = client
+            .get_next_investment_date(RecurringFrequency::Monthly, "2026-06-01")
+            .await
+            .unwrap();
+
+        assert_eq!(next.next_investment_date.as_deref(), Some("2026-06-01"));
+        assert_eq!(next.frequency.as_deref(), Some("monthly"));
+    }
+
+    #[tokio::test]
+    async fn get_recurring_investments_propagates_server_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/recurring_schedules/"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server.uri(), true).await;
+
+        let result: Result<Vec<RecurringInvestment>> = client.get_recurring_investments().await;
+
+        assert!(result.is_err());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::models::recurring::{MoneyAmount, RecurringInvestment};
