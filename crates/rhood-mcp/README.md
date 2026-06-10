@@ -4,6 +4,14 @@ MCP server exposing Robinhood brokerage operations as tools for LLM clients.
 
 Built on [rmcp](https://github.com/modelcontextprotocol/rust-sdk) and [rhood-core](../rhood-core/).
 
+## Install
+
+```bash
+brew install seferino-fernandez/tools/rhood-mcp   # Homebrew (macOS & Linux)
+cargo install rhood-mcp                            # build from source (crates.io)
+cargo binstall rhood-mcp                           # prebuilt binary, no compile
+```
+
 ## Transports
 
 - `stdio` for Claude Desktop, Claude Code, and other local MCP clients

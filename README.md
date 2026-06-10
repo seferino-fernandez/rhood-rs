@@ -14,6 +14,30 @@ Inspired by [robin_stocks](https://github.com/jmfernandes/robin_stocks), the exc
 | [`rhood-cli`](crates/rhood-cli/)   | Terminal CLI (`rhood`) for trading |
 | [`rhood-mcp`](crates/rhood-mcp/)   | MCP server for LLM-driven trading  |
 
+## Installation
+
+### Homebrew (macOS & Linux)
+
+```bash
+brew tap seferino-fernandez/tools
+brew install rhood       # CLI
+brew install rhood-mcp   # MCP server
+```
+
+### Cargo (build from source)
+
+```bash
+cargo install rhood-cli   # installs the `rhood` binary
+cargo install rhood-mcp   # installs the `rhood-mcp` binary
+```
+
+### cargo-binstall (prebuilt binaries, no compile)
+
+```bash
+cargo binstall rhood-cli
+cargo binstall rhood-mcp
+```
+
 ## Quick Start
 
 ```bash

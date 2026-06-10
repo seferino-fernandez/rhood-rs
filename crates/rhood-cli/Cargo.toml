@@ -35,3 +35,14 @@ predicates = "3.1.4"
 [[test]]
 name = "integration"
 path = "tests/integration/main.rs"
+
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/rhood-{ target }.{ archive-format }"
+bin-dir = "rhood{ binary-ext }"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-fmt = "zip"
+
+[package.metadata.binstall.overrides.aarch64-pc-windows-msvc]
+pkg-fmt = "zip"
