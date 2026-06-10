@@ -7,7 +7,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/seferino-fernandez/rhood-rs"
@@ -16,7 +16,7 @@ authors = ["Seferino Fernandez"]
 rust-version = "1.96"
 
 [workspace.dependencies]
-rhood-core = { version = "0.1.0", path = "crates/rhood-core" }
+rhood-core = { version = "0.1.1", path = "crates/rhood-core" }
 tokio = { version = "1.52.3", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
