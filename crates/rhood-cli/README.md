@@ -12,7 +12,15 @@ cargo build --release -p rhood-cli
 
 The binary is written to `target/release/rhood`. Add it to your `PATH` or invoke it directly.
 
-Distribution packaging (pre-built binaries, `cargo install`, system packages) is out of scope for this crate.
+## Install
+
+```bash
+brew install seferino-fernandez/tools/rhood   # Homebrew (macOS & Linux)
+cargo install rhood-cli                        # build from source (crates.io)
+cargo binstall rhood-cli                       # prebuilt binary, no compile
+```
+
+All three install the `rhood` binary.
 
 ## Authentication
 
