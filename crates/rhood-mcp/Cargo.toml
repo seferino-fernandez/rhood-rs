@@ -45,7 +45,7 @@ sha2 = "0.11.0"
 base64 = "0.22.1"
 serde_urlencoded = "0.7.1"
 urlencoding = "2.1.3"
-tower-http = { version = "0.6.9", features = ["cors"] }
+tower-http = { version = "0.6.11", features = ["cors"] }
 
 [dev-dependencies]
 tower = "0.5.3"
