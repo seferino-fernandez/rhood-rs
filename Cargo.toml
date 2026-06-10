@@ -1,0 +1,104 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/rhood-core",
+    "crates/rhood-cli",
+    "crates/rhood-mcp",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/seferino-fernandez/rhood-rs"
+homepage = "https://github.com/seferino-fernandez/rhood-rs"
+authors = ["Seferino Fernandez"]
+rust-version = "1.96"
+
+[workspace.dependencies]
+rhood-core = { version = "0.1.0", path = "crates/rhood-core" }
+tokio = { version = "1.52.2", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+reqwest = { version = "0.13.3", features = ["json", "cookies", "query", "form", "gzip", "deflate", "brotli"] }
+thiserror = "2.0.18"
+secrecy = { version = "0.10.3", features = ["serde"] }
+totp-rs = { version = "5.7.1", features = ["gen_secret"] }
+dirs = "6.0.0"
+chrono = { version = "0.4.44", features = ["serde"] }
+uuid = { version = "1.23.1", features = ["v4", "serde"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+anyhow = "1.0.102"
+toml = "1.1.2"
+schemars = { version = "1.2.1", features = ["rust_decimal1", "uuid1"] }
+rust_decimal = { version = "1.37", features = ["serde"] }
+moka = { version = "0.12.15", features = ["future"] }
+futures = { version = "0.3.32", default-features = false, features = ["std"] }
+
+[profile.release]
+opt-level = "z"   # Optimize for size.
+strip = true      # Automatically strip symbols from the binary.
+lto = true        # Enable Link Time Optimization (LTO)
+codegen-units = 1 # Reduce Parallel Code Generation Units to Increase Optimization
+panic = "abort"
+
+[workspace.lints.clippy]
+# Prevent panics from unwraps and unsafe slicing or indexing
+string_slice = "warn"
+indexing_slicing = "warn"
+unwrap_used = "warn"
+panic = "warn"
+todo = "warn"
+unimplemented = "warn"
+unreachable = "warn"
+get_unwrap = "warn"
+unwrap_in_result = "warn"
+unchecked_time_subtraction = "warn"
+panic_in_result_fn = "warn"
+expect_used = "warn"
+arithmetic_side_effects = "warn"
+
+# Prevent dropped futures and swallowed errors
+let_underscore_future = "warn"
+let_underscore_must_use = "warn"
+unused_result_ok = "warn"
+map_err_ignore = "warn"
+assertions_on_result_states = "warn"
+
+# Prevent deadlocks and concurrency bugs
+await_holding_lock = "warn"
+await_holding_refcell_ref = "warn"
+if_let_mutex = "warn"
+large_futures = "warn"
+
+# Prevent unsafe things with memory
+mem_forget = "warn"
+undocumented_unsafe_blocks = "warn"
+multiple_unsafe_ops_per_block = "warn"
+unnecessary_safety_doc = "warn"
+unnecessary_safety_comment = "warn"
+
+# Prevent potentially incorrect things with numbers
+float_cmp = "warn"
+float_cmp_const = "warn"
+lossy_float_literal = "warn"
+cast_sign_loss = "warn"
+invalid_upcast_comparisons = "warn"
+# these effectively force you to document numeric invariants
+cast_possible_wrap = "warn"
+cast_precision_loss = "warn"
+cast_possible_truncation = "warn"
+
+# Don't Do Bad Things That are Easy to Avoid
+rc_mutex = "warn"
+debug_assert_with_mut_call = "warn"
+iter_not_returning_iterator = "warn"
+expl_impl_clone_on_copy = "warn"
+infallible_try_from = "warn"
+dbg_macro = "warn"
+
+# Don't `allow` Your Way Around These Lints - every suppression must be
+# a deliberate #[expect(..., reason = "…")] rather than a silent #[allow]
+allow_attributes = "warn"
+allow_attributes_without_reason = "warn"

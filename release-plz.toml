@@ -1,0 +1,15 @@
+[workspace]
+# One unified tag + GitHub Release for the whole workspace.
+# Disable per-package git tags and releases by default...
+git_tag_enable = false
+git_release_enable = false
+# ...but still keep changelogs and crates.io publishing on for every crate.
+changelog_update = true
+
+# Anchor the single tag/release on rhood-cli.
+[[package]]
+name = "rhood-cli"
+git_tag_enable = true
+git_release_enable = true
+git_tag_name = "v{{ version }}"
+git_release_name = "rhood-rs v{{ version }}"

@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rhood MCP — Authorize</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: system-ui, sans-serif; background: #f5f5f5; display: flex;
+         justify-content: center; align-items: center; min-height: 100vh; }
+  .card { background: #fff; border-radius: 12px; padding: 2rem; max-width: 420px;
+          width: 100%; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+  h1 { font-size: 1.25rem; margin-bottom: 1rem; }
+  .scope-list { margin: 1rem 0; padding: 0.75rem; background: #f9f9f9;
+                border-radius: 8px; font-size: 0.9rem; }
+  .scope-item { padding: 0.25rem 0; }
+  .pin-field { margin: 1rem 0; }
+  .pin-field input { width: 100%; padding: 0.5rem; border: 1px solid #ddd;
+                     border-radius: 6px; font-size: 1rem; }
+  .buttons { display: flex; gap: 0.75rem; margin-top: 1.5rem; }
+  .btn { flex: 1; padding: 0.75rem; border: none; border-radius: 8px; font-size: 1rem;
+         cursor: pointer; font-weight: 500; }
+  .btn-approve { background: #22c55e; color: #fff; }
+  .btn-approve:hover { background: #16a34a; }
+  .btn-deny { background: #e5e5e5; color: #333; }
+  .btn-deny:hover { background: #d4d4d4; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>Authorize MCP Client</h1>
+  <p><strong id="client-name"></strong> is requesting access:</p>
+  <div class="scope-list" id="scope-list"></div>
+  <div class="pin-field" id="pin-section" style="display:none">
+    <label for="pin">Enter PIN to authorize:</label>
+    <input type="password" id="pin" name="pin" autocomplete="off">
+  </div>
+  <form id="auth-form" method="POST" action="/oauth/approve">
+    <input type="hidden" name="client_id" id="f-client-id">
+    <input type="hidden" name="redirect_uri" id="f-redirect-uri">
+    <input type="hidden" name="scope" id="f-scope">
+    <input type="hidden" name="state" id="f-state">
+    <input type="hidden" name="code_challenge" id="f-code-challenge">
+    <input type="hidden" name="code_challenge_method" id="f-code-challenge-method">
+    <input type="hidden" name="approved" id="f-approved" value="false">
+    <input type="hidden" name="pin" id="f-pin" value="">
+    <input type="hidden" name="csrf_nonce" id="f-csrf-nonce" value="">
+    <div class="buttons">
+      <button type="button" class="btn btn-deny" onclick="deny()">Deny</button>
+      <button type="button" class="btn btn-approve" onclick="approve()">Approve</button>
+    </div>
+  </form>
+</div>
+<script>
+  const params = new URLSearchParams(window.location.search);
+  document.getElementById('f-client-id').value = params.get('client_id') || '';
+  document.getElementById('f-redirect-uri').value = params.get('redirect_uri') || '';
+  document.getElementById('f-scope').value = params.get('scope') || 'read';
+  document.getElementById('f-state').value = params.get('state') || '';
+  document.getElementById('f-code-challenge').value = params.get('code_challenge') || '';
+  document.getElementById('f-code-challenge-method').value = params.get('code_challenge_method') || '';
+  document.getElementById('f-csrf-nonce').value = document.body.dataset.csrfNonce || '';
+  document.getElementById('client-name').textContent = params.get('client_id') || 'Unknown client';
+  const scopes = (params.get('scope') || 'read').split(' ');
+  const list = document.getElementById('scope-list');
+  scopes.forEach(s => {
+    const div = document.createElement('div');
+    div.className = 'scope-item';
+    div.textContent = s === 'read' ? 'Read account data, quotes, positions'
+                    : s === 'write' ? 'Place and cancel orders' : s;
+    list.appendChild(div);
+  });
+  if (document.body.dataset.pinRequired === 'true') {
+    document.getElementById('pin-section').style.display = 'block';
+  }
+  function approve() {
+    document.getElementById('f-approved').value = 'true';
+    document.getElementById('f-pin').value = document.getElementById('pin')?.value || '';
+    document.getElementById('auth-form').submit();
+  }
+  function deny() {
+    document.getElementById('f-approved').value = 'false';
+    document.getElementById('auth-form').submit();
+  }
+</script>
+</body>
+</html>

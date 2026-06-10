@@ -1,0 +1,132 @@
+# Rhood — Example Configuration
+#
+# Copy this file to one of:
+#   ~/.config/rhood/config.toml   (default location)
+#   any path via: rhood --config /path/to/config.toml
+#   any path via: RHOOD_CONFIG=/path/to/config.toml
+#
+# All values below show their defaults. Every field is optional —
+# omitted fields fall back to these defaults.
+#
+# Environment variables override config.toml values.
+# CLI flags override environment variables.
+
+# Prevent order placement and cancellation (default: true)
+# Env: RHOOD_READ_ONLY=true
+read_only = true
+
+[auth]
+# Robinhood account credentials
+# Env: RHOOD_USERNAME, RHOOD_PASSWORD, RHOOD_MFA
+# username = ""
+# password = ""
+# mfa_secret = ""
+
+# OAuth2 client identifier
+# Env: RHOOD_CLIENT_ID
+client_id = "c82SH0WZOsabOXGP2sxqcj34FxkvfnWRZBKlBjFS"
+
+# Secret file alternatives (Docker _FILE convention).
+# Reads the file at load time, trims whitespace. Cannot be set
+# alongside the direct value — set one or the other.
+# Env: RHOOD_PASSWORD_FILE, RHOOD_MFA_FILE, RHOOD_DEVICE_TOKEN_FILE
+# password_file = "/run/secrets/rhood-password"
+# mfa_secret_file = "/run/secrets/rhood-mfa"
+# device_token_file = "/run/secrets/rhood-device-token"
+
+# Persistent device token (auto-generated if omitted)
+# Env: RHOOD_DEVICE_TOKEN
+# device_token = ""
+
+# Access token lifetime in seconds
+# Env: RHOOD_TOKEN_EXPIRY_SECS
+token_expiry_secs = 86400
+
+# Path to cached auth token
+# Env: RHOOD_TOKEN_CACHE_PATH
+token_cache_path = "~/.rhood/.rhood-token"
+
+[api]
+# Robinhood API base URLs
+# Env: RHOOD_API_URL, RHOOD_PHOENIX_URL, RHOOD_BONFIRE_URL
+base_url = "https://api.robinhood.com"
+phoenix_url = "https://phoenix.robinhood.com"
+bonfire_url = "https://bonfire.robinhood.com"
+
+[device_verification]
+# Polling interval and timeout for device verification flow (seconds)
+# Env: RHOOD_DV_POLL_INTERVAL_SECS, RHOOD_DV_TIMEOUT_SECS
+poll_interval_secs = 5
+timeout_secs = 120
+
+[log]
+# Log level: trace, debug, info, warn, error
+# Env: RHOOD_LOG_LEVEL
+level = "info"
+
+[mcp]
+# MCP server settings (used by rhood-mcp)
+
+# Bind address and port for HTTP transport
+# Env: RHOOD_MCP_HOST, RHOOD_MCP_PORT
+# host = "127.0.0.1"
+# port = 8080
+
+# External base URL for OAuth metadata discovery.
+# Falls back to http://{host}:{port} if unset. Set this to your
+# public HTTPS URL for production deployments.
+# Env: RHOOD_MCP_BASE_URL
+# base_url = "https://mcp.example.com"
+
+# Static bearer token for auth_mode="token"
+# Env: RHOOD_MCP_TOKEN
+# token = ""
+
+# Secret file alternative for MCP bearer token
+# Env: RHOOD_MCP_TOKEN_FILE
+# token_file = "/run/secrets/rhood-mcp-token"
+
+# Auth mode: "token" (default), "oauth", or "none"
+# - token: static bearer token (requires token/token_file above)
+# - oauth: OAuth 2.1 with PKCE, dynamic client registration, consent screen
+# - none: no authentication (loopback-only, for local development)
+# Env: RHOOD_MCP_AUTH_MODE
+# auth_mode = "token"
+
+# OAuth: optional PIN for consent screen (recommended for non-loopback)
+# Env: RHOOD_MCP_OAUTH_PIN
+# oauth_pin = ""
+
+# OAuth: PIN secret file (_FILE convention)
+# Env: RHOOD_MCP_OAUTH_PIN_FILE
+# oauth_pin_file = "/run/secrets/rhood-mcp-oauth-pin"
+
+# OAuth: access token lifetime in seconds (default: 3600 = 1 hour)
+# Env: RHOOD_MCP_OAUTH_TOKEN_EXPIRY_SECS
+# oauth_token_expiry_secs = 3600
+
+# OAuth: authorization code TTL in seconds (default: 60 = 1 minute)
+# How long an authorization code remains valid after issuance.
+# Env: RHOOD_MCP_OAUTH_AUTH_CODE_TTL_SECS
+# oauth_auth_code_ttl_secs = 60
+
+# OAuth: CSRF nonce TTL in seconds (default: 600 = 10 minutes)
+# How long a CSRF nonce on the consent page remains valid.
+# Env: RHOOD_MCP_OAUTH_CSRF_NONCE_TTL_SECS
+# oauth_csrf_nonce_ttl_secs = 600
+
+# OAuth: expired entry sweep interval in seconds (default: 300 = 5 minutes)
+# How often the background task purges expired auth codes, tokens, and nonces.
+# Env: RHOOD_MCP_OAUTH_SWEEP_INTERVAL_SECS
+# oauth_sweep_interval_secs = 300
+
+# Ceiling on a single tool response payload, in bytes. Oversized responses are
+# replaced with a bounded JSON error. Default: 262144 (256 KiB).
+# Env: RHOOD_MCP_MAX_RESPONSE_BYTES
+# max_response_bytes = 262144
+
+# OAuth: CORS allowed origins for OAuth endpoints (default: localhost only)
+# Set to ["*"] to allow all origins. Comma-separated for env var.
+# Env: RHOOD_MCP_OAUTH_CORS_ORIGINS=http://localhost,http://127.0.0.1,http://[::1]
+[mcp.oauth_cors]
+# origins = ["http://localhost", "http://127.0.0.1", "http://[::1]"]
