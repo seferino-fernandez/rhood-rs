@@ -14,10 +14,23 @@ The binary is written to `target/release/rhood`. Add it to your `PATH` or invoke
 
 ## Install
 
+### Homebrew (macOS & Linux)
+
 ```bash
-brew install seferino-fernandez/tools/rhood   # Homebrew (macOS & Linux)
-cargo install rhood-cli                        # build from source (crates.io)
-cargo binstall rhood-cli                       # prebuilt binary, no compile
+brew tap seferino-fernandez/tools
+brew install rhood
+```
+
+### Cargo (build from source)
+
+```bash
+cargo install rhood-cli
+```
+
+### cargo-binstall (prebuilt binary, no compile)
+
+```bash
+cargo binstall rhood-cli
 ```
 
 All three install the `rhood` binary.

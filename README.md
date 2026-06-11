@@ -20,15 +20,15 @@ Inspired by [robin_stocks](https://github.com/jmfernandes/robin_stocks), the exc
 
 ```bash
 brew tap seferino-fernandez/tools
-brew install rhood       # CLI
-brew install rhood-mcp   # MCP server
+brew install rhood
+brew install rhood-mcp
 ```
 
 ### Cargo (build from source)
 
 ```bash
-cargo install rhood-cli   # installs the `rhood` binary
-cargo install rhood-mcp   # installs the `rhood-mcp` binary
+cargo install rhood-cli
+cargo install rhood-mcp
 ```
 
 ### cargo-binstall (prebuilt binaries, no compile)
