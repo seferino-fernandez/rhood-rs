@@ -6,10 +6,23 @@ Built on [rmcp](https://github.com/modelcontextprotocol/rust-sdk) and [rhood-cor
 
 ## Install
 
+### Homebrew (macOS & Linux)
+
 ```bash
-brew install seferino-fernandez/tools/rhood-mcp   # Homebrew (macOS & Linux)
-cargo install rhood-mcp                            # build from source (crates.io)
-cargo binstall rhood-mcp                           # prebuilt binary, no compile
+brew tap seferino-fernandez/tools
+brew install rhood-mcp
+```
+
+### Cargo (build from source)
+
+```bash
+cargo install rhood-mcp
+```
+
+### cargo-binstall (prebuilt binary, no compile)
+
+```bash
+cargo binstall rhood-mcp
 ```
 
 ## Transports
