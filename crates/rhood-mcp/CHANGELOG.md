@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3](https://github.com/seferino-fernandez/rhood-rs/compare/rhood-mcp-v0.1.2...rhood-mcp-v0.1.3) - 2026-06-18
+
+### Other
+
+- *(deps)* Bump the dependencies group with 2 updates ([#7](https://github.com/seferino-fernandez/rhood-rs/pull/7))
+- updated install instructions for homebrew and cargo binstall
+
 ## [0.1.2](https://github.com/seferino-fernandez/rhood-rs/compare/rhood-mcp-v0.1.1...rhood-mcp-v0.1.2) - 2026-06-10
 
 ### Added
