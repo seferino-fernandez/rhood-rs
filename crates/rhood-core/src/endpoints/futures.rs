@@ -124,7 +124,7 @@ impl RobinhoodClient {
     ///
     /// Unlike [`get_futures_account_id`](Self::get_futures_account_id), this
     /// wrapper returns [`RhoodError::InvalidParameter`] rather than
-    /// `Ok(None)` when the user has no futures account — matching the error
+    /// `Ok(None)` when the user has no futures account, matching the error
     /// shape existing call sites already expect.
     pub async fn cached_futures_account_id(&self) -> Result<String> {
         if !self.resolvers.enabled {

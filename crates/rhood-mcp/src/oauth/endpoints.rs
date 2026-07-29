@@ -18,7 +18,7 @@ use super::pkce;
 
 const CONSENT_HTML: &str = include_str!("consent.html");
 
-/// `GET /.well-known/oauth-protected-resource` — returns resource metadata
+/// `GET /.well-known/oauth-protected-resource` - returns resource metadata
 /// including supported scopes and authorization server references.
 pub async fn protected_resource_metadata(
     State(state): State<Arc<OAuthEndpointState>>,
@@ -36,7 +36,7 @@ pub async fn protected_resource_metadata(
     })
 }
 
-/// `GET /.well-known/oauth-authorization-server` — returns authorization server
+/// `GET /.well-known/oauth-authorization-server` - returns authorization server
 /// metadata including endpoints, supported grant types, and PKCE methods.
 pub async fn authorization_server_metadata(
     State(state): State<Arc<OAuthEndpointState>>,
@@ -62,7 +62,7 @@ pub async fn authorization_server_metadata(
     })
 }
 
-/// `GET /oauth/authorize` — validates the authorization request and renders
+/// `GET /oauth/authorize` - validates the authorization request and renders
 /// the consent form HTML. Requires PKCE `code_challenge` with method `S256`.
 pub async fn authorize(
     State(state): State<Arc<OAuthEndpointState>>,
@@ -147,7 +147,7 @@ pub async fn authorize(
         .into_response()
 }
 
-/// `POST /oauth/approve` — processes the consent form submission. On approval,
+/// `POST /oauth/approve` - processes the consent form submission. On approval,
 /// issues an authorization code and redirects to the client's `redirect_uri`.
 pub async fn approve(
     State(state): State<Arc<OAuthEndpointState>>,
@@ -219,7 +219,7 @@ pub async fn approve(
             &form.redirect_uri,
             state_param,
             "access_denied",
-            "Write scope is not available — server is in read-only mode",
+            "Write scope is not available because server is in read-only mode",
         );
     }
 
@@ -253,7 +253,7 @@ pub async fn approve(
     Redirect::to(&redirect_url).into_response()
 }
 
-/// `POST /oauth/token` — handles token exchange (`authorization_code`) and
+/// `POST /oauth/token` - handles token exchange (`authorization_code`) and
 /// token refresh (`refresh_token`) grant types.
 pub async fn token(
     State(state): State<Arc<OAuthEndpointState>>,
@@ -369,7 +369,7 @@ fn token_error(error: &str, description: &str) -> Response {
         .into_response()
 }
 
-/// `POST /oauth/register` — dynamic client registration endpoint.
+/// `POST /oauth/register` - dynamic client registration endpoint.
 /// Returns a new `client_id` and `client_secret`.
 pub async fn register(
     State(state): State<Arc<OAuthEndpointState>>,

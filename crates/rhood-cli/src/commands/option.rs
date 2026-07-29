@@ -371,7 +371,7 @@ mod tests {
 
     #[test]
     fn leg_columns_missing_leg_field_yields_empty_segment() {
-        // Leg missing "option_type" — should fall back to empty string for that column.
+        // Leg missing "option_type" should fall back to empty string for that column.
         let mut order = base_order();
         order.legs = Some(vec![serde_json::json!({
             "strike_price": "200.0000",

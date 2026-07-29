@@ -69,7 +69,11 @@ rhood --output json stock quote AAPL
 
 ## MCP Server
 
-`rhood-mcp` exposes Robinhood operations as MCP tools for LLM clients. See the [rhood-mcp README](crates/rhood-mcp/) for the full reference (auth modes, OAuth, CLI flags, env vars).
+`rhood-mcp` exposes Robinhood operations as MCP tools for LLM clients. It implements
+MCP **2026-07-28** (`rmcp 3.x`), and older clients still negotiate down: a 2025-11-25
+client keeps its session and resumability, while a 2026-07-28 client is served
+statelessly per SEP-2567. See the [rhood-mcp README](crates/rhood-mcp/) for the full
+reference (auth modes, OAuth, CLI flags, env vars).
 
 ### Setup
 
@@ -100,8 +104,8 @@ For the live tool list, call MCP `tools/list` against the running server. Order 
 ## Testing
 
 ```bash
-cargo test                    # All unit tests
-cargo test -p rhood-core      # Core library only
+cargo test
+cargo test -p rhood-core
 ```
 
 or:

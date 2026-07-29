@@ -45,7 +45,7 @@ const FUTURES_CONTRACT_HEADER_VALUE: &str = "true";
 /// then call [`login`](Self::login) before any endpoint method. `login`
 /// follows a cascade: cached token → live validation → refresh →
 /// headless OAuth. If the server requires a verification code,
-/// `login` returns [`RhoodError::ChallengeRequired`] — collect the code
+/// `login` returns [`RhoodError::ChallengeRequired`] so collect the code
 /// from the user and complete the flow with
 /// [`submit_challenge_response`](Self::submit_challenge_response).
 ///
@@ -141,7 +141,7 @@ impl RobinhoodClient {
     /// **SAFETY:** This method bypasses the entire OAuth flow and accepts
     /// arbitrary tokens. The `test-helpers` feature must never be enabled
     /// in production builds, published binaries, or `--all-features`
-    /// invocations of downstream consumers — doing so exposes a public
+    /// invocations of downstream consumers. Doing so exposes a public
     /// method that can overwrite the client's authentication state.
     ///
     /// Compiled in two cases: the crate's own unit tests (`cfg(test)`), and

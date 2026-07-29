@@ -1,4 +1,4 @@
-//! `rhood` — a terminal CLI for the Robinhood trading API.
+//! `rhood` - a terminal CLI for the Robinhood trading API.
 //!
 //! Wraps [`rhood_core`] with a [`clap`]-based command surface for stocks,
 //! options, futures, indices, orders, watchlists, and recurring

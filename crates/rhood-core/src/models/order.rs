@@ -104,7 +104,7 @@ impl fmt::Display for MarketHours {
 pub enum OrderAmount {
     /// Whole or fractional share quantity (e.g., 10.0 shares, 0.5 shares).
     Quantity(f64),
-    /// Dollar amount to invest — broker calculates share count (e.g., $50.00).
+    /// Dollar amount to invest - broker calculates share count (e.g., $50.00).
     DollarAmount(f64),
 }
 
@@ -191,7 +191,7 @@ pub struct OptionOrder {
 pub struct StockOrderRequest {
     /// Ticker symbol of the stock to trade.
     pub symbol: String,
-    /// Order amount — either a share quantity or a dollar amount.
+    /// Order amount - either a share quantity or a dollar amount.
     pub amount: OrderAmount,
     /// Side of the trade (buy or sell).
     pub side: Side,

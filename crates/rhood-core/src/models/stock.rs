@@ -444,12 +444,6 @@ pub struct IndexQuoteInner {
 }
 
 /// Real-time index quote.
-///
-/// Mirrors the fields the Robinhood `/marketdata/indexes/values/v1/{id}/`
-/// endpoint actually returns. The earlier struct declared session-extreme
-/// fields (`open_value`, `high_value`, `low_value`, `previous_close_value`)
-/// that do NOT exist upstream — they were a guess that produced silent-null
-/// responses because serde found zero matching fields.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexQuote {
     /// Index symbol (e.g., "SPX"). May be absent; backfilled from the

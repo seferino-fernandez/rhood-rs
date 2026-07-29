@@ -3,11 +3,11 @@
 //! Splitting the "where does an env var come from?" question behind a trait
 //! lets production code read from the process environment while tests pass
 //! an in-memory [`MapEnv`](crate::env::MapEnv). The config module never calls
-//! `std::env::var` directly — every env read goes through an
+//! `std::env::var` directly, every env read goes through an
 //! [`&impl Env`](crate::env::Env).
 //!
-//! Two small helpers — [`env_non_empty`](crate::env::env_non_empty) and
-//! [`env_non_empty_u64`](crate::env::env_non_empty_u64) — treat empty strings
+//! [`env_non_empty`](crate::env::env_non_empty) and
+//! [`env_non_empty_u64`](crate::env::env_non_empty_u64) treat empty strings
 //! as "unset" and parse `u64` values, matching how every `RHOOD_*` variable
 //! is interpreted across the workspace.
 

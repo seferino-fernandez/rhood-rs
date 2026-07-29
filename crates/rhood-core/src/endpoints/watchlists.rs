@@ -193,7 +193,7 @@ impl RobinhoodClient {
 /// Builds the midlands bulk-edit request body: an object keyed by the list ID
 /// whose value is an array of `{object_type, object_id, operation}` ops.
 ///
-/// This exact keyed shape is required — a top-level array or an
+/// This exact keyed shape is required because a top-level array or an
 /// `{list_id, items}` object are both rejected by the API.
 fn bulk_watchlist_payload(
     list_id: &str,

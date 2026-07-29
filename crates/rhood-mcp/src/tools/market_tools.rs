@@ -89,7 +89,7 @@ impl RhoodTools {
 
     #[tool(
         name = "get_daily_movers",
-        description = "Get the top 20 daily movers — a single combined list of the biggest gainers and losers today. There is no direction filter; the result mixes up and down movers.",
+        description = "Get the top 20 daily movers - a single combined list of the biggest gainers and losers today. There is no direction filter; the result mixes up and down movers.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn get_daily_movers(&self, peer: Peer<RoleServer>) -> Result<String, String> {

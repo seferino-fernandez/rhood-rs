@@ -99,7 +99,7 @@ impl TokenCache {
                 tracing::warn!(
                     path = %self.path.display(),
                     %err,
-                    "Token cache is corrupt or unreadable — treating as absent; \
+                    "Token cache is corrupt or unreadable so treating as absent; \
                      run `rhood login` to create a fresh session"
                 );
                 return Ok(None);

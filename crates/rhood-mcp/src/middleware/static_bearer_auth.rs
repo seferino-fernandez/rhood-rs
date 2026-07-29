@@ -30,7 +30,7 @@ pub async fn static_bearer_auth(
     if expected_bytes.len() != provided_bytes.len()
         || expected_bytes.ct_eq(provided_bytes).unwrap_u8() != 1
     {
-        tracing::warn!(%method, %uri, "static_bearer_auth: rejected — invalid token");
+        tracing::warn!(%method, %uri, "static_bearer_auth: rejected, invalid token");
         return Err(StatusCode::UNAUTHORIZED);
     }
 

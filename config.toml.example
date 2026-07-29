@@ -1,11 +1,11 @@
-# Rhood — Example Configuration
+# Rhood - Example Configuration
 #
 # Copy this file to one of:
 #   ~/.config/rhood/config.toml   (default location)
 #   any path via: rhood --config /path/to/config.toml
 #   any path via: RHOOD_CONFIG=/path/to/config.toml
 #
-# All values below show their defaults. Every field is optional —
+# All values below show their defaults. Every field is optional and
 # omitted fields fall back to these defaults.
 #
 # Environment variables override config.toml values.
@@ -28,7 +28,7 @@ client_id = "c82SH0WZOsabOXGP2sxqcj34FxkvfnWRZBKlBjFS"
 
 # Secret file alternatives (Docker _FILE convention).
 # Reads the file at load time, trims whitespace. Cannot be set
-# alongside the direct value — set one or the other.
+# alongside the direct value, only set one or the other.
 # Env: RHOOD_PASSWORD_FILE, RHOOD_MFA_FILE, RHOOD_DEVICE_TOKEN_FILE
 # password_file = "/run/secrets/rhood-password"
 # mfa_secret_file = "/run/secrets/rhood-mfa"
@@ -71,6 +71,14 @@ level = "info"
 # Env: RHOOD_MCP_HOST, RHOOD_MCP_PORT
 # host = "127.0.0.1"
 # port = 8080
+
+# Hostnames accepted in the inbound `Host` header (DNS-rebinding guard).
+# Defaults to loopback, so binding to a non-loopback address REQUIRES setting
+# this: requests carrying your public hostname are otherwise rejected with 403
+# before reaching a handler. Env: RHOOD_MCP_ALLOWED_HOSTS (comma-separated).
+# Entries may include a port, e.g. "example.com:8443".
+# An empty list disables the check and accepts any Host.
+# allowed_hosts = ["localhost", "127.0.0.1", "::1"]
 
 # External base URL for OAuth metadata discovery.
 # Falls back to http://{host}:{port} if unset. Set this to your

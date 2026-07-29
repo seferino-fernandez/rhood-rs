@@ -7,9 +7,9 @@ test, and submit changes.
 
 `rhood-rs` is a Cargo workspace with three crates:
 
-- [`rhood-core`](crates/rhood-core) — async client library for the Robinhood API
-- [`rhood-cli`](crates/rhood-cli) — terminal CLI built on `rhood-core`
-- [`rhood-mcp`](crates/rhood-mcp) — Model Context Protocol server exposing the API to LLM clients
+- [`rhood-core`](crates/rhood-core) - async client library for the Robinhood API
+- [`rhood-cli`](crates/rhood-cli) - terminal CLI built on `rhood-core`
+- [`rhood-mcp`](crates/rhood-mcp) - Model Context Protocol server exposing the API to LLM clients
 
 The minimum supported Rust version is **1.96** (edition 2024). Install Rust via
 [rustup](https://rustup.rs/).
@@ -43,7 +43,7 @@ The workspace enables a strict Clippy lint set in
 no swallowed errors, careful numeric casts, and more).
 
 Do not silence lints with bare `#[allow(...)]`. When a suppression is genuinely
-warranted, use `#[expect(lint_name, reason = "…")]` with a clear reason — this is
+warranted, use `#[expect(lint_name, reason = "…")]` with a clear reason. This is
 enforced by the `allow_attributes` and `allow_attributes_without_reason` lints.
 
 ## Pull requests
@@ -53,11 +53,11 @@ enforced by the `allow_attributes` and `allow_attributes_without_reason` lints.
   messages and PR titles (e.g. `feat:`, `fix:`, `docs:`, `refactor:`). Releases
   are automated with [release-plz](https://release-plz.dev/) and rely on this.
 - Ensure `fmt`, `clippy`, and the test suite all pass locally.
-- Never commit real credentials, tokens, MFA secrets, or account identifiers —
+- Never commit real credentials, tokens, MFA secrets, or account identifiers
   in code, fixtures, or examples. Use synthetic values (the existing tests use
   random UUIDs and the canonical TOTP test vector).
 
 ## Reporting security issues
 
-Please report vulnerabilities privately — see [SECURITY.md](SECURITY.md). Do not
+Please report vulnerabilities privately - see [SECURITY.md](SECURITY.md). Do not
 open a public issue for security problems.

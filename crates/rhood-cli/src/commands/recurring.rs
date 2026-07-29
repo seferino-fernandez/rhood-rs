@@ -62,7 +62,7 @@ pub enum RecurringCommand {
 
 /// Build table rows for a slice of [`RecurringInvestment`] values.
 ///
-/// Columns: ID, Symbol, Amount, Frequency, State, Start Date —
+/// Columns: ID, Symbol, Amount, Frequency, State, Start Date
 /// matching the headers used by every recurring subcommand that
 /// returns a schedule.
 fn recurring_rows(items: &[RecurringInvestment]) -> Vec<Vec<String>> {

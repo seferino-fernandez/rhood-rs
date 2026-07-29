@@ -1,7 +1,7 @@
 //! In-memory caches for identity/metadata lookups.
 //!
 //! See [`ResolverCache`] for the full policy. Financial data is **never**
-//! stored here — only immutable identifiers and metadata that the Robinhood
+//! stored here, only immutable identifiers and metadata that the Robinhood
 //! API returns repeatedly over the lifetime of a client.
 
 use std::sync::Arc;
@@ -31,8 +31,8 @@ use crate::models::stock::{IndexInstrument, Instrument};
 /// - `symbol → FuturesContract`
 /// - The singleton futures account id
 ///
-/// Financial data — quotes, prices, candles, positions, orders, fundamentals,
-/// news, ratings — is **never** stored here.
+/// Financial data such as quotes, prices, candles, positions, orders, fundamentals,
+/// news, ratings are **never** stored here.
 #[derive(Clone)]
 pub struct ResolverCache {
     pub(crate) enabled: bool,

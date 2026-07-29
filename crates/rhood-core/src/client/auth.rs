@@ -19,10 +19,10 @@ impl RobinhoodClient {
     /// Unified login that cascades through all available authentication strategies.
     ///
     /// The cascade order is:
-    /// 1. **Cache** — load token from disk
-    /// 2. **Validate** — confirm the cached token is accepted by the server
-    /// 3. **Refresh** — if validation fails, try refreshing the access token
-    /// 4. **Headless** — if refresh fails, perform a full OAuth password grant
+    /// 1. **Cache** - load token from disk
+    /// 2. **Validate** - confirm the cached token is accepted by the server
+    /// 3. **Refresh** - if validation fails, try refreshing the access token
+    /// 4. **Headless** - if refresh fails, perform a full OAuth password grant
     ///
     /// If the headless login encounters a challenge (SMS/email), the error
     /// [`RhoodError::ChallengeRequired`] is returned with the challenge details.
@@ -31,9 +31,9 @@ impl RobinhoodClient {
     ///
     /// # Arguments
     ///
-    /// * `username` — Robinhood account email/username
-    /// * `password` — Robinhood account password
-    /// * `mfa_secret` — Optional base32-encoded TOTP secret for automated MFA
+    /// * `username` - Robinhood account email/username
+    /// * `password` - Robinhood account password
+    /// * `mfa_secret` - Optional base32-encoded TOTP secret for automated MFA
     ///
     /// # Errors
     ///
@@ -135,7 +135,7 @@ impl RobinhoodClient {
             }
         }
 
-        // Token validation failed — try refresh before giving up
+        // Token validation failed so try to refresh before giving up
         if self.try_refresh_token().await? {
             tracing::debug!("Token refresh succeeded");
             return Ok(true);
@@ -152,7 +152,7 @@ impl RobinhoodClient {
     /// if the server returns 401 or 403 (token revoked or invalid), and
     /// `Err` on network/transport errors.
     ///
-    /// Uses `GET /positions/?nonzero=true` as the validation endpoint —
+    /// Uses `GET /positions/?nonzero=true` as the validation endpoint because
     /// it returns a small payload and is always available for authenticated users.
     pub async fn validate_token(&self) -> Result<bool> {
         let auth = match self.auth_state.read().await.authorization_header() {
@@ -175,7 +175,7 @@ impl RobinhoodClient {
     ///
     /// Returns `Ok(true)` if refresh succeeded and state is now Authenticated.
     /// Returns `Ok(false)` if refresh failed gracefully (no refresh token, server
-    /// rejection, or the refresh token itself has expired — indicated by the
+    /// rejection, or the refresh token itself has expired which is indicated by the
     /// server returning a `verification_workflow` in the response).
     async fn try_refresh_token(&self) -> Result<bool> {
         let refresh_token = match self.auth_state.read().await.refresh_token() {
@@ -208,7 +208,7 @@ impl RobinhoodClient {
         })?;
 
         // If the refresh response contains a verification_workflow, the refresh
-        // token itself has expired — a full re-authentication is required.
+        // token itself has expired and a full re-authentication is required.
         // Return false to let the cascade fall through to headless login.
         if data.verification_workflow.is_some() {
             tracing::debug!("Refresh token expired (verification_workflow in response)");
@@ -306,11 +306,11 @@ impl RobinhoodClient {
         // Device verification: run the pathfinder flow, then retry login
         if let Some(workflow) = &data.verification_workflow {
             let workflow_id = workflow.id.clone();
-            tracing::info!("Device verification required — approve on your Robinhood app");
+            tracing::info!("Device verification required, approve on your Robinhood app");
             self.handle_device_verification(&workflow_id).await?;
 
             // Retry the original login after device is verified
-            tracing::info!("Device verified — completing login");
+            tracing::info!("Device verified, now completing login");
             let res = self.http.post(&token_url).form(&payload).send().await?;
             let retry_status = res.status();
             let retry_body = res.text().await.unwrap_or_default();
@@ -377,7 +377,6 @@ impl RobinhoodClient {
             return Err(RhoodError::ChallengeRequired(challenge_type));
         }
 
-        // Success — extract tokens
         tracing::debug!("Extracting tokens from login response");
         self.extract_tokens(data).await
     }
@@ -442,7 +441,7 @@ impl RobinhoodClient {
         tracing::debug!(body = ?data, "Challenge response");
 
         if data.status.as_deref() == Some("validated") {
-            // Challenge validated — the caller should re-attempt login
+            // Challenge validated so the caller should re-attempt login
             *self.auth_state.write().await = AuthState::Unauthenticated;
             Ok(())
         } else {
@@ -461,7 +460,7 @@ impl RobinhoodClient {
     /// 3. On success, transitions to `Authenticated` and caches tokens
     ///
     /// The caller must provide the original login credentials because the
-    /// challenge response only validates the device — a fresh OAuth password
+    /// challenge response only validates the device. A fresh OAuth password
     /// grant is still required to obtain tokens.
     ///
     /// # Errors
@@ -494,7 +493,7 @@ impl RobinhoodClient {
             });
         }
 
-        // Step 2: Challenge validated — re-attempt login
+        // Step 2: Challenge validated so re-attempt login
         tracing::debug!("Challenge validated, re-attempting login");
         *self.auth_state.write().await = AuthState::Unauthenticated;
         self.login_headless(username, password, mfa_secret).await
