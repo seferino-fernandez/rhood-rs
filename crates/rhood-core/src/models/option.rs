@@ -13,9 +13,9 @@ use serde::{Deserialize, Serialize};
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum OptionType {
-    /// A call option — the right to buy at the strike price.
+    /// A call option - the right to buy at the strike price.
     Call,
-    /// A put option — the right to sell at the strike price.
+    /// A put option - the right to sell at the strike price.
     Put,
 }
 

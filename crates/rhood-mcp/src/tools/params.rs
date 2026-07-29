@@ -301,7 +301,7 @@ pub struct CreateRecurringInvestmentParams {
 
 /// States an MCP caller may set on `update_recurring_investment`.
 ///
-/// Deliberately excludes `RecurringState::Deleted` — cancellation goes through
+/// Deliberately excludes `RecurringState::Deleted` - cancellation goes through
 /// the dedicated `cancel_recurring_investment` tool, so `"deleted"` is not a
 /// valid input here and is rejected with a structured `-32602` error.
 #[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
@@ -393,7 +393,7 @@ pub struct TagsParams {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WatchlistNameParams {
-    /// Watchlist name or ID — call get_watchlists first to discover valid names/IDs.
+    /// Watchlist name or ID - call get_watchlists first to discover valid names/IDs.
     #[schemars(length(max = 100))]
     pub name: String,
 }
@@ -401,7 +401,7 @@ pub struct WatchlistNameParams {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WatchlistModifyParams {
-    /// Watchlist name or ID — call get_watchlists first to discover valid names/IDs.
+    /// Watchlist name or ID - call get_watchlists first to discover valid names/IDs.
     #[schemars(length(max = 100))]
     pub name: String,
     /// Stock symbols to add or remove

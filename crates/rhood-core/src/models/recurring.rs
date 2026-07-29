@@ -52,7 +52,7 @@ impl fmt::Display for RecurringSource {
 /// Lifecycle state of a recurring investment schedule.
 ///
 /// `Deleted` is an internal sentinel set by `cancel_recurring_investment`;
-/// it is hidden from the CLI (`#[clap(skip)]`) — callers cancel via the
+/// it is hidden from the CLI (`#[clap(skip)]`) - callers cancel via the
 /// dedicated `recurring cancel` subcommand rather than `--state deleted`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
@@ -164,7 +164,7 @@ pub struct UpdateRecurringRequest {
     pub amount: Option<f64>,
     /// New frequency (optional).
     pub frequency: Option<RecurringFrequency>,
-    /// New state (optional; `Deleted` is internal — use the cancel endpoint instead).
+    /// New state (optional; `Deleted` is internal - use the cancel endpoint instead).
     pub state: Option<RecurringState>,
     /// New start date (optional).
     pub start_date: Option<String>,

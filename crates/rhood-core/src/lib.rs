@@ -22,14 +22,14 @@
 //!
 //! # Modules
 //!
-//! - [`auth`] — Device token generation, token caching, and auth state machine
-//! - [`client`] — [`RobinhoodClient`] struct with authenticated HTTP helpers
-//! - [`config`] — [`RhoodConfig`] loaded from TOML files and environment variables
-//! - [`endpoints`] — API methods organized by domain (stocks, options, orders, account)
-//! - [`error`] — [`RhoodError`] enum with [`thiserror`] integration
-//! - [`models`] — Serde response types for API data
-//! - [`pagination`] — Generic paginated response wrappers
-//! - [`api`] — Robinhood API path constants
+//! - [`auth`] - Device token generation, token caching, and auth state machine
+//! - [`client`] - [`RobinhoodClient`] struct with authenticated HTTP helpers
+//! - [`config`] - [`RhoodConfig`] loaded from TOML files and environment variables
+//! - [`endpoints`] - API methods organized by domain (stocks, options, orders, account)
+//! - [`error`] - [`RhoodError`] enum with [`thiserror`] integration
+//! - [`models`] - Serde response types for API data
+//! - [`pagination`] - Generic paginated response wrappers
+//! - [`api`] - Robinhood API path constants
 
 #![warn(missing_docs)]
 #![forbid(unsafe_code)]

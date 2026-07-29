@@ -77,7 +77,7 @@ impl std::fmt::Display for ChallengeType {
 #[derive(Debug, Error)]
 pub enum RhoodError {
     /// The client is not authenticated and cannot make API calls.
-    #[error("Not authenticated — run `rhood login` first")]
+    #[error("Not authenticated, run `rhood login` first")]
     NotAuthenticated,
 
     /// The server issued an authentication challenge that must be answered.
@@ -98,7 +98,7 @@ pub enum RhoodError {
     },
 
     /// The API returned HTTP 429, indicating the client should back off.
-    #[error("Rate limited — retry after {retry_after_secs}s")]
+    #[error("Rate limited, retry after {retry_after_secs}s")]
     RateLimited {
         /// Suggested number of seconds to wait before retrying.
         retry_after_secs: u64,
@@ -113,7 +113,7 @@ pub enum RhoodError {
     InvalidParameter(String),
 
     /// A write operation was attempted while the client is in read-only mode.
-    #[error("Operation blocked — client is in read-only mode")]
+    #[error("Operation blocked, client is in read-only mode")]
     ReadOnlyMode,
 
     /// An order request contains invalid or contradictory parameters.
@@ -121,7 +121,7 @@ pub enum RhoodError {
     InvalidOrder(String),
 
     /// Device verification is required before the client can authenticate.
-    #[error("Device verification required — run `rhood login` interactively first")]
+    #[error("Device verification required, run `rhood login` interactively first")]
     DeviceVerificationRequired,
 
     /// An HTTP transport error from the underlying HTTP client.

@@ -110,7 +110,7 @@ impl RobinhoodClient {
 
             if start.elapsed() > timeout {
                 return Err(RhoodError::Timeout(
-                    "Device verification timed out — no approval received".into(),
+                    "Device verification timed out, no approval received".into(),
                 ));
             }
 

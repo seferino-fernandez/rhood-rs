@@ -64,11 +64,11 @@ These flags apply to every subcommand.
 --read-write                 Enable order placement and cancellation
 ```
 
-Logs are written to stderr. `--output json` and `--output csv` are therefore safe to pipe — stdout carries only structured data.
+Logs are written to stderr. `--output json` and `--output csv` are therefore safe to pipe, stdout carries only structured data.
 
 ## Read-Only Mode and Safety
 
-The CLI defaults to read-only mode (`read_only = true` in config). Mutating commands — order buy/sell, recurring create/update/cancel, and watchlist add/remove — are blocked unless `--read-write` is passed.
+The CLI defaults to read-only mode (`read_only = true` in config). Mutating commands order buy/sell, recurring create/update/cancel, and watchlist add/remove are blocked unless `--read-write` is passed.
 
 Order placement also prompts interactively before submitting. Pass `--yes` to skip the prompt when running non-interactively (e.g. in scripts).
 

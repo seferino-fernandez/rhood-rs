@@ -240,7 +240,7 @@ mod endpoint_tests {
             })))
             .mount(&server)
             .await;
-        // Symbol resolution fails — enrichment is best-effort and swallowed.
+        // Symbol resolution fails so enrichment is best-effort and swallowed.
         Mock::given(method("GET"))
             .and(path("/instruments/"))
             .respond_with(ResponseTemplate::new(500))
@@ -432,7 +432,7 @@ mod tests {
         assert_eq!(div.id.as_deref(), Some("div-002"));
         assert!(div.amount.is_none());
         assert!(div.paid_at.is_none());
-        // symbol is not in raw API response — must default to None
+        // symbol is not in raw API response so must default to None
         assert!(div.symbol.is_none());
     }
 

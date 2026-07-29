@@ -24,3 +24,7 @@ mod user_tools;
 mod watchlist_tools;
 
 pub use handler::{LazyAuthHook, RhoodTools};
+
+/// Tools gated off when the server runs in read-only mode.
+#[cfg(test)]
+pub(crate) use types::WRITE_TOOLS;

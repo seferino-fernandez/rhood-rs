@@ -1,4 +1,4 @@
-//! `rhood-mcp` — Model Context Protocol server exposing the Robinhood API
+//! `rhood-mcp` - Model Context Protocol server exposing the Robinhood API
 //! as tools an LLM client can call.
 //!
 //! Two transports are supported: `stdio` (recommended for local agent

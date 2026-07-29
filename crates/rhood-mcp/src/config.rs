@@ -25,9 +25,11 @@ const ENV_MCP_OAUTH_CSRF_NONCE_TTL_SECS: &str = "RHOOD_MCP_OAUTH_CSRF_NONCE_TTL_
 const ENV_MCP_OAUTH_SWEEP_INTERVAL_SECS: &str = "RHOOD_MCP_OAUTH_SWEEP_INTERVAL_SECS";
 const ENV_MCP_OAUTH_CORS_ORIGINS: &str = "RHOOD_MCP_OAUTH_CORS_ORIGINS";
 const ENV_MCP_MAX_RESPONSE_BYTES: &str = "RHOOD_MCP_MAX_RESPONSE_BYTES";
+const ENV_MCP_ALLOWED_HOSTS: &str = "RHOOD_MCP_ALLOWED_HOSTS";
 
 const DEFAULT_MCP_HOST: &str = "127.0.0.1";
 const DEFAULT_MCP_PORT: u16 = 8080;
+
 /// Default ceiling on the first-call lazy-auth wait (seconds). Generous enough
 /// for a mobile-approval device-verification round trip, but bounded so one
 /// stuck login cannot hold the auth gate and wedge every other first call.
@@ -37,8 +39,21 @@ const DEFAULT_OAUTH_TOKEN_EXPIRY_SECS: u64 = 3600;
 const DEFAULT_OAUTH_AUTH_CODE_TTL_SECS: u64 = 60;
 const DEFAULT_OAUTH_CSRF_NONCE_TTL_SECS: u64 = 600;
 const DEFAULT_OAUTH_SWEEP_INTERVAL_SECS: u64 = 300;
+
 /// Default ceiling on a single tool response payload, in bytes (256 KiB).
 const DEFAULT_MCP_MAX_RESPONSE_BYTES: usize = 256 * 1024;
+
+/// Default `Host` allow-list for the streamable HTTP transport: loopback only.
+///
+/// Not empty because rmcp treats an empty list as "accept any `Host`", which switches the DNS-rebinding guard off.
+const DEFAULT_ALLOWED_HOSTS: [&str; 3] = ["localhost", "127.0.0.1", "::1"];
+
+fn default_allowed_hosts() -> Vec<String> {
+    DEFAULT_ALLOWED_HOSTS
+        .iter()
+        .map(|host| (*host).to_string())
+        .collect()
+}
 
 /// CORS configuration for the MCP OAuth routes.
 #[derive(Debug, Clone, Deserialize)]
@@ -99,6 +114,13 @@ pub struct McpConfig {
     /// responses are replaced with a bounded JSON error. Very small values (a
     /// few KiB, or 0) make every response overflow into that bounded error.
     pub max_response_bytes: usize,
+    /// Hostnames accepted in the inbound `Host` header (DNS-rebinding guard).
+    ///
+    /// Defaults to loopback only, so binding the HTTP transport to a
+    /// non-loopback address requires listing the hostnames clients will use.
+    /// Otherwise every request is rejected with 403 before reaching a handler.
+    /// Entries may include a port, e.g. `"example.com:8443"`.
+    pub allowed_hosts: Vec<String>,
 }
 
 impl Default for McpConfig {
@@ -119,6 +141,7 @@ impl Default for McpConfig {
             oauth_sweep_interval_secs: DEFAULT_OAUTH_SWEEP_INTERVAL_SECS,
             oauth_cors: OAuthCorsConfig::default(),
             max_response_bytes: DEFAULT_MCP_MAX_RESPONSE_BYTES,
+            allowed_hosts: default_allowed_hosts(),
         }
     }
 }
@@ -139,6 +162,7 @@ impl std::fmt::Debug for McpConfig {
             .field("oauth_sweep_interval_secs", &self.oauth_sweep_interval_secs)
             .field("oauth_cors", &self.oauth_cors)
             .field("max_response_bytes", &self.max_response_bytes)
+            .field("allowed_hosts", &self.allowed_hosts)
             .finish()
     }
 }
@@ -146,7 +170,7 @@ impl std::fmt::Debug for McpConfig {
 /// Top-level MCP server configuration.
 ///
 /// Combines the core Robinhood API client config with MCP-specific settings.
-/// The `#[serde(flatten)]` attribute means the TOML format is flat — `[auth]`,
+/// The `#[serde(flatten)]` attribute means the TOML format is flat - `[auth]`,
 /// `[api]`, and `[mcp]` sections all live in the same file.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
@@ -274,6 +298,16 @@ impl ServerConfig {
         {
             self.mcp.max_response_bytes = val;
         }
+        if let Some(hosts_csv) = env_non_empty(env, ENV_MCP_ALLOWED_HOSTS) {
+            let hosts: Vec<String> = hosts_csv
+                .split(',')
+                .map(|host| host.trim().to_string())
+                .filter(|host| !host.is_empty())
+                .collect();
+            if !hosts.is_empty() {
+                self.mcp.allowed_hosts = hosts;
+            }
+        }
     }
 
     fn resolve_mcp_secrets(&mut self) -> anyhow::Result<()> {
@@ -305,6 +339,60 @@ mod tests {
         assert_eq!(config.mcp.auth_mode, "token");
         assert!(config.mcp.oauth_pin.is_none());
         assert_eq!(config.mcp.oauth_token_expiry_secs, 3600);
+    }
+
+    /// The default must be the explicit loopback trio, never an empty `Vec`.
+    /// rmcp treats an empty allow-list as "accept any `Host`", so a config that
+    /// defaulted to empty would silently disable DNS-rebinding protection for
+    /// every user who never touches the setting.
+    #[test]
+    fn allowed_hosts_defaults_to_loopback_and_is_never_empty() {
+        let config = ServerConfig::default();
+        assert_eq!(
+            config.mcp.allowed_hosts,
+            vec!["localhost", "127.0.0.1", "::1"]
+        );
+        assert!(
+            !config.mcp.allowed_hosts.is_empty(),
+            "an empty allow-list turns the DNS-rebinding guard off"
+        );
+    }
+
+    #[test]
+    fn allowed_hosts_env_override_applies() {
+        let env = rhood_core::env::MapEnv::new().with(
+            ENV_MCP_ALLOWED_HOSTS,
+            " mcp.example.com , example.com:8443 ",
+        );
+        let mut config = ServerConfig::default();
+        config.apply_mcp_env_overrides(&env);
+        assert_eq!(
+            config.mcp.allowed_hosts,
+            vec!["mcp.example.com", "example.com:8443"],
+            "entries must be trimmed and a port preserved"
+        );
+    }
+
+    /// Unlike `oauth_cors.origins`, which fails closed, this setting fails open:
+    /// an all-whitespace value parses to an empty list, and applying that would
+    /// accept any `Host`. Disabling the check must stay deliberate and TOML-only.
+    #[test]
+    fn empty_allowed_hosts_env_does_not_clear_the_default() {
+        let env = rhood_core::env::MapEnv::new().with(ENV_MCP_ALLOWED_HOSTS, " , , ");
+        let mut config = ServerConfig::default();
+        config.apply_mcp_env_overrides(&env);
+        assert_eq!(
+            config.mcp.allowed_hosts,
+            vec!["localhost", "127.0.0.1", "::1"],
+            "an all-separator env value must leave the loopback default in place"
+        );
+    }
+
+    /// The one supported way to switch the guard off.
+    #[test]
+    fn allowed_hosts_can_be_emptied_from_toml() {
+        let config: ServerConfig = toml::from_str("[mcp]\nallowed_hosts = []\n").unwrap();
+        assert!(config.mcp.allowed_hosts.is_empty());
     }
 
     #[test]

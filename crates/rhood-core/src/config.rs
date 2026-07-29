@@ -154,7 +154,7 @@ pub struct DeviceVerificationConfig {
 /// Bounded timeouts for every outbound HTTP call.
 ///
 /// `request_timeout_secs` is the total-call ceiling (headers + body). A slow
-/// or hung upstream is aborted with a timeout error — preventing a single
+/// or hung upstream is aborted with a timeout error which prevents a single
 /// stuck call from starving concurrent tool invocations. `connect_timeout_secs`
 /// is the TCP-connect ceiling; it triggers before the request timeout when
 /// the host is unreachable.
@@ -345,7 +345,7 @@ fn expand_tilde(path: &str) -> String {
     if path == "~" {
         home
     } else {
-        // path starts with "~/" or "~something" — only expand "~/"
+        // path starts with "~/" or "~something", we are only expanding "~/"
         if let Some(rest) = path.strip_prefix("~/") {
             format!("{home}/{rest}")
         } else {

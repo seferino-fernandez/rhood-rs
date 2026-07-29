@@ -13,7 +13,7 @@ use super::types::{PendingOrder, PendingOrderKind, format_tool_error};
 const MAX_SYMBOL_LENGTH: usize = 6;
 
 /// Validates that a symbol string looks like a valid stock ticker.
-/// Does not verify the symbol exists — that happens at confirmation.
+/// Does not verify the symbol exists, that happens at confirmation.
 fn validate_symbol_format(symbol: &str) -> Result<(), String> {
     if symbol.is_empty() {
         return Err("Symbol cannot be empty".into());

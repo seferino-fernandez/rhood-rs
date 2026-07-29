@@ -42,7 +42,7 @@ pub fn format_tool_error(err: &rhood_core::RhoodError) -> String {
         }
         rhood_core::RhoodError::RateLimited { retry_after_secs } => (
             "rate_limited",
-            format!("Rate limited — retry after {retry_after_secs}s"),
+            format!("Rate limited - retry after {retry_after_secs}s"),
         ),
         rhood_core::RhoodError::ReadOnlyMode => ("read_only", err.to_string()),
         rhood_core::RhoodError::InvalidParameter(msg) => ("invalid_parameter", msg.clone()),

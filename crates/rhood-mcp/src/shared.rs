@@ -1,13 +1,10 @@
 use clap::Parser;
 use rhood_core::RobinhoodClient;
-use rmcp::model::{LoggingLevel, LoggingMessageNotificationParam};
-use rmcp::{Peer, RoleServer};
 use secrecy::{ExposeSecret, SecretString};
 
 use crate::config::ServerConfig;
 
-/// Runs the Robinhood login flow on demand, sending MCP logging notifications
-/// to the connected peer as authentication progresses.
+/// Runs the Robinhood login flow on demand, tracing progress as it goes.
 ///
 /// When `config.core.auth.username` is set, delegates to
 /// [`RobinhoodClient::login`], whose internal cascade tries the on-disk token
@@ -20,27 +17,29 @@ use crate::config::ServerConfig;
 /// a clear error instructing the caller what to set.
 ///
 /// Used by the stdio transport's lazy-auth hook on the first tool call.
+///
+/// Progress used to be reported in-band via `notifications/message`, but
+/// SEP-2577 deprecated MCP logging, so it now goes to `tracing` (stderr) which
+/// a launcher such as Claude Desktop does not surface. Every failure path below
+/// therefore has to be self-explanatory on its own, because the returned error
+/// is the only text the user will actually see.
 pub(crate) async fn authenticate_on_demand(
     client: &RobinhoodClient,
     config: &ServerConfig,
-    peer: &Peer<RoleServer>,
 ) -> Result<(), String> {
-    let _ = peer
-        .notify_logging_message(LoggingMessageNotificationParam::new(
-            LoggingLevel::Info,
-            serde_json::json!("Authenticating with Robinhood..."),
-        ))
-        .await;
+    tracing::info!("Authenticating with Robinhood...");
 
     let Some(username) = config.core.auth.username.as_ref() else {
-        return authenticate_from_cache_only(client, peer).await;
+        return authenticate_from_cache_only(client).await;
     };
-    let password_secret =
-        config.core.auth.password.as_ref().ok_or_else(|| {
-            "Set RHOOD_PASSWORD env var or add password to config.toml".to_string()
-        })?;
+    let password_secret = config.core.auth.password.as_ref().ok_or_else(|| {
+        "RHOOD_USERNAME is set but no password is configured. Set RHOOD_PASSWORD, \
+         add `password` to config.toml, or unset RHOOD_USERNAME and run `rhood login` \
+         to authenticate from the cached token instead."
+            .to_string()
+    })?;
     // Materialize the MFA secret as an owned String before any .await so we
-    // don't hold a borrow of `config` across await points — which would become
+    // don't hold a borrow of `config` across await points which would become
     // a compile error if `config` is ever moved behind a lock.
     let mfa: Option<String> = config
         .core
@@ -49,55 +48,44 @@ pub(crate) async fn authenticate_on_demand(
         .as_ref()
         .map(|secret| secret.expose_secret().to_owned());
 
-    let _ = peer
-        .notify_logging_message(LoggingMessageNotificationParam::new(
-            LoggingLevel::Info,
-            serde_json::json!(
-                "Logging in \u{2014} device verification may be required. \
-                 Please check your Robinhood app if prompted."
-            ),
-        ))
-        .await;
+    tracing::info!(
+        "Logging in \u{2014} device verification may be required; check the Robinhood app if prompted"
+    );
 
     client
         .login(username, password_secret.expose_secret(), mfa.as_deref())
         .await
-        .map_err(|err| format!("Robinhood login failed: {err}"))?;
+        .map_err(|err| {
+            format!(
+                "Robinhood login failed: {err}. If a device-approval prompt appeared in the \
+                 Robinhood app, approve it and retry this tool call."
+            )
+        })?;
 
-    let _ = peer
-        .notify_logging_message(LoggingMessageNotificationParam::new(
-            LoggingLevel::Info,
-            serde_json::json!("Robinhood login successful"),
-        ))
-        .await;
+    tracing::info!("Robinhood login successful");
 
     Ok(())
 }
 
 /// Attempts to authenticate using only the on-disk token cache.
 ///
-/// Used when no username is configured — the caller has no way to perform a
+/// Used when no username is configured, the caller has no way to perform a
 /// fresh password grant, so a cached token is the only path.
-async fn authenticate_from_cache_only(
-    client: &RobinhoodClient,
-    peer: &Peer<RoleServer>,
-) -> Result<(), String> {
+async fn authenticate_from_cache_only(client: &RobinhoodClient) -> Result<(), String> {
     match client.login_from_cache().await {
         Ok(true) => {
-            let _ = peer
-                .notify_logging_message(LoggingMessageNotificationParam::new(
-                    LoggingLevel::Info,
-                    serde_json::json!("Restored Robinhood session from cached token"),
-                ))
-                .await;
+            tracing::info!("Restored Robinhood session from cached token");
             Ok(())
         }
         Ok(false) => Err(
-            "Not logged in. Run `rhood login` to create a cached token, \
-             or set RHOOD_USERNAME and RHOOD_PASSWORD in the server env."
+            "Not logged in, and no cached token was found. Run `rhood login` in a terminal \
+             to create one, or set RHOOD_USERNAME and RHOOD_PASSWORD in the server env."
                 .to_string(),
         ),
-        Err(err) => Err(format!("Cached-token login failed: {err}")),
+        Err(err) => Err(format!(
+            "Cached-token login failed: {err}. Run `rhood login` in a terminal to refresh \
+             the cached token, then retry."
+        )),
     }
 }
 

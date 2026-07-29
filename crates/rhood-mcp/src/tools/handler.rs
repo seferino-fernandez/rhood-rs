@@ -1,5 +1,4 @@
 use rhood_core::RobinhoodClient;
-use rmcp::model::LoggingLevel;
 use rmcp::{Peer, RoleServer, handler::server::tool::ToolRouter};
 
 use crate::config::McpConfig;
@@ -22,7 +21,7 @@ type LazyAuthFuture = Pin<Box<dyn Future<Output = Result<(), String>> + Send>>;
 /// Hook invoked on the first tool call when the client is not yet
 /// authenticated.
 ///
-/// Receives a clone of the shared [`RobinhoodClient`] (cheap — internally an
+/// Receives a clone of the shared [`RobinhoodClient`] (internally an
 /// `Arc<RwLock<AuthState>>`) and the MCP peer so the hook can drive the login
 /// flow while sending progress notifications back to the client.
 ///
@@ -37,7 +36,7 @@ pub type LazyAuthHook =
 /// Wraps a shared [`RobinhoodClient`] and holds staged pending-order state.
 /// Supports read-only mode that hides write tools.
 ///
-/// The client is a plain value — it derives `Clone` internally over
+/// The client is a plain value that derives `Clone` internally over
 /// `Arc`-wrapped state, so cloning `RhoodTools` across concurrent tool
 /// invocations is cheap and does not serialize tool calls.
 #[derive(Clone)]
@@ -48,7 +47,7 @@ pub struct RhoodTools {
     ///
     /// Without this, two tool calls arriving before the first login resolves
     /// can both see `is_authenticated() == false` and each trigger a full
-    /// OAuth grant — duplicate device-verification challenges on the second
+    /// OAuth grant - duplicate device-verification challenges on the second
     /// caller. The guard is acquired only when the client is unauthenticated;
     /// already-authenticated fast-path skips it entirely. On login failure the
     /// guard releases so the next caller can retry.
@@ -59,7 +58,6 @@ pub struct RhoodTools {
     /// Ceiling on the first-call lazy-auth wait, so a stuck login can't hold
     /// `lazy_auth_gate` and wedge every other first call.
     auth_timeout: Duration,
-    pub(super) min_log_level: Arc<tokio::sync::RwLock<LoggingLevel>>,
     /// Ceiling on a single tool response payload, in bytes. Oversized responses
     /// are replaced with a bounded JSON error in `call_tool`.
     pub(super) max_response_bytes: usize,
@@ -86,7 +84,6 @@ impl RhoodTools {
             pending_orders,
             read_only,
             auth_timeout: Duration::from_secs(mcp_config.lazy_auth_timeout_secs),
-            min_log_level: Arc::new(tokio::sync::RwLock::new(LoggingLevel::Info)),
             max_response_bytes: mcp_config.max_response_bytes,
         }
     }
@@ -112,7 +109,6 @@ impl RhoodTools {
             pending_orders: Arc::new(Mutex::new(HashMap::new())),
             read_only,
             auth_timeout: Duration::from_secs(mcp_config.lazy_auth_timeout_secs),
-            min_log_level: Arc::new(tokio::sync::RwLock::new(LoggingLevel::Info)),
             max_response_bytes: mcp_config.max_response_bytes,
         }
     }

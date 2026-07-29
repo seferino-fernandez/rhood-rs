@@ -10,7 +10,7 @@ use super::types::format_tool_error;
 
 /// Object projection for `get_latest_prices` so each entry is
 /// `{"symbol": "...", "price": "..."}` instead of a positional `[sym, price]`
-/// tuple — matching the shape every other tool returns.
+/// tuple.
 #[derive(serde::Serialize)]
 struct LatestPrice {
     symbol: String,

@@ -395,7 +395,7 @@ mod tests {
 
     #[test]
     fn market_cap_millions() {
-        // 750_000_000 = 7.5e8 — below 1e9, formats as millions
+        // 750_000_000 = 7.5e8 (below 1e9) formats as millions
         assert_eq!(human_market_cap("750000000"), "750.00M");
         assert_eq!(human_market_cap("5000000"), "5.00M");
     }
@@ -459,13 +459,13 @@ mod tests {
 
     #[test]
     fn split_ratio_three_for_two() {
-        // 3:2 split — divisor is not 1
+        // 3:2 split, divisor is not 1
         assert_eq!(split_ratio("3.00000000", "2.00000000"), "3:2");
     }
 
     #[test]
     fn split_ratio_non_integer_multiplier() {
-        // 1.5 : 1 — trailing zeros trimmed but decimal preserved
+        // 1.5 : 1, trailing zeros trimmed but decimal preserved
         assert_eq!(split_ratio("1.50000000", "1.00000000"), "1.5:1");
     }
 

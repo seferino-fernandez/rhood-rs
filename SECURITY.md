@@ -16,7 +16,7 @@ will keep you informed as a fix is developed and released.
 
 `rhood-rs` handles Robinhood account credentials, MFA secrets, and OAuth
 tokens. These are read from your local configuration and token cache and are
-only ever sent to Robinhood's API — never to any third party or to the
+only ever sent to Robinhood's API, never to any third party or to the
 maintainers.
 
 When filing **any** issue (security or otherwise), never paste real

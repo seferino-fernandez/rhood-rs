@@ -2,7 +2,10 @@
 
 MCP server exposing Robinhood brokerage operations as tools for LLM clients.
 
-Built on [rmcp](https://github.com/modelcontextprotocol/rust-sdk) and [rhood-core](../rhood-core/).
+Built on [rmcp](https://github.com/modelcontextprotocol/rust-sdk) 3.x and [rhood-core](../rhood-core/).
+
+Implements the MCP [2026-07-28](https://modelcontextprotocol.io/specification/2026-07-28)
+specification, and negotiates down to every earlier version `rmcp` supports.
 
 ## Install
 
@@ -28,7 +31,35 @@ cargo binstall rhood-mcp
 ## Transports
 
 - `stdio` for Claude Desktop, Claude Code, and other local MCP clients
-- `http` (streamable HTTP with session management) for remote deployments
+- `http` (streamable HTTP) for remote deployments
+
+### Sessions and the 2026-07-28 boundary
+
+SEP-2567 removed sessions from the 2026-07-28 protocol, so the transport runs in
+dual mode:
+
+| Negotiated version     | Behavior                                                                                                                                                  |
+| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `2026-07-28`           | Stateless. No `Mcp-Session-Id`, no GET/DELETE, no resumption. Results carry `resultType`, and `tools/list` carries SEP-2549 `ttlMs` / `cacheScope` hints. |
+| `2025-11-25` and older | Session-based, with SSE priming and resumability. Legacy wire shape preserved, no `resultType`.                                                           |
+
+Controlled by `legacy_session_mode` in `http.rs`; it only affects pre-2026-07-28
+clients, since modern requests are always stateless.
+
+### Host validation
+
+The streamable HTTP transport rejects requests whose `Host` header is not in
+`[mcp] allowed_hosts` (a DNS-rebinding guard), which defaults to loopback only.
+**Deploying to a non-loopback address requires setting it**, via TOML or
+`RHOOD_MCP_ALLOWED_HOSTS` (comma-separated); otherwise every request is rejected
+with 403 before reaching a handler. An empty list disables the check entirely.
+
+### Logging
+
+MCP logging (`notifications/message`, `logging/setLevel`) was deprecated by
+SEP-2577 and is no longer implemented: the `logging` capability is not
+advertised, and `logging/setLevel` returns method-not-found. Server diagnostics
+go to stderr via `tracing`, controlled by `RUST_LOG` and the `-v`/`-q` flags.
 
 ## Authentication Modes
 
@@ -174,26 +205,26 @@ rhood-mcp --transport http --port 8080
 
 ## Tools
 
-Tools are grouped by domain. The complete authoritative list is what `tools/list` returns at runtime — what follows is an overview of the surface.
+Tools are grouped by domain. The complete authoritative list is what `tools/list` returns at runtime and what follows is an overview of the surface.
 
-- **Stocks** — quotes, history, fundamentals, plus stock-order history (open and full).
-- **Options** — chain metadata, contract quotes (bid/ask, Greeks, volume), positions, and order history.
-- **Futures** — contract lookup, real-time quotes, order history, and futures-account discovery.
-- **Indices** — index quotes (SPX, NDX, VIX, RUT, XSP), index option chains, and contract search.
-- **Account** — positions (current and including closed), portfolio summary, account profile and unified summary, account documents (statements, tax forms).
-- **Income** — dividend history (and total), interest/sweep payments, and unified transfers (ACH, wire, debit card).
-- **Research** — earnings, ratings, news, splits, and category tags.
-- **Recurring investments** — list, create, update, cancel, and next-investment-date lookup.
-- **Watchlists** — list, view items, add/remove symbols.
-- **User** — authenticated user profile and day-trade / pattern-day-trader status.
-- **Market** — exchange listings, trading hours (any date or today), and daily movers.
-- **Orders** — staging (`place_stock_order`, `place_option_order`), execution (`confirm_order`), and cancellation (`cancel_order`, `cancel_option_order`).
+- **Stocks** - quotes, history, fundamentals, plus stock-order history (open and full).
+- **Options** - chain metadata, contract quotes (bid/ask, Greeks, volume), positions, and order history.
+- **Futures** - contract lookup, real-time quotes, order history, and futures-account discovery.
+- **Indices** - index quotes (SPX, NDX, VIX, RUT, XSP), index option chains, and contract search.
+- **Account** - positions (current and including closed), portfolio summary, account profile and unified summary, account documents (statements, tax forms).
+- **Income** - dividend history (and total), interest/sweep payments, and unified transfers (ACH, wire, debit card).
+- **Research** - earnings, ratings, news, splits, and category tags.
+- **Recurring investments** - list, create, update, cancel, and next-investment-date lookup.
+- **Watchlists** - list, view items, add/remove symbols.
+- **User** - authenticated user profile and day-trade / pattern-day-trader status.
+- **Market** - exchange listings, trading hours (any date or today), and daily movers.
+- **Orders** - staging (`place_stock_order`, `place_option_order`), execution (`confirm_order`), and cancellation (`cancel_order`, `cancel_option_order`).
 
 For the live list, call MCP `tools/list` against the running server.
 
 ### Read-only vs. write
 
-Order placement, confirmation, and cancellation are write operations. The server starts in read-only mode by default — write tools are hidden from `tools/list` and rejected on call. Pass `--read-write` or set `read_only = false` in config to enable them.
+Order placement, confirmation, and cancellation are write operations. The server starts in read-only mode by default and write tools are hidden from `tools/list` and rejected on call. Pass `--read-write` or set `read_only = false` in config to enable them.
 
 Order placement uses two-step confirmation: `place_*` stages the order and returns a `pending_order_id`; `confirm_order` then submits it.
 
@@ -234,6 +265,7 @@ See [config.toml.example](../../config.toml.example) for all available fields.
 | `RHOOD_MCP_BASE_URL`                | External base URL for OAuth          |
 | `RHOOD_MCP_OAUTH_PIN`               | OAuth consent screen PIN             |
 | `RHOOD_MCP_OAUTH_TOKEN_EXPIRY_SECS` | OAuth token lifetime (default: 3600) |
+| `RHOOD_MCP_ALLOWED_HOSTS`           | Accepted `Host` headers (CSV)        |
 | `RHOOD_READ_ONLY`                   | Disable write operations             |
 
 ## Read-Only Mode

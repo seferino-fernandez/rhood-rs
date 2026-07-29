@@ -1,7 +1,7 @@
 //! Schema post-processing: close every object schema so MCP tool inputs reject
 //! unexpected properties, and a response-size guard helper.
 
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::{CallToolResult, ContentBlock};
 use serde_json::{Map, Value};
 
 /// Recursively sets `additionalProperties: false` on every object schema node
@@ -60,9 +60,9 @@ pub fn enforce_response_budget(result: CallToolResult, max_bytes: usize) -> Call
     if size <= max_bytes {
         return result;
     }
-    // Preserve the original error flag: in rmcp 1.7 a tool `Err(String)` arrives
-    // here as `Ok(CallToolResult { is_error: Some(true), .. })`, so relabeling it
-    // as a success would silently hide the failure.
+    // Preserve the original error flag: a tool `Err(String)` arrives here as
+    // `Ok(CallToolResult { is_error: Some(true), .. })`, so relabeling it as a
+    // success would silently hide the failure.
     let was_error = result.is_error;
     let body = serde_json::json!({
         "error": "response_too_large",
@@ -70,7 +70,7 @@ pub fn enforce_response_budget(result: CallToolResult, max_bytes: usize) -> Call
         "limit": max_bytes,
         "hint": "narrow the query (smaller span/interval, fewer symbols)"
     });
-    let mut replacement = CallToolResult::success(vec![Content::text(body.to_string())]);
+    let mut replacement = CallToolResult::success(vec![ContentBlock::text(body.to_string())]);
     replacement.is_error = was_error;
     replacement
 }
@@ -161,24 +161,121 @@ mod tests {
 mod router_tests {
     use super::close_object_schemas;
     use crate::config::McpConfig;
+    use crate::tools::WRITE_TOOLS;
     use crate::tools::handler::RhoodTools;
     use rhood_core::{RhoodConfig, RobinhoodClient};
     use serde_json::Value;
     use std::sync::Arc;
 
-    #[test]
-    fn every_listed_tool_schema_is_closed() {
-        // `with_config(RhoodConfig::default())` is a pure, no-network constructor:
-        // it builds the HTTP client but performs no I/O or authentication. Using
-        // the default config (rather than `RobinhoodClient::new()`, which loads
-        // env/TOML via `RhoodConfig::load`) keeps the test deterministic.
+    /// Builds a `RhoodTools` with no network access.
+    ///
+    /// `with_config(RhoodConfig::default())` is a pure constructor: it builds the
+    /// HTTP client but performs no I/O or authentication. Using the default
+    /// config (rather than `RobinhoodClient::new()`, which loads env/TOML via
+    /// `RhoodConfig::load`) keeps these tests deterministic.
+    fn tools_with(read_only: bool) -> RhoodTools {
         let client = RobinhoodClient::with_config(RhoodConfig::default())
             .expect("default config builds a client");
         let hook = Arc::new(|_c: RobinhoodClient, _p: rmcp::Peer<rmcp::RoleServer>| {
             Box::pin(async { Ok(()) })
                 as std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>>
         });
-        let tools = RhoodTools::new_lazy(client, hook, false, &McpConfig::default());
+        RhoodTools::new_lazy(client, hook, read_only, &McpConfig::default())
+    }
+
+    /// Pins the advertised protocol version so a future rmcp bump that moves
+    /// `ProtocolVersion::LATEST` becomes a reviewed diff rather than a silent
+    /// change to what this server tells clients.
+    #[test]
+    fn advertises_current_protocol_version() {
+        use rmcp::ServerHandler;
+        use rmcp::model::ProtocolVersion;
+
+        assert_eq!(
+            tools_with(false).get_info().protocol_version,
+            ProtocolVersion::V_2026_07_28
+        );
+    }
+
+    /// The server must identify itself, not the SDK. `Implementation::default()`
+    /// and `from_build_env()` both expand `env!` inside rmcp, so they report
+    /// `"rmcp"` at rmcp's version.
+    #[test]
+    fn identifies_itself_rather_than_the_sdk() {
+        use rmcp::ServerHandler;
+
+        let server_info = tools_with(false).get_info().server_info;
+        assert_eq!(server_info.name, env!("CARGO_PKG_NAME"));
+        assert_eq!(server_info.version, env!("CARGO_PKG_VERSION"));
+        assert_ne!(
+            server_info.name, "rmcp",
+            "server_info must not report the SDK's identity"
+        );
+    }
+
+    /// SEP-2577 deprecated MCP logging and rhood no longer implements it, so the
+    /// capability must not be advertised. A client that saw it would be told to
+    /// expect a `logging/setLevel` that rmcp now answers with method-not-found.
+    #[test]
+    fn does_not_advertise_deprecated_logging_capability() {
+        use rmcp::ServerHandler;
+
+        let capabilities = tools_with(false).get_info().capabilities;
+        assert!(capabilities.tools.is_some(), "tools must be advertised");
+        assert!(
+            capabilities.logging.is_none(),
+            "logging capability must not be set"
+        );
+    }
+
+    /// The third read-only enforcement point. `list_tools` filtering and the
+    /// `call_tool` rejection are covered end-to-end in `http::wire_tests`; this
+    /// covers the lookup rmcp uses to resolve `Mcp-Param-*` headers, which would
+    /// otherwise be a way to observe a hidden tool's schema.
+    #[test]
+    fn read_only_get_tool_hides_write_tools() {
+        use rmcp::ServerHandler;
+
+        let read_only = tools_with(true);
+        let read_write = tools_with(false);
+        for write_tool in WRITE_TOOLS {
+            assert!(
+                read_only.get_tool(write_tool).is_none(),
+                "read-only mode must not resolve `{write_tool}`"
+            );
+            assert!(
+                read_write.get_tool(write_tool).is_some(),
+                "read-write mode must resolve `{write_tool}`"
+            );
+        }
+    }
+
+    /// `get_tool` and `list_tools` must return the same document because they share
+    /// `close_tool_schemas` precisely so the schema a client is shown is the one
+    /// rmcp validates promoted headers against.
+    #[test]
+    fn get_tool_returns_a_closed_schema() {
+        use rmcp::ServerHandler;
+
+        let tools = tools_with(false);
+        let name = tools
+            .tool_router
+            .list_all()
+            .first()
+            .map(|tool| tool.name.to_string())
+            .expect("the router advertises at least one tool");
+        let tool = tools.get_tool(&name).expect("router tool resolves");
+        let schema = Value::Object((*tool.input_schema).clone());
+        assert_eq!(
+            schema["additionalProperties"],
+            Value::Bool(false),
+            "get_tool must return the same closed schema list_tools advertises"
+        );
+    }
+
+    #[test]
+    fn every_listed_tool_schema_is_closed() {
+        let tools = tools_with(false);
         for tool in tools.tool_router.list_all() {
             let mut v = Value::Object((*tool.input_schema).clone());
             close_object_schemas(&mut v); // idempotent; asserts no panic
@@ -207,11 +304,12 @@ mod router_tests {
 #[cfg(test)]
 mod budget_tests {
     use super::enforce_response_budget;
-    use rmcp::model::{CallToolResult, Content};
+    use rmcp::model::{CallToolResult, ContentBlock};
 
     #[test]
     fn passes_small_results_through() {
-        let original = CallToolResult::success(vec![Content::text("{\"ok\":true}".to_string())]);
+        let original =
+            CallToolResult::success(vec![ContentBlock::text("{\"ok\":true}".to_string())]);
         let guarded = enforce_response_budget(original, 1024);
         let text = serde_json::to_string(&guarded.content).unwrap();
         assert!(text.contains("ok"));
@@ -220,7 +318,7 @@ mod budget_tests {
     #[test]
     fn replaces_oversized_results() {
         let big = "x".repeat(2048);
-        let original = CallToolResult::success(vec![Content::text(big)]);
+        let original = CallToolResult::success(vec![ContentBlock::text(big)]);
         let guarded = enforce_response_budget(original, 256);
         let text = serde_json::to_string(&guarded.content).unwrap();
         assert!(text.contains("response_too_large"), "got: {text}");
@@ -233,7 +331,7 @@ mod budget_tests {
 
     #[test]
     fn preserves_error_flag_on_replacement() {
-        let mut original = CallToolResult::success(vec![Content::text("x".repeat(2048))]);
+        let mut original = CallToolResult::success(vec![ContentBlock::text("x".repeat(2048))]);
         original.is_error = Some(true);
         let guarded = enforce_response_budget(original, 256);
         assert_eq!(
