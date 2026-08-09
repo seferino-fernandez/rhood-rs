@@ -1,6 +1,13 @@
 default:
     @just --list
 
+# The gate: mirrors CI's pull-request-validation, mutates nothing, red on any failure
+verify:
+    cargo fmt --all --check
+    cargo check --locked --workspace --all-targets --all-features
+    cargo clippy --all-targets --all-features -- -D warnings
+    cargo nextest run --all-targets --all-features
+
 # Run all tests: full feature matrix, default features, and doctests
 test:
 	cargo nextest run --all-targets --all-features
@@ -11,9 +18,9 @@ test:
 integration:
 	cargo test --test integration -p rhood-cli -- --ignored --nocapture
 
-# Lint the code with Clippy
+# Lint the code with Clippy, at the same severity CI enforces
 lint:
-    cargo clippy
+    cargo clippy --all-targets --all-features -- -D warnings
 
 # Format code with rustfmt and apply Clippy's auto-fixable suggestions
 format:
