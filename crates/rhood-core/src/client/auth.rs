@@ -13,7 +13,7 @@ use crate::models::auth::{
 use crate::{ChallengeType, Result, RhoodError};
 use chrono::Utc;
 use secrecy::{ExposeSecret, SecretString};
-use std::time::SystemTimeError;
+use std::time::{SystemTime, SystemTimeError, UNIX_EPOCH};
 
 impl RobinhoodClient {
     /// Unified login that cascades through all available authentication strategies.
@@ -234,22 +234,26 @@ impl RobinhoodClient {
         }
 
         let mfa_code = if let Some(secret) = mfa_secret {
-            let totp = totp_rs::TOTP::new(
-                totp_rs::Algorithm::SHA1,
-                6,
-                1,
-                30,
-                totp_rs::Secret::Encoded(secret.to_string())
-                    .to_bytes()
-                    .map_err(|err| {
-                        RhoodError::InvalidParameter(format!("Invalid MFA secret: {err}"))
-                    })?,
-            )
-            .map_err(|err| RhoodError::InvalidParameter(format!("TOTP error: {err}")))?;
-            let code = totp.generate_current().map_err(|err: SystemTimeError| {
-                RhoodError::InvalidParameter(format!("TOTP generation failed: {err}"))
-            })?;
-            Some(code)
+            let totp = totp_rs::Builder::new()
+                .with_algorithm(totp_rs::Algorithm::SHA1)
+                .with_digits(6)
+                .with_skew(1)
+                .with_step_duration(30)
+                .with_secret(totp_rs::Secret::try_from_base32(secret).map_err(|err| {
+                    RhoodError::InvalidParameter(format!("Invalid MFA secret: {err}"))
+                })?)
+                .build()
+                .map_err(|err| RhoodError::InvalidParameter(format!("TOTP error: {err}")))?;
+            // `Totp::generate_current` panics if the clock is before the Unix epoch;
+            // reading the clock here keeps that a recoverable error, as it was before
+            // totp-rs 6 moved the fallibility out of the return type.
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|err: SystemTimeError| {
+                    RhoodError::InvalidParameter(format!("TOTP generation failed: {err}"))
+                })?
+                .as_secs();
+            Some(totp.generate(now).to_string())
         } else {
             None
         };
