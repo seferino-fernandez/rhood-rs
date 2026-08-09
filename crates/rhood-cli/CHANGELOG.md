@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4](https://github.com/seferino-fernandez/rhood-rs/compare/v0.1.3...v0.1.4) - 2026-08-09
+
+### Other
+
+- *(deps)* Update rmcp to v3.1.2
+
 ## [0.1.3](https://github.com/seferino-fernandez/rhood-rs/compare/v0.1.2...v0.1.3) - 2026-07-29
 
 ### Added
