@@ -33,7 +33,7 @@ impl ServerHandler for RhoodTools {
     fn get_info(&self) -> ServerInfo {
         let mut info = ServerInfo::default();
         // Pinned deliberately rather than using `ProtocolVersion::LATEST`, which
-        // still resolves to 2025-11-25 in rmcp 3.0 and will move in a later
+        // still resolves to 2025-11-25 in rmcp 3.1 and will move in a later
         // release. Naming the version keeps a future SDK bump from silently
         // changing what this server advertises; `advertises_current_protocol_version`
         // turns any such change into a reviewed diff.
@@ -42,12 +42,12 @@ impl ServerHandler for RhoodTools {
         // version: `negotiate_protocol_version` echoes back any version in
         // `ProtocolVersion::KNOWN_VERSIONS`, so older clients still negotiate down.
         info.protocol_version = ProtocolVersion::V_2026_07_28;
-        // No `enable_logging()`: SEP-2577 deprecated MCP logging, and rmcp 3.0
+        // No `enable_logging()`: SEP-2577 deprecated MCP logging, and rmcp 3.1
         // marks the whole surface `#[deprecated]`. Server-side diagnostics go to
         // `tracing` (stderr) instead.
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         // Not `Implementation::from_build_env()`: its `env!` calls expand inside
-        // rmcp, so it reports the SDK's identity ("rmcp", 3.0.0) rather than this
+        // rmcp, so it reports the SDK's identity ("rmcp", 3.1.2) rather than this
         // server's. Expanding them here resolves them against this crate.
         info.server_info = Implementation::new(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"))
             .with_description(env!("CARGO_PKG_DESCRIPTION"));
