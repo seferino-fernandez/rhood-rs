@@ -51,7 +51,7 @@ pub(crate) fn compact_history(
 impl RhoodTools {
     #[tool(
         name = "get_stock_quotes",
-        description = "Get current quotes for stock ticker symbols",
+        description = "Get full-detail current quotes for stock ticker symbols, including bid/ask, sizes, timestamps, previous close, and trading state. Use get_latest_prices for price-only queries.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn get_stock_quotes(
@@ -116,7 +116,7 @@ impl RhoodTools {
 
     #[tool(
         name = "get_latest_prices",
-        description = "Get latest trade price per symbol (prefers ext-hours price when available)",
+        description = "Get the compact current trade price for each symbol when only one price per symbol is needed; prefers the extended-hours trade price when present, otherwise the regular last-trade price. Use get_stock_quotes for full quote detail.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn get_latest_prices(

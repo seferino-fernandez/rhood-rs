@@ -299,6 +299,37 @@ mod router_tests {
             );
         }
     }
+
+    #[test]
+    fn stock_price_tools_advertise_reciprocal_selection_guidance() {
+        let tools = tools_with(false);
+        let description = |name: &str| {
+            tools
+                .tool_router
+                .list_all()
+                .into_iter()
+                .find(|tool| tool.name == name)
+                .and_then(|tool| tool.description)
+                .unwrap_or_else(|| panic!("tool {name} must advertise a description"))
+        };
+
+        let latest_prices = description("get_latest_prices");
+        assert!(
+            latest_prices.contains("compact") && latest_prices.contains("get_stock_quotes"),
+            "get_latest_prices must recommend itself for compact price-only queries and point to get_stock_quotes for full detail: {latest_prices}"
+        );
+
+        let stock_quotes = description("get_stock_quotes");
+        assert!(
+            stock_quotes.contains("bid/ask")
+                && stock_quotes.contains("sizes")
+                && stock_quotes.contains("timestamps")
+                && stock_quotes.contains("previous close")
+                && stock_quotes.contains("trading state")
+                && stock_quotes.contains("get_latest_prices"),
+            "get_stock_quotes must describe full quote detail and point to get_latest_prices for price-only queries: {stock_quotes}"
+        );
+    }
 }
 
 #[cfg(test)]
