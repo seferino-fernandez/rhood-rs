@@ -36,9 +36,17 @@ fn build_test_router(
     server_read_only: bool,
     oauth_pin: Option<String>,
 ) -> (Router, store::OAuthStore) {
+    build_test_router_with_clients(server_read_only, oauth_pin, registered_clients())
+}
+
+fn build_test_router_with_clients(
+    server_read_only: bool,
+    oauth_pin: Option<String>,
+    registered_clients: Vec<model::RegisteredClient>,
+) -> (Router, store::OAuthStore) {
     let store_instance = store::OAuthStore::with_registered_clients(
         store::OAuthStoreConfig::default(),
-        registered_clients(),
+        registered_clients,
     );
     let base = test_base_url();
 
@@ -702,6 +710,93 @@ async fn consent_page_has_anti_clickjacking_headers() {
         .to_str()
         .unwrap();
     assert!(csp.contains("frame-ancestors 'none'"));
+}
+
+#[tokio::test]
+async fn consent_page_uses_the_trusted_client_and_validated_request_document() {
+    let (app, _store) = build_test_router(false, None);
+    let query = serde_urlencoded::to_string([
+        ("response_type", "code"),
+        ("client_id", TEST_CLIENT_ID),
+        ("redirect_uri", TEST_REDIRECT_URI),
+        ("scope", "read write"),
+        ("state", "client state"),
+        ("code_challenge", "validated-challenge"),
+        ("code_challenge_method", "S256"),
+    ])
+    .unwrap();
+
+    let response = app
+        .oneshot(
+            Request::get(format!("/oauth/authorize?{query}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_to_string(response.into_body()).await;
+    for server_value in [
+        r#"data-client-name="Configured%20Test%20Client""#,
+        r#"data-client-id="configured-test-client""#,
+        r#"data-redirect-uri="http%3A%2F%2Flocalhost%2Fcb""#,
+        r#"data-scope="read%20write""#,
+        r#"data-state="client%20state""#,
+        r#"data-code-challenge="validated-challenge""#,
+        r#"data-code-challenge-method="S256""#,
+        r#"data-csrf-nonce="rhood_csrf_"#,
+    ] {
+        assert!(body.contains(server_value), "missing {server_value}");
+    }
+    assert!(body.contains("Redirect destination:"));
+    assert!(body.contains(r#"id="redirect-destination""#));
+    assert!(!body.contains("URLSearchParams"));
+    assert!(!body.contains("window.location.search"));
+}
+
+#[tokio::test]
+async fn consent_page_does_not_emit_untrusted_markup_raw() {
+    const HOSTILE_CLIENT_NAME: &str = r#"Trusted Client"><script>alert('name')</script>"#;
+    const HOSTILE_STATE: &str = r#""><img src=x onerror=alert('state')>"#;
+    let clients = vec![model::RegisteredClient {
+        client_id: TEST_CLIENT_ID.to_string(),
+        client_name: HOSTILE_CLIENT_NAME.to_string(),
+        redirect_uris: vec![TEST_REDIRECT_URI.to_string()],
+    }];
+    let (app, _store) = build_test_router_with_clients(false, None, clients);
+    let query = serde_urlencoded::to_string([
+        ("response_type", "code"),
+        ("client_id", TEST_CLIENT_ID),
+        ("redirect_uri", TEST_REDIRECT_URI),
+        ("state", HOSTILE_STATE),
+        ("code_challenge", "validated-challenge"),
+        ("code_challenge_method", "S256"),
+    ])
+    .unwrap();
+
+    let response = app
+        .oneshot(
+            Request::get(format!("/oauth/authorize?{query}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_to_string(response.into_body()).await;
+    assert!(!body.contains(HOSTILE_CLIENT_NAME));
+    assert!(!body.contains(HOSTILE_STATE));
+    assert!(body.contains(
+        r#"data-client-name="Trusted%20Client%22%3E%3Cscript%3Ealert%28%27name%27%29%3C%2Fscript%3E""#
+    ));
+    assert!(
+        body.contains(
+            r#"data-state="%22%3E%3Cimg%20src%3Dx%20onerror%3Dalert%28%27state%27%29%3E""#
+        )
+    );
+    assert!(body.contains(r#"data-scope="read""#));
 }
 
 #[tokio::test]

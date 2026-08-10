@@ -74,11 +74,10 @@ pub async fn authorize(
         scope = ?params.scope,
         "GET /oauth/authorize"
     );
-    if state
+    let Some(registered_client) = state
         .store
         .registered_client(&params.client_id, &params.redirect_uri)
-        .is_none()
-    {
+    else {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
@@ -87,7 +86,7 @@ pub async fn authorize(
             })),
         )
             .into_response();
-    }
+    };
 
     if params.response_type != "code" {
         return error_redirect_or_json(
@@ -98,8 +97,8 @@ pub async fn authorize(
         );
     }
 
-    match params.code_challenge_method.as_deref() {
-        Some("S256") => {}
+    let code_challenge_method = match params.code_challenge_method.as_deref() {
+        Some("S256") => "S256",
         Some(other) => {
             return error_redirect_or_json(
                 &params.redirect_uri,
@@ -116,22 +115,49 @@ pub async fn authorize(
                 "code_challenge and code_challenge_method=S256 are required",
             );
         }
-    }
+    };
 
-    if params.code_challenge.is_none() {
+    let Some(code_challenge) = params.code_challenge.as_deref() else {
         return error_redirect_or_json(
             &params.redirect_uri,
             params.state.as_deref(),
             "invalid_request",
             "code_challenge is required",
         );
-    }
+    };
 
     let csrf_nonce = state.store.create_csrf_nonce().await;
     let pin_required = state.oauth_pin.is_some();
+    let scope = params
+        .scope
+        .as_deref()
+        .filter(|scope| !scope.is_empty())
+        .unwrap_or("read");
+    let client_state = params.state.as_deref().unwrap_or("");
     let html = CONSENT_HTML.replace(
         "<body>",
-        &format!("<body data-pin-required=\"{pin_required}\" data-csrf-nonce=\"{csrf_nonce}\">"),
+        &format!(
+            concat!(
+                "<body data-pin-required=\"{pin_required}\" ",
+                "data-client-name=\"{client_name}\" ",
+                "data-client-id=\"{client_id}\" ",
+                "data-redirect-uri=\"{redirect_uri}\" ",
+                "data-scope=\"{scope}\" ",
+                "data-state=\"{client_state}\" ",
+                "data-code-challenge=\"{code_challenge}\" ",
+                "data-code-challenge-method=\"{code_challenge_method}\" ",
+                "data-csrf-nonce=\"{csrf_nonce}\">"
+            ),
+            pin_required = pin_required,
+            client_name = urlencoding::encode(&registered_client.client_name),
+            client_id = urlencoding::encode(&params.client_id),
+            redirect_uri = urlencoding::encode(&params.redirect_uri),
+            scope = urlencoding::encode(scope),
+            client_state = urlencoding::encode(client_state),
+            code_challenge = urlencoding::encode(code_challenge),
+            code_challenge_method = urlencoding::encode(code_challenge_method),
+            csrf_nonce = urlencoding::encode(&csrf_nonce),
+        ),
     );
     (
         [
