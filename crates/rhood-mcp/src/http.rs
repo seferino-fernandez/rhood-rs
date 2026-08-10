@@ -355,6 +355,7 @@ mod tests {
 #[cfg(test)]
 mod wire_tests {
     use super::*;
+    use crate::middleware::oauth::{OAuthAuthenticated, OAuthPrincipal};
     use crate::tools::WRITE_TOOLS;
     use axum::body::Body;
     use rhood_core::{RhoodConfig, RobinhoodClient};
@@ -492,6 +493,48 @@ mod wire_tests {
         )
     }
 
+    fn counting_write_service(
+        dispatches: Arc<AtomicUsize>,
+    ) -> StreamableHttpService<RhoodTools, LocalSessionManager> {
+        let client =
+            RobinhoodClient::with_config(RhoodConfig::default()).expect("default config builds");
+        let mcp_config = McpConfig::default();
+        let allowed_hosts = mcp_config.allowed_hosts.clone();
+        let rate_limiter =
+            ToolRateLimiter::new(&mcp_config.rate_limit).expect("default rate limits are valid");
+        StreamableHttpService::new(
+            move || {
+                let mut tools = RhoodTools::new_eager(
+                    client.clone(),
+                    false,
+                    &mcp_config,
+                    rate_limiter.clone(),
+                    FallbackPrincipal::HttpNone,
+                );
+                let dispatches = dispatches.clone();
+                tools.tool_router = ToolRouter::new().with_route(ToolRoute::new_dyn(
+                    Tool::new(
+                        "place_stock_order",
+                        "Count actual write-tool dispatches",
+                        Arc::new(Default::default()),
+                    ),
+                    move |_context| {
+                        dispatches.fetch_add(1, Ordering::SeqCst);
+                        Box::pin(async move {
+                            Ok(CallToolResult::success(vec![ContentBlock::text("called")]).into())
+                        })
+                    },
+                ));
+                Ok(tools)
+            },
+            Arc::default(),
+            StreamableHttpServerConfig::default()
+                .with_legacy_session_mode(false)
+                .with_stateless_protocol_metadata_required(true)
+                .with_allowed_hosts(allowed_hosts),
+        )
+    }
+
     /// Sends one JSON-RPC message and returns the status, headers, and every
     /// JSON payload in the response (SSE `data:` frames, or a lone JSON body).
     async fn post(
@@ -499,6 +542,16 @@ mod wire_tests {
         body: Value,
         session_id: Option<&str>,
         protocol_version: Option<&str>,
+    ) -> (axum::http::StatusCode, axum::http::HeaderMap, Vec<Value>) {
+        post_with_oauth(service, body, session_id, protocol_version, None).await
+    }
+
+    async fn post_with_oauth(
+        service: &StreamableHttpService<RhoodTools, LocalSessionManager>,
+        body: Value,
+        session_id: Option<&str>,
+        protocol_version: Option<&str>,
+        oauth_principal: Option<OAuthPrincipal>,
     ) -> (axum::http::StatusCode, axum::http::HeaderMap, Vec<Value>) {
         let mut request = axum::http::Request::builder()
             .method("POST")
@@ -533,9 +586,13 @@ mod wire_tests {
                 }
             }
         }
-        let request = request
+        let mut request = request
             .body(Body::from(body.to_string()))
             .expect("request builds");
+        if let Some(oauth_principal) = oauth_principal {
+            request.extensions_mut().insert(OAuthAuthenticated);
+            request.extensions_mut().insert(oauth_principal);
+        }
 
         let response = service.clone().oneshot(request).await.expect("infallible");
         let status = response.status();
@@ -811,6 +868,85 @@ mod wire_tests {
             message.contains("read-only"),
             "rejection must say why: {message}"
         );
+    }
+
+    #[tokio::test]
+    async fn oauth_write_scope_reaches_http_dispatch() {
+        let dispatches = Arc::new(AtomicUsize::new(0));
+        let service = counting_write_service(Arc::clone(&dispatches));
+        let _ = post(&service, initialize(V_MODERN), None, None).await;
+
+        let (status, _, payloads) = post_with_oauth(
+            &service,
+            modern_tools_call("place_stock_order"),
+            None,
+            Some(V_MODERN),
+            Some(OAuthPrincipal {
+                principal: "rhood_cid_read_write".to_string(),
+                scopes: vec!["read".to_string(), "write".to_string()],
+            }),
+        )
+        .await;
+
+        assert!(status.is_success(), "tools/call failed: {payloads:?}");
+        assert_eq!(result_of(&payloads)["isError"], false);
+        assert_eq!(dispatches.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn oauth_read_scope_denies_write_scope_before_http_dispatch() {
+        let dispatches = Arc::new(AtomicUsize::new(0));
+        let service = counting_write_service(Arc::clone(&dispatches));
+        let _ = post(&service, initialize(V_MODERN), None, None).await;
+
+        let (status, _, payloads) = post_with_oauth(
+            &service,
+            modern_tools_call("place_stock_order"),
+            None,
+            Some(V_MODERN),
+            Some(OAuthPrincipal {
+                principal: "rhood_cid_read_only".to_string(),
+                scopes: vec!["read".to_string()],
+            }),
+        )
+        .await;
+
+        assert!(
+            !status.is_server_error(),
+            "unexpected HTTP failure: {status}"
+        );
+        let error = error_of(&payloads);
+        assert_eq!(error["code"], -32602, "expected INVALID_PARAMS: {error}");
+        assert!(
+            error["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("write")),
+            "rejection must identify the required scope: {error}"
+        );
+        assert_eq!(
+            dispatches.load(Ordering::SeqCst),
+            0,
+            "scope-rejected invocation must not reach the tool router"
+        );
+    }
+
+    #[tokio::test]
+    async fn non_oauth_http_write_scope_reaches_dispatch() {
+        let dispatches = Arc::new(AtomicUsize::new(0));
+        let service = counting_write_service(Arc::clone(&dispatches));
+        let _ = post(&service, initialize(V_MODERN), None, None).await;
+
+        let (status, _, payloads) = post(
+            &service,
+            modern_tools_call("place_stock_order"),
+            None,
+            Some(V_MODERN),
+        )
+        .await;
+
+        assert!(status.is_success(), "tools/call failed: {payloads:?}");
+        assert_eq!(result_of(&payloads)["isError"], false);
+        assert_eq!(dispatches.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

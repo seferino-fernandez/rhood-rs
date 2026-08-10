@@ -21,7 +21,7 @@ use super::rate_limit::{FallbackPrincipal, ToolRateLimiter};
 const ORDER_CONFIRMATION_TTL: Duration = Duration::from_secs(600);
 // A consumed Confirmation stays recorded for twice the sealed state's TTL so
 // its replay guard cannot disappear while that state might still be valid.
-const ORDER_REDEMPTION_RETENTION: Duration = Duration::from_secs(1_200);
+pub(super) const ORDER_REDEMPTION_RETENTION: Duration = Duration::from_secs(1_200);
 
 fn process_request_state_codec() -> RequestStateCodec {
     static CODEC: OnceLock<RequestStateCodec> = OnceLock::new();

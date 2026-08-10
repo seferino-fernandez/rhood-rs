@@ -1020,6 +1020,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn login_headless_handles_challenge_on_successful_password_grant() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/oauth2/token/"))
+            .and(body_string_contains("grant_type=password"))
+            .and(body_string_contains("username=user"))
+            .and(body_string_contains("password=pass"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "challenge": {
+                    "id": "ch-login-1",
+                    "type": "sms",
+                    "status": "issued"
+                }
+            })))
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server.uri()).await;
+
+        let err = client
+            .login_headless("user", "pass", None)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            RhoodError::ChallengeRequired(ChallengeType::Sms)
+        ));
+        assert!(matches!(
+            client.auth_state().await,
+            AuthState::Challenged {
+                challenge_type: ChallengeType::Sms,
+                challenge_id,
+            } if challenge_id == "ch-login-1"
+        ));
+    }
+
+    #[tokio::test]
     async fn login_headless_rejects_non_success_retry_with_access_token() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))

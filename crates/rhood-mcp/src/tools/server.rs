@@ -297,14 +297,19 @@ impl ServerHandler for RhoodTools {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use axum::http::Request;
     use rhood_core::{RhoodConfig, RobinhoodClient};
     use rmcp::{
         Peer, RoleServer, ServerHandler,
+        handler::server::tool::{ToolRoute, ToolRouter},
         model::{
-            CallToolResult, CreateTaskResult, InputRequiredResult, MetaObject, Task, TaskStatus,
+            CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock,
+            CreateTaskResult, InputRequiredResult, MetaObject, NumberOrString, Task, TaskStatus,
+            Tool,
         },
+        service::{RequestContext, RunningService, serve_directly},
     };
     use serde_json::{Value, json};
 
@@ -428,6 +433,39 @@ mod tests {
         let parts = oauth_parts(None);
 
         assert!(oauth_write_scope_error_for_parts("place_stock_order", Some(&parts)).is_some());
+    }
+
+    #[tokio::test]
+    async fn write_scope_allows_direct_call_tool_without_http_parts_to_dispatch() {
+        let dispatches = Arc::new(AtomicUsize::new(0));
+        let counted_dispatches = Arc::clone(&dispatches);
+        let mut tools = tools_with(false);
+        tools.tool_router = ToolRouter::new().with_route(ToolRoute::new_dyn(
+            Tool::new(
+                "place_stock_order",
+                "Count direct stdio dispatches",
+                Arc::new(Default::default()),
+            ),
+            move |_context| {
+                counted_dispatches.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async move {
+                    Ok(CallToolResult::success(vec![ContentBlock::text("called")]).into())
+                })
+            },
+        ));
+        let (server_transport, _client_transport) = tokio::io::duplex(4_096);
+        let running: RunningService<RoleServer, RhoodTools> =
+            serve_directly(tools, server_transport, None);
+        let context = RequestContext::new(NumberOrString::Number(1), running.peer().clone());
+
+        let response = running
+            .service()
+            .call_tool(CallToolRequestParams::new("place_stock_order"), context)
+            .await
+            .expect("direct stdio write-tool call is allowed");
+
+        assert!(matches!(response, CallToolResponse::Complete(_)));
+        assert_eq!(dispatches.load(Ordering::SeqCst), 1);
     }
 
     #[test]

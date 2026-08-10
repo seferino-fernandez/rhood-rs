@@ -497,20 +497,24 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
+    use axum::http::Request;
     use rhood_core::models::option::OptionType;
     use rhood_core::models::order::{OrderType, Side, TimeInForce};
     use rhood_core::{RhoodConfig, RobinhoodClient};
     use rmcp::model::{
-        CallToolResponse, ElicitRequestParams, ElicitResult, ElicitationAction, InputRequest,
-        InputRequiredResult, InputResponses,
+        CallToolResponse, ElicitRequestParams, ElicitResult, ElicitationAction, Extensions,
+        InputRequest, InputRequiredResult, InputResponses,
     };
+    use tokio::sync::Barrier;
 
     use crate::config::McpConfig;
-    use crate::tools::handler::{OrderRedemptionStore, RhoodTools};
+    use crate::middleware::oauth::{OAuthAuthenticated, OAuthPrincipal};
+    use crate::tools::handler::{ORDER_REDEMPTION_RETENTION, OrderRedemptionStore, RhoodTools};
 
     use super::{
-        CONFIRMATION_REQUEST_ID, OPTION_ORDER_TOOL, OrderRoundRequest, STOCK_ORDER_TOOL,
-        StagedOrder, run_order_round, validate_positive, validate_symbol_format,
+        CONFIRMATION_REQUEST_ID, NON_OAUTH_HTTP_PRINCIPAL, OPTION_ORDER_TOOL, OrderRoundRequest,
+        STDIO_PRINCIPAL, STOCK_ORDER_TOOL, StagedOrder, request_principal, run_order_round,
+        validate_positive, validate_symbol_format,
     };
     use crate::tools::ToolRateLimiter;
     use crate::tools::params::{PlaceOptionOrderParams, PlaceStockOrderParams};
@@ -530,8 +534,58 @@ mod tests {
         let rate_limiter =
             ToolRateLimiter::new(&config.rate_limit).expect("default rate limits are valid");
         let mut tools = RhoodTools::new_lazy(client, hook, false, &config, rate_limiter);
-        tools.order_redemptions = Arc::new(OrderRedemptionStore::new(Duration::from_secs(1_200)));
+        tools.order_redemptions = Arc::new(OrderRedemptionStore::new(ORDER_REDEMPTION_RETENTION));
         tools
+    }
+
+    fn extensions_with_parts(parts: axum::http::request::Parts) -> Extensions {
+        let mut extensions = Extensions::default();
+        extensions.insert(parts);
+        extensions
+    }
+
+    #[test]
+    fn request_principal_without_http_parts_uses_stdio_principal() {
+        assert_eq!(
+            request_principal(&Extensions::default()).expect("stdio Principal is available"),
+            STDIO_PRINCIPAL
+        );
+    }
+
+    #[test]
+    fn request_principal_uses_validated_oauth_client_id() {
+        let (mut parts, _body) = Request::new(()).into_parts();
+        parts.extensions.insert(OAuthPrincipal {
+            principal: "registered-client".to_string(),
+            scopes: vec!["read".to_string(), "write".to_string()],
+        });
+
+        assert_eq!(
+            request_principal(&extensions_with_parts(parts))
+                .expect("validated OAuth Principal is available"),
+            "registered-client"
+        );
+    }
+
+    #[test]
+    fn request_principal_rejects_oauth_marker_without_validated_principal() {
+        let (mut parts, _body) = Request::new(()).into_parts();
+        parts.extensions.insert(OAuthAuthenticated);
+
+        let error = request_principal(&extensions_with_parts(parts))
+            .expect_err("OAuth marker without a Principal must fail closed");
+        assert!(error.contains("no Principal"), "got: {error}");
+    }
+
+    #[test]
+    fn request_principal_for_ordinary_http_is_bounded() {
+        let (parts, _body) = Request::new(()).into_parts();
+
+        assert_eq!(
+            request_principal(&extensions_with_parts(parts))
+                .expect("non-OAuth HTTP Principal is available"),
+            NON_OAUTH_HTTP_PRINCIPAL
+        );
     }
 
     fn stock_order() -> PlaceStockOrderParams {
@@ -701,7 +755,7 @@ mod tests {
         assert_eq!(submissions.load(Ordering::SeqCst), 1);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn concurrent_confirmations_submit_exactly_once() {
         let tools = tools();
         let staged = run_order_round(
@@ -717,45 +771,65 @@ mod tests {
         .expect("valid order stages");
         let state = sealed_state(&input_required(staged));
         let submissions = Arc::new(AtomicUsize::new(0));
-        let first_submissions = Arc::clone(&submissions);
-        let second_submissions = Arc::clone(&submissions);
+        let start = Arc::new(Barrier::new(3));
+        let first = tokio::spawn({
+            let tools = tools.clone();
+            let submissions = Arc::clone(&submissions);
+            let start = Arc::clone(&start);
+            let state = state.clone();
+            async move {
+                start.wait().await;
+                run_order_round(
+                    &tools.request_state_codec,
+                    &tools.order_redemptions,
+                    tools.order_confirmation_ttl,
+                    "principal-a",
+                    STOCK_ORDER_TOOL,
+                    round(
+                        StagedOrder::Stock(stock_order()),
+                        Some(state),
+                        Some(accepted_confirmation()),
+                    ),
+                    move |_| async move {
+                        let _previous = submissions.fetch_add(1, Ordering::SeqCst);
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                        Ok(Some("first-order-id".to_string()))
+                    },
+                )
+                .await
+            }
+        });
+        let second = tokio::spawn({
+            let tools = tools.clone();
+            let submissions = Arc::clone(&submissions);
+            let start = Arc::clone(&start);
+            async move {
+                start.wait().await;
+                run_order_round(
+                    &tools.request_state_codec,
+                    &tools.order_redemptions,
+                    tools.order_confirmation_ttl,
+                    "principal-a",
+                    STOCK_ORDER_TOOL,
+                    round(
+                        StagedOrder::Stock(stock_order()),
+                        Some(state),
+                        Some(accepted_confirmation()),
+                    ),
+                    move |_| async move {
+                        let _previous = submissions.fetch_add(1, Ordering::SeqCst);
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                        Ok(Some("second-order-id".to_string()))
+                    },
+                )
+                .await
+            }
+        });
 
-        let first = run_order_round(
-            &tools.request_state_codec,
-            &tools.order_redemptions,
-            tools.order_confirmation_ttl,
-            "principal-a",
-            STOCK_ORDER_TOOL,
-            round(
-                StagedOrder::Stock(stock_order()),
-                Some(state.clone()),
-                Some(accepted_confirmation()),
-            ),
-            move |_| async move {
-                let _previous = first_submissions.fetch_add(1, Ordering::SeqCst);
-                tokio::time::sleep(Duration::from_millis(20)).await;
-                Ok(Some("first-order-id".to_string()))
-            },
-        );
-        let second = run_order_round(
-            &tools.request_state_codec,
-            &tools.order_redemptions,
-            tools.order_confirmation_ttl,
-            "principal-a",
-            STOCK_ORDER_TOOL,
-            round(
-                StagedOrder::Stock(stock_order()),
-                Some(state),
-                Some(accepted_confirmation()),
-            ),
-            move |_| async move {
-                let _previous = second_submissions.fetch_add(1, Ordering::SeqCst);
-                tokio::time::sleep(Duration::from_millis(20)).await;
-                Ok(Some("second-order-id".to_string()))
-            },
-        );
-
+        start.wait().await;
         let (first_result, second_result) = tokio::join!(first, second);
+        let first_result = first_result.expect("first Confirmation task completes");
+        let second_result = second_result.expect("second Confirmation task completes");
 
         assert!(matches!(
             (&first_result, &second_result),
