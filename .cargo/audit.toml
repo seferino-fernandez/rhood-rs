@@ -1,0 +1,7 @@
+[advisories]
+# rkyv enters only through rust_decimal's optional rkyv feature, which this workspace does
+# not enable: `cargo tree -i rkyv` verifies this by printing "nothing to print". cargo
+# auditable embeds the resolved dependency graph rather than the compiled subset, so it
+# reports rkyv 0.7.46 even though no workspace binary compiles or reaches it. rust_decimal
+# 1.42.1 is already current, so no version bump removes this entry.
+ignore = ["RUSTSEC-2026-0235"]
