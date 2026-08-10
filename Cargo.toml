@@ -12,7 +12,6 @@ edition = "2024"
 license = "MIT"
 repository = "https://github.com/seferino-fernandez/rhood-rs"
 homepage = "https://github.com/seferino-fernandez/rhood-rs"
-authors = ["Seferino Fernandez"]
 rust-version = "1.96"
 
 [workspace.dependencies]

@@ -75,11 +75,11 @@ go to stderr via `tracing`, controlled by `RUST_LOG` and the `-v`/`-q` flags.
 
 ## Authentication Modes
 
-| Mode    | Flag                | Description                                              |
-| ------- | ------------------- | -------------------------------------------------------- |
-| `token` | `--auth-mode token` | Static bearer token (default)                            |
-| `oauth` | `--auth-mode oauth` | OAuth 2.1 with PKCE and operator-preregistered clients   |
-| `none`  | `--auth-mode none`  | No auth (loopback-only, local development)               |
+| Mode    | Flag                | Description                                            |
+| ------- | ------------------- | ------------------------------------------------------ |
+| `token` | `--auth-mode token` | Static bearer token (default)                          |
+| `oauth` | `--auth-mode oauth` | OAuth 2.1 with PKCE and operator-preregistered clients |
+| `none`  | `--auth-mode none`  | No auth (loopback-only, local development)             |
 
 ## Quick Start
 
