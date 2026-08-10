@@ -45,6 +45,11 @@ fn normalize_api_body(status: u16, body: &str) -> String {
             rhood_core::error::ApiErrorDetail::Message(message) => {
                 return format!("API error ({status}): {message}");
             }
+            _ => {
+                return format!(
+                    "API error ({status}): upstream returned an unrecognized diagnostic"
+                );
+            }
         }
     }
     // HTML error page -> don't dump markup.

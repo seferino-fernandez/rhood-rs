@@ -6,7 +6,22 @@
 use thiserror::Error;
 
 /// Structured diagnostic content extracted from a JSON API error body.
+///
+/// Callers must include a wildcard arm because additional recognized
+/// diagnostics may be added in future releases.
+///
+/// ```compile_fail
+/// use rhood_core::error::ApiErrorDetail;
+///
+/// fn render(detail: ApiErrorDetail) {
+///     match detail {
+///         ApiErrorDetail::MissingInstruments(_) => {}
+///         ApiErrorDetail::Message(_) => {}
+///     }
+/// }
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ApiErrorDetail {
     /// Instrument symbols the API did not recognize.
     MissingInstruments(Vec<String>),
@@ -58,11 +73,16 @@ pub fn extract_api_error_detail(body: &str) -> Option<ApiErrorDetail> {
 /// diagnostic message.
 fn display_api_error(status: u16, body: &str) -> String {
     if let Some(detail) = extract_api_error_detail(body) {
+        #[expect(
+            unreachable_patterns,
+            reason = "keeps in-crate rendering forward-compatible with non-exhaustive ApiErrorDetail"
+        )]
         let message = match detail {
             ApiErrorDetail::MissingInstruments(symbols) => {
                 format!("unknown symbol(s): {}", symbols.join(", "))
             }
             ApiErrorDetail::Message(message) => message,
+            _ => "upstream returned an unrecognized diagnostic".to_string(),
         };
         return format!("API error ({status}): {message}");
     }
