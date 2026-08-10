@@ -351,12 +351,19 @@ mod wire_tests {
     use crate::tools::WRITE_TOOLS;
     use axum::body::Body;
     use rhood_core::{RhoodConfig, RobinhoodClient};
-    use rmcp::model::ProtocolVersion;
+    use rmcp::{
+        handler::server::tool::{ToolRoute, ToolRouter},
+        model::{
+            CallToolResponse, CallToolResult, ContentBlock, CreateTaskResult, MetaObject,
+            ProtocolVersion, Task, TaskStatus, Tool,
+        },
+    };
     use serde_json::{Value, json};
     use tower::ServiceExt;
 
     const V_MODERN: &str = "2026-07-28";
     const V_LEGACY: &str = "2025-11-25";
+    const TEST_TOOL: &str = "test_tool_result";
 
     fn mcp_service(read_only: bool) -> StreamableHttpService<RhoodTools, LocalSessionManager> {
         let client =
@@ -374,6 +381,42 @@ mod wire_tests {
                 .with_legacy_session_mode(false)
                 .with_stateless_protocol_metadata_required(true)
                 .with_allowed_hosts(McpConfig::default().allowed_hosts),
+        )
+    }
+
+    fn mcp_service_returning(
+        response: CallToolResponse,
+        max_response_bytes: usize,
+    ) -> StreamableHttpService<RhoodTools, LocalSessionManager> {
+        let client =
+            RobinhoodClient::with_config(RhoodConfig::default()).expect("default config builds");
+        let mcp_config = McpConfig {
+            max_response_bytes,
+            ..McpConfig::default()
+        };
+        let allowed_hosts = mcp_config.allowed_hosts.clone();
+        StreamableHttpService::new(
+            move || {
+                let mut tools = RhoodTools::new_eager(client.clone(), false, &mcp_config);
+                let response = response.clone();
+                tools.tool_router = ToolRouter::new().with_route(ToolRoute::new_dyn(
+                    Tool::new(
+                        TEST_TOOL,
+                        "Return a predetermined test result",
+                        Arc::new(Default::default()),
+                    ),
+                    move |_context| {
+                        let response = response.clone();
+                        Box::pin(async move { Ok(response) })
+                    },
+                ));
+                Ok(tools)
+            },
+            Arc::default(),
+            StreamableHttpServerConfig::default()
+                .with_legacy_session_mode(false)
+                .with_stateless_protocol_metadata_required(true)
+                .with_allowed_hosts(allowed_hosts),
         )
     }
 
@@ -443,13 +486,17 @@ mod wire_tests {
     }
 
     fn initialize(version: &str) -> Value {
+        initialize_with_capabilities(version, json!({}))
+    }
+
+    fn initialize_with_capabilities(version: &str, capabilities: Value) -> Value {
         json!({
             "jsonrpc": "2.0",
             "id": 1,
             "method": "initialize",
             "params": {
                 "protocolVersion": version,
-                "capabilities": {},
+                "capabilities": capabilities,
                 "clientInfo": { "name": "wire-test", "version": "0" }
             }
         })
@@ -458,10 +505,14 @@ mod wire_tests {
     /// Lifecycle metadata every stateless 2026-07-28 request carries in place of
     /// a session (SEP-2575).
     fn modern_meta() -> Value {
+        modern_meta_with_capabilities(json!({}))
+    }
+
+    fn modern_meta_with_capabilities(capabilities: Value) -> Value {
         json!({
             "io.modelcontextprotocol/protocolVersion": V_MODERN,
             "io.modelcontextprotocol/clientInfo": { "name": "wire-test", "version": "0" },
-            "io.modelcontextprotocol/clientCapabilities": {}
+            "io.modelcontextprotocol/clientCapabilities": capabilities
         })
     }
 
@@ -475,11 +526,45 @@ mod wire_tests {
     }
 
     fn modern_tools_call(name: &str) -> Value {
+        modern_tools_call_with_arguments(name, json!({}))
+    }
+
+    fn modern_tools_call_with_arguments(name: &str, arguments: Value) -> Value {
+        modern_tools_call_with_capabilities(name, arguments, json!({}))
+    }
+
+    fn modern_tools_call_with_capabilities(
+        name: &str,
+        arguments: Value,
+        capabilities: Value,
+    ) -> Value {
         json!({
             "jsonrpc": "2.0",
             "id": 3,
             "method": "tools/call",
-            "params": { "name": name, "arguments": {}, "_meta": modern_meta() }
+            "params": {
+                "name": name,
+                "arguments": arguments,
+                "_meta": modern_meta_with_capabilities(capabilities)
+            }
+        })
+    }
+
+    fn meta_with_marker(marker: &str) -> Option<MetaObject> {
+        Some(
+            serde_json::from_value(json!({
+                "unrelated": marker,
+                "io.modelcontextprotocol/serverInfo": { "name": "not-rhood-mcp" }
+            }))
+            .expect("test metadata deserializes"),
+        )
+    }
+
+    fn expected_server_info() -> Value {
+        json!({
+            "name": env!("CARGO_PKG_NAME"),
+            "version": env!("CARGO_PKG_VERSION"),
+            "description": env!("CARGO_PKG_DESCRIPTION")
         })
     }
 
@@ -645,10 +730,138 @@ mod wire_tests {
             error["code"], -32602,
             "expected INVALID_PARAMS, got {error}"
         );
+        assert!(
+            error.get("_meta").is_none(),
+            "JSON-RPC errors are not tool results: {error}"
+        );
         let message = error["message"].as_str().unwrap_or_default();
         assert!(
             message.contains("read-only"),
             "rejection must say why: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn call_tool_complete_carries_authoritative_server_info() {
+        let mut complete = CallToolResult::success(vec![ContentBlock::text("complete")]);
+        complete.meta = meta_with_marker("complete");
+        let service =
+            mcp_service_returning(complete.into(), McpConfig::default().max_response_bytes);
+        let _ = post(&service, initialize(V_MODERN), None, None).await;
+        let (status, _, payloads) =
+            post(&service, modern_tools_call(TEST_TOOL), None, Some(V_MODERN)).await;
+
+        assert!(
+            status.is_success(),
+            "tools/call failed: {status} {payloads:?}"
+        );
+        let result = result_of(&payloads);
+        assert_eq!(result["resultType"], "complete");
+        assert_eq!(result["content"][0]["text"], "complete");
+        assert_eq!(result["_meta"]["unrelated"], "complete");
+        assert_eq!(
+            result["_meta"]["io.modelcontextprotocol/serverInfo"],
+            expected_server_info()
+        );
+    }
+
+    #[tokio::test]
+    async fn call_tool_task_carries_authoritative_server_info() {
+        let task = Task::new(
+            "task-id",
+            TaskStatus::Working,
+            "2026-08-10T00:00:00Z",
+            "2026-08-10T00:00:00Z",
+        );
+        let mut task = CreateTaskResult::new(task);
+        task.meta = meta_with_marker("task");
+        let service = mcp_service_returning(task.into(), McpConfig::default().max_response_bytes);
+        let capabilities = json!({
+            "extensions": { "io.modelcontextprotocol/tasks": {} }
+        });
+        let _ = post(
+            &service,
+            initialize_with_capabilities(V_MODERN, capabilities.clone()),
+            None,
+            None,
+        )
+        .await;
+        let (status, _, payloads) = post(
+            &service,
+            modern_tools_call_with_capabilities(TEST_TOOL, json!({}), capabilities),
+            None,
+            Some(V_MODERN),
+        )
+        .await;
+
+        assert!(
+            status.is_success(),
+            "tools/call failed: {status} {payloads:?}"
+        );
+        let result = result_of(&payloads);
+        assert_eq!(result["resultType"], "task");
+        assert_eq!(result["taskId"], "task-id");
+        assert_eq!(result["_meta"]["unrelated"], "task");
+        assert_eq!(
+            result["_meta"]["io.modelcontextprotocol/serverInfo"],
+            expected_server_info()
+        );
+    }
+
+    #[tokio::test]
+    async fn call_tool_budget_replacement_still_carries_server_info() {
+        let oversized = CallToolResult::success(vec![ContentBlock::text("x".repeat(2048))]);
+        let service = mcp_service_returning(oversized.into(), 256);
+        let _ = post(&service, initialize(V_MODERN), None, None).await;
+        let (status, _, payloads) =
+            post(&service, modern_tools_call(TEST_TOOL), None, Some(V_MODERN)).await;
+
+        assert!(
+            status.is_success(),
+            "tools/call failed: {status} {payloads:?}"
+        );
+        let result = result_of(&payloads);
+        assert_eq!(result["resultType"], "complete");
+        let text = result["content"][0]["text"]
+            .as_str()
+            .expect("replacement has text content");
+        assert!(text.contains("response_too_large"), "got: {text}");
+        assert_eq!(
+            result["_meta"]["io.modelcontextprotocol/serverInfo"],
+            expected_server_info()
+        );
+    }
+
+    #[tokio::test]
+    async fn tools_call_result_serializes_rhood_server_info_metadata() {
+        let service = mcp_service(false);
+        let _ = post(&service, initialize(V_MODERN), None, None).await;
+        let (status, _, payloads) = post(
+            &service,
+            modern_tools_call_with_arguments(
+                "place_stock_order",
+                json!({
+                    "symbol": "F",
+                    "side": "buy",
+                    "quantity": 1,
+                    "order_type": "market",
+                    "time_in_force": "gfd"
+                }),
+            ),
+            None,
+            Some(V_MODERN),
+        )
+        .await;
+
+        assert!(
+            status.is_success(),
+            "tools/call failed: {status} {payloads:?}"
+        );
+        let result = result_of(&payloads);
+        assert_eq!(result["resultType"], "input_required");
+        assert_eq!(
+            result["_meta"]["io.modelcontextprotocol/serverInfo"],
+            expected_server_info()
         );
     }
 

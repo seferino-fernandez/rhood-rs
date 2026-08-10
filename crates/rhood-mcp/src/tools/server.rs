@@ -4,7 +4,8 @@ use axum::http::request::Parts;
 use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::model::{
     CacheScope, CallToolRequestParams, CallToolResponse, ErrorCode, Implementation,
-    InitializeRequestParams, PaginatedRequestParams, ProtocolVersion, ServerCapabilities, Tool,
+    InitializeRequestParams, MetaObject, PaginatedRequestParams, ProtocolVersion,
+    ServerCapabilities, Tool,
 };
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
@@ -17,6 +18,21 @@ use crate::tools::schema::{close_object_map, enforce_response_budget};
 
 use super::handler::RhoodTools;
 use super::types::WRITE_TOOLS;
+
+const SERVER_INFO_META_KEY: &str = "io.modelcontextprotocol/serverInfo";
+
+/// Adds the authoritative rhood-mcp identity to a tool result's existing metadata.
+fn insert_server_info(meta: &mut Option<MetaObject>, server_info: &Implementation) {
+    #[expect(
+        clippy::expect_used,
+        reason = "Implementation contains only infallibly serializable fields"
+    )]
+    let server_info = serde_json::to_value(server_info)
+        .expect("rhood-mcp server information must serialize to JSON");
+    meta.get_or_insert_default()
+        .0
+        .insert(SERVER_INFO_META_KEY.to_string(), server_info);
+}
 
 /// Hardens a tool's advertised schemas in place: closes the input schema and,
 /// when present, the output schema (sets `additionalProperties: false` and an
@@ -170,16 +186,28 @@ impl ServerHandler for RhoodTools {
             return Err(error);
         }
         let tool_name = request.name.to_string();
+        let server_info = self.get_info().server_info;
         let tool_call_context = ToolCallContext::new(self, request, context);
         match self.tool_router.call(tool_call_context).await {
             Ok(CallToolResponse::Complete(result)) => {
                 tracing::debug!(tool = %tool_name, "call_tool succeeded");
-                Ok(enforce_response_budget(result, self.max_response_bytes).into())
+                let mut result = enforce_response_budget(result, self.max_response_bytes);
+                insert_server_info(&mut result.meta, &server_info);
+                Ok(result.into())
             }
-            // `InputRequired` (MRTR) and `Task` carry no tool payload to size, so
-            // they pass through untouched. The wildcard is required because
-            // `CallToolResponse` is `#[non_exhaustive]`, and passing future
-            // variants through unmodified is also the correct behavior.
+            // `InputRequired` (MRTR) and `Task` carry no tool payload to size.
+            Ok(CallToolResponse::InputRequired(mut result)) => {
+                tracing::debug!(tool = %tool_name, "call_tool returned input required");
+                insert_server_info(&mut result.meta, &server_info);
+                Ok(result.into())
+            }
+            Ok(CallToolResponse::Task(mut result)) => {
+                tracing::debug!(tool = %tool_name, "call_tool returned task");
+                insert_server_info(&mut result.meta, &server_info);
+                Ok(result.into())
+            }
+            // `CallToolResponse` is `#[non_exhaustive]`; future variants retain
+            // their SDK-defined behavior until this boundary understands them.
             Ok(other) => {
                 tracing::debug!(tool = %tool_name, "call_tool returned a non-terminal response");
                 Ok(other)
@@ -207,10 +235,17 @@ mod tests {
 
     use axum::http::Request;
     use rhood_core::{RhoodConfig, RobinhoodClient};
-    use rmcp::{Peer, RoleServer, ServerHandler};
+    use rmcp::{
+        Peer, RoleServer, ServerHandler,
+        model::{
+            CallToolResult, CreateTaskResult, InputRequiredResult, MetaObject, Task, TaskStatus,
+        },
+    };
+    use serde_json::{Value, json};
 
     use super::{
-        OAuthAuthenticated, OAuthPrincipal, Parts, RhoodTools, oauth_write_scope_error_for_parts,
+        Implementation, OAuthAuthenticated, OAuthPrincipal, Parts, RhoodTools,
+        SERVER_INFO_META_KEY, insert_server_info, oauth_write_scope_error_for_parts,
     };
     use crate::config::McpConfig;
 
@@ -232,6 +267,51 @@ mod tests {
             parts.extensions.insert(principal);
         }
         parts
+    }
+
+    fn meta_with_marker(marker: &str) -> Option<MetaObject> {
+        Some(
+            serde_json::from_value(json!({
+                "unrelated": marker,
+                SERVER_INFO_META_KEY: { "name": "not-rhood-mcp" }
+            }))
+            .expect("test metadata deserializes"),
+        )
+    }
+
+    fn assert_server_info(meta: &Option<MetaObject>, marker: &str, server_info: &Implementation) {
+        let meta: Value = serde_json::to_value(meta).expect("metadata serializes");
+        assert_eq!(meta["unrelated"], marker);
+        assert_eq!(
+            meta[SERVER_INFO_META_KEY],
+            serde_json::to_value(server_info).expect("server info serializes")
+        );
+    }
+
+    #[test]
+    fn every_tool_result_variant_carries_authoritative_server_info() {
+        let server_info = tools_with(false).get_info().server_info;
+
+        let mut complete = CallToolResult::default();
+        complete.meta = meta_with_marker("complete");
+        insert_server_info(&mut complete.meta, &server_info);
+        assert_server_info(&complete.meta, "complete", &server_info);
+
+        let mut input_required = InputRequiredResult::from_request_state("state");
+        input_required.meta = meta_with_marker("input-required");
+        insert_server_info(&mut input_required.meta, &server_info);
+        assert_server_info(&input_required.meta, "input-required", &server_info);
+
+        let task = Task::new(
+            "task-id",
+            TaskStatus::Working,
+            "2026-08-10T00:00:00Z",
+            "2026-08-10T00:00:00Z",
+        );
+        let mut task = CreateTaskResult::new(task);
+        task.meta = meta_with_marker("task");
+        insert_server_info(&mut task.meta, &server_info);
+        assert_server_info(&task.meta, "task", &server_info);
     }
 
     #[test]
