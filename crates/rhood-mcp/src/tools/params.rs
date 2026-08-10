@@ -108,14 +108,14 @@ pub struct PlaceStockOrderParams {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CancelOrderParams {
-    /// The order ID to cancel
+    /// The order ID to cancel - call get_open_orders first to discover valid IDs.
     pub order_id: String,
 }
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CancelOptionOrderParams {
-    /// The option order ID to cancel
+    /// The option order ID to cancel - call get_open_option_orders first to discover valid IDs.
     pub order_id: String,
 }
 
@@ -322,7 +322,7 @@ impl From<UpdatableRecurringState> for RecurringState {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateRecurringInvestmentParams {
-    /// Schedule ID to update
+    /// Schedule ID to update - call get_recurring_investments first to discover valid IDs.
     pub schedule_id: String,
     /// New dollar amount (optional)
     #[schemars(range(min = 0.0))]
@@ -339,7 +339,7 @@ pub struct UpdateRecurringInvestmentParams {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CancelRecurringInvestmentParams {
-    /// Schedule ID to cancel
+    /// Schedule ID to cancel - call get_recurring_investments first to discover valid IDs.
     pub schedule_id: String,
 }
 
@@ -525,6 +525,40 @@ mod tests {
             json["properties"]["strike_price"].get("minimum").is_some(),
             "strike_price must declare a minimum"
         );
+    }
+
+    #[test]
+    fn opaque_id_schema_descriptions_name_discovery_tools() {
+        let cases = [
+            (
+                schemars::schema_for!(UpdateRecurringInvestmentParams),
+                "schedule_id",
+                "Schedule ID to update - call get_recurring_investments first to discover valid IDs.",
+            ),
+            (
+                schemars::schema_for!(CancelRecurringInvestmentParams),
+                "schedule_id",
+                "Schedule ID to cancel - call get_recurring_investments first to discover valid IDs.",
+            ),
+            (
+                schemars::schema_for!(CancelOrderParams),
+                "order_id",
+                "The order ID to cancel - call get_open_orders first to discover valid IDs.",
+            ),
+            (
+                schemars::schema_for!(CancelOptionOrderParams),
+                "order_id",
+                "The option order ID to cancel - call get_open_option_orders first to discover valid IDs.",
+            ),
+        ];
+
+        for (schema, field, expected_description) in cases {
+            let json = serde_json::to_value(&schema).unwrap();
+            assert_eq!(
+                json["properties"][field]["description"], expected_description,
+                "schema description for {field}"
+            );
+        }
     }
 
     #[test]
