@@ -101,20 +101,17 @@ A few representative tools:
 | `place_stock_order` | Request confirmation; the same tool submits after acceptance |
 | `cancel_order`      | Cancel an open stock order                                   |
 
-For the live tool list, call MCP `tools/list` against the running server. Order placement uses MCP elicitation: a `place_*` call returns an order summary asking the human to confirm; after acceptance, the client retries the same call with the confirmation response, which submits the order. Read-only mode (default) hides write tools.
+For the live tool list, page through MCP `tools/list` against the running server. Each response contains at most 20 definitions; pass `nextCursor` back as `cursor` until it is absent. Order placement uses MCP elicitation: a `place_*` call returns an order summary asking the human to confirm; after acceptance, the client retries the same call with the confirmation response, which submits the order. Read-only mode (default) hides write tools.
 
 ## Testing
 
 ```bash
-cargo test
-cargo test -p rhood-core
+just verify
 ```
 
-or:
-
-```bash
-just test
-```
+The verification gate checks formatting, all targets and features, strict Clippy warnings,
+and the full nextest suite. Use `cargo test -p rhood-core`, `cargo test -p rhood-cli`, or
+`cargo test -p rhood-mcp` for focused development.
 
 ## License
 

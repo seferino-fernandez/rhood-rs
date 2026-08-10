@@ -17,3 +17,7 @@ target/
 .env.development
 .env.production
 config.toml
+
+# Local planning documents
+/docs/BACKLOG.md
+/docs/adr/
