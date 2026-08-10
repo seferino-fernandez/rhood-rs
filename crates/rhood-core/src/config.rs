@@ -298,6 +298,31 @@ impl Default for LogConfig {
     }
 }
 
+/// Rejects a secret-bearing file that grants any group or other access.
+///
+/// On non-Unix platforms, filesystem permission bits are not portable, so
+/// this check is intentionally a no-op.
+pub fn ensure_secret_file_permissions(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let mode = std::fs::metadata(path)?.permissions().mode() & 0o777;
+        if mode & 0o077 != 0 {
+            return Err(RhoodError::InvalidParameter(format!(
+                "Secret-bearing file {} has insecure permissions {mode:04o}; run `chmod 600 {}` to restrict access",
+                path.display(),
+                path.display()
+            )));
+        }
+    }
+
+    #[cfg(not(unix))]
+    let _ = path;
+
+    Ok(())
+}
+
 fn read_secret_file(path: &str, field_name: &str) -> Result<String> {
     let p = Path::new(path);
     if !p.exists() {
@@ -305,6 +330,7 @@ fn read_secret_file(path: &str, field_name: &str) -> Result<String> {
             "Secret file not found: {path} (from {field_name})"
         )));
     }
+    ensure_secret_file_permissions(p)?;
     std::fs::read_to_string(p)
         .map(|contents| contents.trim().to_string())
         .map_err(|e| {
@@ -394,8 +420,8 @@ impl RhoodConfig {
         let explicit = path.is_some();
         let file_path = Self::resolve_path(path, env);
 
-        let mut config = match file_path {
-            Some(ref p) if p.exists() => {
+        let mut config = match file_path.as_deref() {
+            Some(p) if p.exists() => {
                 let contents = std::fs::read_to_string(p)?;
                 toml::from_str::<RhoodConfig>(&contents).map_err(|error| {
                     RhoodError::InvalidParameter(format!("Invalid config TOML: {error}"))
@@ -409,6 +435,12 @@ impl RhoodConfig {
             }
             _ => RhoodConfig::default(),
         };
+
+        if config.contains_inline_secrets()
+            && let Some(config_path) = file_path.as_deref()
+        {
+            ensure_secret_file_permissions(config_path)?;
+        }
 
         config.apply_env_overrides(env);
         config.resolve_secret_files()?;
@@ -616,6 +648,12 @@ impl RhoodConfig {
         Ok(())
     }
 
+    fn contains_inline_secrets(&self) -> bool {
+        self.auth.password.is_some()
+            || self.auth.mfa_secret.is_some()
+            || self.auth.device_token.is_some()
+    }
+
     /// Restores invariants after in-place mutation of configuration fields.
     ///
     /// Expands a leading `~` in [`auth.token_cache_path`](AuthConfig::token_cache_path)
@@ -640,6 +678,14 @@ mod tests {
     use super::*;
     use secrecy::ExposeSecret;
     use std::io::Write as _;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
+    #[cfg(unix)]
+    fn write_file_with_mode(path: &Path, contents: &str, mode: u32) -> std::io::Result<()> {
+        std::fs::write(path, contents)?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+    }
 
     /// Expose an `Option<SecretString>` as `Option<&str>` for test assertions.
     fn expose_secret_opt(secret: &Option<SecretString>) -> Option<&str> {
@@ -820,6 +866,65 @@ level = "warn"
         assert_eq!(cfg.log.level, "warn");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn owner_only_secret_config_file_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        write_file_with_mode(&config_path, "[auth]\npassword = \"hunter2\"\n", 0o600).unwrap();
+
+        let config = RhoodConfig::load_with_env(Some(&config_path), &MapEnv::new()).unwrap();
+
+        assert_eq!(expose_secret_opt(&config.auth.password), Some("hunter2"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn group_readable_secret_config_file_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        write_file_with_mode(&config_path, "[auth]\npassword = \"hunter2\"\n", 0o640).unwrap();
+
+        let error = RhoodConfig::load_with_env(Some(&config_path), &MapEnv::new())
+            .err()
+            .unwrap();
+        let message = error.to_string();
+
+        assert!(message.contains(&config_path.display().to_string()));
+        assert!(message.contains("0640"));
+        assert!(message.contains("chmod 600"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn group_readable_secret_file_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret_path = dir.path().join("password.txt");
+        write_file_with_mode(&secret_path, "hunter2\n", 0o640).unwrap();
+        let toml = format!("[auth]\npassword_file = \"{}\"\n", secret_path.display());
+
+        let error = RhoodConfig::from_toml_with_env(&toml, &MapEnv::new())
+            .err()
+            .unwrap();
+        let message = error.to_string();
+
+        assert!(message.contains(&secret_path.display().to_string()));
+        assert!(message.contains("0640"));
+        assert!(message.contains("chmod 600"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn group_readable_secret_free_config_file_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        write_file_with_mode(&config_path, "[auth]\nusername = \"alice\"\n", 0o644).unwrap();
+
+        let config = RhoodConfig::load_with_env(Some(&config_path), &MapEnv::new()).unwrap();
+
+        assert_eq!(config.auth.username.as_deref(), Some("alice"));
+    }
+
     #[test]
     fn env_vars_override_toml() {
         let env = MapEnv::new()
@@ -923,6 +1028,8 @@ phoenix_url = "https://phoenix.robinhood.com/"
         let dir = tempfile::tempdir().unwrap();
         let secret_path = dir.path().join("password.txt");
         std::fs::write(&secret_path, "  hunter2\n  ").unwrap();
+        #[cfg(unix)]
+        std::fs::set_permissions(&secret_path, std::fs::Permissions::from_mode(0o600)).unwrap();
 
         let toml = format!(
             r#"

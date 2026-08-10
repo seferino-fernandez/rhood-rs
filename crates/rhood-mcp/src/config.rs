@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use rhood_core::config::resolve_secret;
+use rhood_core::config::{ensure_secret_file_permissions, resolve_secret};
 use rhood_core::env::{Env, SystemEnv, env_non_empty, env_non_empty_u64};
 use secrecy::SecretString;
 use serde::Deserialize;
@@ -205,8 +205,8 @@ impl ServerConfig {
         let explicit = path.is_some();
         let file_path = Self::resolve_path(path, env);
 
-        let mut config: ServerConfig = match file_path {
-            Some(ref path) if path.exists() => {
+        let mut config: ServerConfig = match file_path.as_deref() {
+            Some(path) if path.exists() => {
                 let contents = std::fs::read_to_string(path)?;
                 toml::from_str(&contents)
                     .map_err(|err| anyhow::anyhow!("Invalid config TOML: {err}"))?
@@ -221,6 +221,12 @@ impl ServerConfig {
             }
             _ => ServerConfig::default(),
         };
+
+        if config.contains_inline_secrets()
+            && let Some(config_path) = file_path.as_deref()
+        {
+            ensure_secret_file_permissions(config_path)?;
+        }
 
         config
             .core
@@ -324,15 +330,40 @@ impl ServerConfig {
         )?;
         Ok(())
     }
+
+    fn contains_inline_secrets(&self) -> bool {
+        self.core.auth.password.is_some()
+            || self.core.auth.mfa_secret.is_some()
+            || self.core.auth.device_token.is_some()
+            || self.mcp.token.is_some()
+            || self.mcp.oauth_pin.is_some()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use secrecy::ExposeSecret;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    #[cfg(unix)]
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     fn expose_secret_opt(secret: &Option<SecretString>) -> Option<&str> {
         secret.as_ref().map(|val| val.expose_secret())
+    }
+
+    #[cfg(unix)]
+    fn create_test_directory() -> std::io::Result<std::path::PathBuf> {
+        static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
+
+        let sequence = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "rhood-mcp-config-permission-test-{}-{sequence}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&path)?;
+        Ok(path)
     }
 
     #[test]
@@ -521,5 +552,25 @@ max_response_bytes = 65536
         let config = ServerConfig::default();
         assert!(config.mcp.token.is_none());
         assert!(config.mcp.oauth_pin.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn group_readable_mcp_secret_config_file_is_rejected() {
+        let directory = create_test_directory().unwrap();
+        let config_path = directory.join("config.toml");
+        std::fs::write(&config_path, "[mcp]\ntoken = \"secret-token\"\n").unwrap();
+        std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o640)).unwrap();
+
+        let error =
+            ServerConfig::load_with_env(Some(&config_path), &rhood_core::env::MapEnv::new())
+                .err()
+                .unwrap();
+        let message = error.to_string();
+
+        assert!(message.contains(&config_path.display().to_string()));
+        assert!(message.contains("0640"));
+        assert!(message.contains("chmod 600"));
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }
