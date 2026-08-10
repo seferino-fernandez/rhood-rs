@@ -767,7 +767,10 @@ mod endpoint_tests {
             .await;
         Mock::given(method("POST"))
             .and(path("/orders/stock-failure/cancel/"))
-            .respond_with(ResponseTemplate::new(500).set_body_string("stock cancellation failed"))
+            .respond_with(
+                ResponseTemplate::new(500)
+                    .set_body_string(r#"{"detail":"stock cancellation failed"}"#),
+            )
             .expect(1)
             .mount(&server)
             .await;
@@ -824,7 +827,10 @@ mod endpoint_tests {
             .await;
         Mock::given(method("POST"))
             .and(path("/options/orders/option-failure/cancel/"))
-            .respond_with(ResponseTemplate::new(500).set_body_string("option cancellation failed"))
+            .respond_with(
+                ResponseTemplate::new(500)
+                    .set_body_string(r#"{"detail":"option cancellation failed"}"#),
+            )
             .expect(1)
             .mount(&server)
             .await;
