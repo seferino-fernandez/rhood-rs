@@ -356,7 +356,7 @@ mod tests {
 mod wire_tests {
     use super::*;
     use crate::middleware::oauth::{OAuthAuthenticated, OAuthPrincipal};
-    use crate::tools::WRITE_TOOLS;
+    use crate::tools::{TOOLS_LIST_PAGE_SIZE, WRITE_TOOLS};
     use axum::body::Body;
     use rhood_core::{RhoodConfig, RobinhoodClient};
     use rmcp::{
@@ -646,11 +646,19 @@ mod wire_tests {
     }
 
     fn modern_tools_list() -> Value {
+        modern_tools_list_with_cursor(None)
+    }
+
+    fn modern_tools_list_with_cursor(cursor: Option<&str>) -> Value {
+        let mut params = json!({ "_meta": modern_meta() });
+        if let Some(cursor) = cursor {
+            params["cursor"] = Value::String(cursor.to_string());
+        }
         json!({
             "jsonrpc": "2.0",
             "id": 2,
             "method": "tools/list",
-            "params": { "_meta": modern_meta() }
+            "params": params
         })
     }
 
@@ -722,6 +730,34 @@ mod wire_tests {
             .collect()
     }
 
+    async fn all_tool_names(
+        service: &StreamableHttpService<RhoodTools, LocalSessionManager>,
+    ) -> Vec<String> {
+        let mut names = Vec::new();
+        let mut cursor = None;
+        for _ in 0..10 {
+            let (status, _, payloads) = post(
+                service,
+                modern_tools_list_with_cursor(cursor.as_deref()),
+                None,
+                Some(V_MODERN),
+            )
+            .await;
+            assert!(
+                status.is_success(),
+                "tools/list page failed: {status} {payloads:?}"
+            );
+            let result = result_of(&payloads);
+            names.extend(tool_names(&result));
+            cursor = result["nextCursor"].as_str().map(str::to_string);
+            if cursor.is_none() {
+                break;
+            }
+        }
+        assert!(cursor.is_none(), "tools/list pagination must terminate");
+        names
+    }
+
     /// Per SEP-2567 the 2026-07-28 protocol removed sessions, so a modern client
     /// is served statelessly.
     #[tokio::test]
@@ -770,9 +806,33 @@ mod wire_tests {
         assert_eq!(result["resultType"], "complete");
         assert_eq!(result["ttlMs"], 300_000);
         assert_eq!(result["cacheScope"], "private");
+        assert_eq!(tool_names(&result).len(), TOOLS_LIST_PAGE_SIZE);
+        assert!(result["nextCursor"].as_str().is_some());
+    }
+
+    #[tokio::test]
+    async fn malformed_tools_list_cursor_is_an_invalid_params_error() {
+        let service = mcp_service(false);
+        let _ = post(&service, initialize(V_MODERN), None, None).await;
+        let (status, _, payloads) = post(
+            &service,
+            modern_tools_list_with_cursor(Some("not-a-cursor")),
+            None,
+            Some(V_MODERN),
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            axum::http::StatusCode::BAD_REQUEST,
+            "invalid params must reject the HTTP request: {payloads:?}"
+        );
+        let error = error_of(&payloads);
+        assert_eq!(error["code"], -32602);
         assert!(
-            !tool_names(&result).is_empty(),
-            "a read-write server must advertise tools"
+            error["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("pass next_cursor"))
         );
     }
 
@@ -807,9 +867,7 @@ mod wire_tests {
     async fn read_only_server_advertises_no_write_tools() {
         let service = mcp_service(true);
         let _ = post(&service, initialize(V_MODERN), None, None).await;
-        let (_, _, payloads) = post(&service, modern_tools_list(), None, Some(V_MODERN)).await;
-
-        let names = tool_names(&result_of(&payloads));
+        let names = all_tool_names(&service).await;
         assert!(
             !names.is_empty(),
             "read-only mode must still advertise read tools"
@@ -828,9 +886,7 @@ mod wire_tests {
     async fn read_write_server_advertises_every_write_tool() {
         let service = mcp_service(false);
         let _ = post(&service, initialize(V_MODERN), None, None).await;
-        let (_, _, payloads) = post(&service, modern_tools_list(), None, Some(V_MODERN)).await;
-
-        let names = tool_names(&result_of(&payloads));
+        let names = all_tool_names(&service).await;
         for write_tool in WRITE_TOOLS {
             assert!(
                 names.iter().any(|name| name == write_tool),

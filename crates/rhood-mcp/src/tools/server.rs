@@ -14,6 +14,7 @@ use rmcp::{
 };
 
 use crate::middleware::oauth::{OAuthAuthenticated, OAuthPrincipal};
+use crate::tools::pagination::CollectionPager;
 use crate::tools::schema::{close_object_map, enforce_response_budget};
 
 use super::handler::RhoodTools;
@@ -21,6 +22,11 @@ use super::rate_limit::{FallbackPrincipal, ToolClass};
 use super::types::WRITE_TOOLS;
 
 const SERVER_INFO_META_KEY: &str = "io.modelcontextprotocol/serverInfo";
+// Tool definitions carry full JSON schemas, so 20 materially bounds each
+// response while keeping discovery to a handful of round trips.
+pub(crate) const TOOLS_LIST_PAGE_SIZE: usize = 20;
+const TOOLS_LIST_READ_ONLY_SCOPE: &str = "tools/list:read-only";
+const TOOLS_LIST_WRITABLE_SCOPE: &str = "tools/list:writable";
 
 /// Adds the authoritative rhood-mcp identity to a tool result's existing metadata.
 fn insert_server_info(meta: &mut Option<MetaObject>, server_info: &Implementation) {
@@ -169,7 +175,7 @@ impl ServerHandler for RhoodTools {
 
     async fn list_tools(
         &self,
-        _request: Option<PaginatedRequestParams>,
+        request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
         tracing::debug!(read_only = self.read_only, "list_tools called");
@@ -186,6 +192,20 @@ impl ServerHandler for RhoodTools {
             close_tool_schemas(tool);
         }
 
+        let scope = if self.read_only {
+            TOOLS_LIST_READ_ONLY_SCOPE
+        } else {
+            TOOLS_LIST_WRITABLE_SCOPE
+        };
+        let cursor = request
+            .as_ref()
+            .and_then(|request| request.cursor.as_deref());
+        let pager = CollectionPager::new(scope, cursor, Some(TOOLS_LIST_PAGE_SIZE))
+            .map_err(|message| McpError::invalid_params(message, None))?;
+        let (tools, next_cursor) = pager
+            .page(tools)
+            .map_err(|message| McpError::invalid_params(message, None))?;
+
         // SEP-2549 cache hints. The tool set is materialized from the router at
         // compile time and filtered by a `read_only` flag fixed at startup, so it
         // cannot change without a restart; a short TTL absorbs a client's startup
@@ -195,9 +215,11 @@ impl ServerHandler for RhoodTools {
         // from a shared cache to the wrong caller. It is invariant across callers
         // today, but the OAuth layer already distinguishes read and write scopes,
         // so per-token tool visibility is a short step away.
-        Ok(ListToolsResult::with_all_items(tools)
+        let mut result = ListToolsResult::with_all_items(tools)
             .with_ttl_ms(300_000)
-            .with_cache_scope(CacheScope::Private))
+            .with_cache_scope(CacheScope::Private);
+        result.next_cursor = next_cursor;
+        Ok(result)
     }
 
     async fn call_tool(
@@ -305,18 +327,18 @@ mod tests {
         Peer, RoleServer, ServerHandler,
         handler::server::tool::{ToolRoute, ToolRouter},
         model::{
-            CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock,
-            CreateTaskResult, InputRequiredResult, MetaObject, NumberOrString, Task, TaskStatus,
-            Tool,
+            CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock,
+            CreateTaskResult, InputRequiredResult, ListToolsResult, MetaObject, NumberOrString,
+            PaginatedRequestParams, Task, TaskStatus, Tool,
         },
         service::{RequestContext, RunningService, serve_directly},
     };
     use serde_json::{Value, json};
 
     use super::{
-        FallbackPrincipal, Implementation, OAuthAuthenticated, OAuthPrincipal, Parts, RhoodTools,
-        SERVER_INFO_META_KEY, insert_server_info, oauth_write_scope_error_for_parts,
-        rate_limit_principal_for_parts,
+        FallbackPrincipal, Implementation, McpError, OAuthAuthenticated, OAuthPrincipal, Parts,
+        RhoodTools, SERVER_INFO_META_KEY, TOOLS_LIST_PAGE_SIZE, insert_server_info,
+        oauth_write_scope_error_for_parts, rate_limit_principal_for_parts,
     };
     use crate::config::McpConfig;
     use crate::tools::ToolRateLimiter;
@@ -333,6 +355,19 @@ mod tests {
         let rate_limiter =
             ToolRateLimiter::new(&config.rate_limit).expect("default rate limits are valid");
         RhoodTools::new_lazy(client, hook, read_only, &config, rate_limiter)
+    }
+
+    async fn list_page(
+        tools: &RhoodTools,
+        cursor: Option<String>,
+    ) -> Result<ListToolsResult, McpError> {
+        let request =
+            cursor.map(|cursor| PaginatedRequestParams::default().with_cursor(Some(cursor)));
+        let (server_transport, _client_transport) = tokio::io::duplex(4_096);
+        let running: RunningService<RoleServer, RhoodTools> =
+            serve_directly(tools.clone(), server_transport, None);
+        let context = RequestContext::new(NumberOrString::Number(1), running.peer().clone());
+        running.service().list_tools(request, context).await
     }
 
     fn oauth_parts(principal: Option<OAuthPrincipal>) -> Parts {
@@ -387,6 +422,68 @@ mod tests {
         task.meta = meta_with_marker("task");
         insert_server_info(&mut task.meta, &server_info);
         assert_server_info(&task.meta, "task", &server_info);
+    }
+
+    #[tokio::test]
+    async fn list_tools_pages_the_complete_sorted_surface() {
+        let tools = tools_with(false);
+        let expected: Vec<_> = tools
+            .tool_router
+            .list_all()
+            .into_iter()
+            .map(|tool| tool.name.to_string())
+            .collect();
+        let mut actual = Vec::new();
+        let mut page_lengths = Vec::new();
+        let mut cursor = None;
+
+        for _ in 0..10 {
+            let result = list_page(&tools, cursor)
+                .await
+                .expect("each tools/list page succeeds");
+            assert_eq!(result.ttl_ms, Some(300_000));
+            assert_eq!(result.cache_scope, Some(CacheScope::Private));
+            page_lengths.push(result.tools.len());
+            actual.extend(result.tools.into_iter().map(|tool| tool.name.to_string()));
+            cursor = result.next_cursor;
+            if cursor.is_none() {
+                break;
+            }
+        }
+
+        assert_eq!(page_lengths.first(), Some(&TOOLS_LIST_PAGE_SIZE));
+        assert!(
+            page_lengths
+                .iter()
+                .all(|length| *length <= TOOLS_LIST_PAGE_SIZE)
+        );
+        assert_eq!(actual, expected);
+        assert!(
+            cursor.is_none(),
+            "the final page must terminate the sequence"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_tools_rejects_malformed_and_cross_surface_cursors() {
+        let writable = tools_with(false);
+        let malformed = list_page(&writable, Some("not-a-cursor".to_string()))
+            .await
+            .expect_err("malformed cursors must fail");
+        assert_eq!(malformed.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        assert!(malformed.message.contains("pass next_cursor"));
+
+        let writable_cursor = list_page(&writable, None)
+            .await
+            .expect("first writable page succeeds")
+            .next_cursor
+            .expect("writable surface has another page");
+        let read_only = tools_with(true);
+        let mismatched = list_page(&read_only, Some(writable_cursor))
+            .await
+            .expect_err("writable cursors must not address the read-only surface");
+        assert_eq!(mismatched.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        assert!(mismatched.message.contains("does not belong"));
     }
 
     #[test]

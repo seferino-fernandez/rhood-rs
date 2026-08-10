@@ -45,8 +45,8 @@ impl CollectionPager {
         })
     }
 
-    /// Serializes one page while preserving the collection's upstream ordering.
-    pub(super) fn serialize<T: Serialize>(self, items: Vec<T>) -> Result<String, String> {
+    /// Selects one page while preserving the collection's upstream ordering.
+    pub(super) fn page<T>(self, items: Vec<T>) -> Result<(Vec<T>, Option<String>), String> {
         let total = items.len();
         if self.offset > total {
             return Err(
@@ -62,10 +62,13 @@ impl CollectionPager {
             .take(self.limit)
             .collect();
         let next_cursor = (end < total).then(|| encode_cursor(self.scope, end));
-        let page = CollectionPage {
-            items: page_items,
-            next_cursor,
-        };
+        Ok((page_items, next_cursor))
+    }
+
+    /// Serializes one page while preserving the collection's upstream ordering.
+    pub(super) fn serialize<T: Serialize>(self, items: Vec<T>) -> Result<String, String> {
+        let (items, next_cursor) = self.page(items)?;
+        let page = CollectionPage { items, next_cursor };
         serde_json::to_string_pretty(&page).map_err(|error| error.to_string())
     }
 }
