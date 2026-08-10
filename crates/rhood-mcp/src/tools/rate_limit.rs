@@ -263,10 +263,12 @@ impl ToolRateLimiter {
         // A principal without an entry holds a full bucket; entries are only
         // materialized once a call is admitted, so rejected traffic cannot
         // grow the map.
-        let principal_available = state.principals.get(principal).map_or(
-            quota.per_principal.capacity,
-            |buckets| buckets.for_class(class).available(quota.per_principal, now),
-        );
+        let principal_available = state
+            .principals
+            .get(principal)
+            .map_or(quota.per_principal.capacity, |buckets| {
+                buckets.for_class(class).available(quota.per_principal, now)
+            });
         let global_limited = global_available < 1.0;
         let principal_limited = principal_available < 1.0;
 
@@ -276,14 +278,18 @@ impl ToolRateLimiter {
                 .for_class_mut(class)
                 .consume(global_available, now);
             if let Some(buckets) = state.principals.get_mut(principal) {
-                buckets.for_class_mut(class).consume(principal_available, now);
+                buckets
+                    .for_class_mut(class)
+                    .consume(principal_available, now);
             } else {
                 let mut buckets = ClassBuckets::full(
                     self.quotas.read.per_principal,
                     self.quotas.write.per_principal,
                     now,
                 );
-                buckets.for_class_mut(class).consume(principal_available, now);
+                buckets
+                    .for_class_mut(class)
+                    .consume(principal_available, now);
                 state.principals.insert(principal.to_string(), buckets);
             }
             return Ok(None);

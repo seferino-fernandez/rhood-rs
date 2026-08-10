@@ -663,8 +663,10 @@ global_burst = 25
     /// defaults the operator believes they changed.
     #[test]
     fn malformed_numeric_environment_override_fails_startup() {
-        let env = rhood_core::env::MapEnv::new()
-            .with(ENV_MCP_RATE_LIMIT_READ_PER_PRINCIPAL_PER_MINUTE, "unlimited");
+        let env = rhood_core::env::MapEnv::new().with(
+            ENV_MCP_RATE_LIMIT_READ_PER_PRINCIPAL_PER_MINUTE,
+            "unlimited",
+        );
         let mut config = ServerConfig::default();
         let error = config
             .apply_mcp_env_overrides(&env)
