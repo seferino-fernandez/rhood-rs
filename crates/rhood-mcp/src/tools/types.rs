@@ -37,28 +37,14 @@ pub fn format_tool_error(err: &rhood_core::RhoodError) -> String {
 /// Turns a raw upstream error body into a clean, LLM-friendly message.
 fn normalize_api_body(status: u16, body: &str) -> String {
     let trimmed = body.trim();
-    // Named missing instruments/symbols.
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
-        if let Some(missing) = value.get("missing_instruments").and_then(|m| m.as_array()) {
-            let names: Vec<String> = missing
-                .iter()
-                .filter_map(|name| name.as_str().map(str::to_string))
-                .collect();
-            return format!("unknown symbol(s): {}", names.join(", "));
-        }
-        if let Some(detail) = value
-            .get("message")
-            .or_else(|| value.get("detail"))
-            .and_then(|detail_value| detail_value.as_str())
-        {
-            return format!("API error ({status}): {detail}");
-        }
-        if let Some(detail) = value
-            .get("error")
-            .and_then(|error| error.get("message"))
-            .and_then(|error_value| error_value.as_str())
-        {
-            return format!("API error ({status}): {detail}");
+    if let Some(detail) = rhood_core::error::extract_api_error_detail(trimmed) {
+        match detail {
+            rhood_core::error::ApiErrorDetail::MissingInstruments(symbols) => {
+                return format!("unknown symbol(s): {}", symbols.join(", "));
+            }
+            rhood_core::error::ApiErrorDetail::Message(message) => {
+                return format!("API error ({status}): {message}");
+            }
         }
     }
     // HTML error page -> don't dump markup.
@@ -110,5 +96,38 @@ mod tests {
         });
         assert_eq!(m, "API error (400): invalid argument");
         assert!(!m.contains('{'), "should not leak raw JSON: {m}");
+    }
+
+    #[test]
+    fn uses_detail_when_missing_instruments_is_empty() {
+        let m = msg(RhoodError::Api {
+            status: 400,
+            message: r#"{"missing_instruments":[],"detail":"insufficient buying power"}"#.into(),
+        });
+        assert_eq!(m, "API error (400): insufficient buying power");
+    }
+
+    #[test]
+    fn extracts_top_level_detail_and_message() {
+        let detail = msg(RhoodError::Api {
+            status: 403,
+            message: r#"{"detail":"Permission denied"}"#.into(),
+        });
+        assert_eq!(detail, "API error (403): Permission denied");
+
+        let message = msg(RhoodError::Api {
+            status: 404,
+            message: r#"{"message":"futures contract not found"}"#.into(),
+        });
+        assert_eq!(message, "API error (404): futures contract not found");
+    }
+
+    #[test]
+    fn preserves_non_json_body() {
+        let m = msg(RhoodError::Api {
+            status: 500,
+            message: "Internal server error".into(),
+        });
+        assert_eq!(m, "API error (500): Internal server error");
     }
 }

@@ -5,28 +5,66 @@
 
 use thiserror::Error;
 
+/// Structured diagnostic content extracted from a JSON API error body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApiErrorDetail {
+    /// Instrument symbols the API did not recognize.
+    MissingInstruments(Vec<String>),
+    /// A human-readable diagnostic supplied by the API.
+    Message(String),
+}
+
+/// Extracts a recognized diagnostic from a JSON API error body.
+///
+/// Non-empty `missing_instruments` takes precedence, followed by top-level
+/// `message`, top-level `detail`, and nested `error.message`. Returns `None`
+/// when the body is not JSON or contains none of those diagnostics.
+pub fn extract_api_error_detail(body: &str) -> Option<ApiErrorDetail> {
+    let parsed = serde_json::from_str::<serde_json::Value>(body).ok()?;
+
+    let missing_instruments = parsed
+        .get("missing_instruments")
+        .and_then(serde_json::Value::as_array)
+        .map(|missing| {
+            missing
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .filter(|missing| !missing.is_empty());
+    if let Some(missing_instruments) = missing_instruments {
+        return Some(ApiErrorDetail::MissingInstruments(missing_instruments));
+    }
+
+    parsed
+        .get("message")
+        .or_else(|| parsed.get("detail"))
+        .and_then(serde_json::Value::as_str)
+        .map(|message| ApiErrorDetail::Message(message.to_owned()))
+        .or_else(|| {
+            parsed
+                .get("error")
+                .and_then(|error| error.get("message"))
+                .and_then(serde_json::Value::as_str)
+                .map(|message| ApiErrorDetail::Message(message.to_owned()))
+        })
+}
+
 /// Formats an API error for display.
 ///
 /// If the body is JSON containing an allowlisted diagnostic field, extracts it
 /// for a cleaner user-facing message. Otherwise falls back to the sanitized
 /// diagnostic message.
 fn display_api_error(status: u16, body: &str) -> String {
-    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(body) {
-        // Try common error shapes: {"message": "..."}, {"detail": "..."}, {"error": {"message": "..."}}
-        if let Some(msg) = parsed
-            .get("message")
-            .or_else(|| parsed.get("detail"))
-            .and_then(|val| val.as_str())
-        {
-            return format!("API error ({status}): {msg}");
-        }
-        if let Some(msg) = parsed
-            .get("error")
-            .and_then(|err| err.get("message"))
-            .and_then(|val| val.as_str())
-        {
-            return format!("API error ({status}): {msg}");
-        }
+    if let Some(detail) = extract_api_error_detail(body) {
+        let message = match detail {
+            ApiErrorDetail::MissingInstruments(symbols) => {
+                format!("unknown symbol(s): {}", symbols.join(", "))
+            }
+            ApiErrorDetail::Message(message) => message,
+        };
+        return format!("API error ({status}): {message}");
     }
     format!("API error ({status}): {body}")
 }
@@ -197,6 +235,30 @@ mod tests {
             message: r#"{"detail":"Permission denied"}"#.into(),
         };
         assert_eq!(err.to_string(), "API error (403): Permission denied");
+    }
+
+    #[test]
+    fn api_error_display_extracts_missing_instruments() {
+        let err = RhoodError::Api {
+            status: 404,
+            message: r#"{"missing_instruments":["NOTAREALSYM"]}"#.into(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "API error (404): unknown symbol(s): NOTAREALSYM"
+        );
+    }
+
+    #[test]
+    fn api_error_display_uses_detail_when_missing_instruments_is_empty() {
+        let err = RhoodError::Api {
+            status: 400,
+            message: r#"{"missing_instruments":[],"detail":"insufficient buying power"}"#.into(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "API error (400): insufficient buying power"
+        );
     }
 
     #[test]
