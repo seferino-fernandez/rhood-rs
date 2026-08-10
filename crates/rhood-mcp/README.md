@@ -218,15 +218,15 @@ Tools are grouped by domain. The complete authoritative list is what `tools/list
 - **Watchlists** - list, view items, add/remove symbols.
 - **User** - authenticated user profile and day-trade / pattern-day-trader status.
 - **Market** - exchange listings, trading hours (any date or today), and daily movers.
-- **Orders** - staging (`place_stock_order`, `place_option_order`), execution (`confirm_order`), and cancellation (`cancel_order`, `cancel_option_order`).
+- **Orders** - human-confirmed placement (`place_stock_order`, `place_option_order`) and cancellation (`cancel_order`, `cancel_option_order`).
 
 For the live list, call MCP `tools/list` against the running server.
 
 ### Read-only vs. write
 
-Order placement, confirmation, and cancellation are write operations. The server starts in read-only mode by default and write tools are hidden from `tools/list` and rejected on call. Pass `--read-write` or set `read_only = false` in config to enable them.
+Order placement and cancellation are write operations. The server starts in read-only mode by default and write tools are hidden from `tools/list` and rejected on call. Pass `--read-write` or set `read_only = false` in config to enable them.
 
-Order placement uses two-step confirmation: `place_*` stages the order and returns a `pending_order_id`; `confirm_order` then submits it.
+Order placement uses MCP elicitation: a `place_*` call returns an order summary asking the human to confirm; after acceptance, the client retries the same call with the confirmation response, which submits the order.
 
 ## CLI Reference
 
@@ -270,9 +270,9 @@ See [config.toml.example](../../config.toml.example) for all available fields.
 
 ## Read-Only Mode
 
-The server starts in read-only mode by default. Write tools (`place_*_order`, `confirm_order`, `cancel_*_order`) are hidden from tool listings and blocked from execution.
+The server starts in read-only mode by default. Write tools (`place_stock_order`, `place_option_order`, `cancel_order`, `cancel_option_order`, `create_recurring_investment`, `update_recurring_investment`, `cancel_recurring_investment`, `add_to_watchlist`, `remove_from_watchlist`) are hidden from tool listings and blocked from execution.
 
-Pass `--read-write` or set `read_only = false` in config to enable order operations.
+Pass `--read-write` or set `read_only = false` in config to enable write operations.
 
 ## OAuth Flow
 

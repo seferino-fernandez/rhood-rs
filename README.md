@@ -95,11 +95,10 @@ A few representative tools:
 | ------------------- | -------------------------------------- |
 | `get_stock_quotes`  | Current quotes for stock tickers       |
 | `get_portfolio`     | Portfolio summary (equity, cash, etc.) |
-| `place_stock_order` | Stage a stock order for confirmation   |
-| `confirm_order`     | Submit a previously staged order       |
+| `place_stock_order` | Request human confirmation for a stock order |
 | `cancel_order`      | Cancel an open stock order             |
 
-For the live tool list, call MCP `tools/list` against the running server. Order placement is two-step: stage with `place_*`, then submit with `confirm_order`. Read-only mode (default) hides write tools.
+For the live tool list, call MCP `tools/list` against the running server. Order placement uses MCP elicitation: a `place_*` call returns an order summary asking the human to confirm; after acceptance, the client retries the same call with the confirmation response, which submits the order. Read-only mode (default) hides write tools.
 
 ## Testing
 
