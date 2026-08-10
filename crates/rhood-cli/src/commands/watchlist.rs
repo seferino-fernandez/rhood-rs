@@ -77,7 +77,7 @@ pub async fn run(
                         item.volume.map_or_else(String::new, |volume| {
                             #[expect(
                                 clippy::cast_possible_truncation,
-                                reason = "trading volume is a whole-share count in watchlist market data"
+                                reason = "the table intentionally renders upstream f64 volume as an integer; no in-code integrality check is performed"
                             )]
                             let volume = volume as i64;
                             format!("{volume}")

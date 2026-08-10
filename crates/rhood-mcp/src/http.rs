@@ -229,7 +229,7 @@ pub async fn serve(config: &ServerConfig) -> anyhow::Result<()> {
 async fn shutdown_signal(cancellation_token: CancellationToken) {
     #[expect(
         clippy::expect_used,
-        reason = "without a SIGINT handler the server cannot provide its documented graceful shutdown path"
+        reason = "installing the process SIGINT handler is assumed to succeed; no recovery path is implemented"
     )]
     let ctrl_c = async {
         tokio::signal::ctrl_c()
@@ -240,7 +240,7 @@ async fn shutdown_signal(cancellation_token: CancellationToken) {
     #[cfg(unix)]
     #[expect(
         clippy::expect_used,
-        reason = "without a SIGTERM handler Unix deployments cannot provide their documented graceful shutdown path"
+        reason = "installing the Unix SIGTERM handler is assumed to succeed; no recovery path is implemented"
     )]
     let terminate = async {
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
