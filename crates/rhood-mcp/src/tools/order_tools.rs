@@ -17,7 +17,7 @@ use rmcp::{Peer, RoleServer, handler::server::wrapper::Parameters, tool, tool_ro
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::handler::RhoodTools;
+use super::handler::{OrderRedemptionStore, RhoodTools};
 use super::params::*;
 use super::types::format_tool_error;
 use crate::middleware::oauth::{OAuthAuthenticated, OAuthPrincipal};
@@ -307,6 +307,7 @@ fn verify_confirmation(input_responses: Option<InputResponses>) -> Result<(), St
 
 async fn run_order_round<F, Fut>(
     codec: &RequestStateCodec,
+    redemptions: &OrderRedemptionStore,
     ttl: Duration,
     principal: &str,
     tool_name: &str,
@@ -333,6 +334,7 @@ where
     let staged_order = codec
         .open_json_with(&request_state, &binding)
         .map_err(|error| RhoodTools::request_state_error(&error))?;
+    redemptions.consume(&request_state)?;
     let prepared = prepare_order(&staged_order)?;
     let order_id = submit(prepared.request).await?;
     let result = serde_json::json!({
@@ -367,6 +369,7 @@ impl RhoodTools {
         let principal = request_principal(&extensions)?;
         run_order_round(
             &self.request_state_codec,
+            &self.order_redemptions,
             self.order_confirmation_ttl,
             &principal,
             STOCK_ORDER_TOOL,
@@ -411,6 +414,7 @@ impl RhoodTools {
         let principal = request_principal(&extensions)?;
         run_order_round(
             &self.request_state_codec,
+            &self.order_redemptions,
             self.order_confirmation_ttl,
             &principal,
             OPTION_ORDER_TOOL,
@@ -502,7 +506,7 @@ mod tests {
     };
 
     use crate::config::McpConfig;
-    use crate::tools::handler::RhoodTools;
+    use crate::tools::handler::{OrderRedemptionStore, RhoodTools};
 
     use super::{
         CONFIRMATION_REQUEST_ID, OPTION_ORDER_TOOL, OrderRoundRequest, STOCK_ORDER_TOOL,
@@ -521,7 +525,9 @@ mod tests {
                     >
             },
         );
-        RhoodTools::new_lazy(client, hook, false, &McpConfig::default())
+        let mut tools = RhoodTools::new_lazy(client, hook, false, &McpConfig::default());
+        tools.order_redemptions = Arc::new(OrderRedemptionStore::new(Duration::from_secs(1_200)));
+        tools
     }
 
     fn stock_order() -> PlaceStockOrderParams {
@@ -595,6 +601,7 @@ mod tests {
         let stock_submissions = Arc::clone(&submissions);
         let stock = run_order_round(
             &tools.request_state_codec,
+            &tools.order_redemptions,
             tools.order_confirmation_ttl,
             "principal-a",
             STOCK_ORDER_TOOL,
@@ -609,6 +616,7 @@ mod tests {
         let option_submissions = Arc::clone(&submissions);
         let option = run_order_round(
             &tools.request_state_codec,
+            &tools.order_redemptions,
             tools.order_confirmation_ttl,
             "principal-a",
             OPTION_ORDER_TOOL,
@@ -627,10 +635,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn accepted_retry_submits_exactly_once() {
+    async fn accepted_confirmation_cannot_be_replayed() {
         let tools = tools();
         let staged = run_order_round(
             &tools.request_state_codec,
+            &tools.order_redemptions,
             tools.order_confirmation_ttl,
             "principal-a",
             STOCK_ORDER_TOOL,
@@ -645,12 +654,13 @@ mod tests {
 
         let submitted = run_order_round(
             &tools.request_state_codec,
+            &tools.order_redemptions,
             tools.order_confirmation_ttl,
             "principal-a",
             STOCK_ORDER_TOOL,
             round(
                 StagedOrder::Stock(stock_order()),
-                Some(state),
+                Some(state.clone()),
                 Some(accepted_confirmation()),
             ),
             move |_| async move {
@@ -662,7 +672,141 @@ mod tests {
         .expect("accepted Confirmation submits");
 
         assert!(matches!(submitted, CallToolResponse::Complete(_)));
+        let replay_submissions = Arc::clone(&submissions);
+        let error = run_order_round(
+            &tools.request_state_codec,
+            &tools.order_redemptions,
+            tools.order_confirmation_ttl,
+            "principal-a",
+            STOCK_ORDER_TOOL,
+            round(
+                StagedOrder::Stock(stock_order()),
+                Some(state),
+                Some(accepted_confirmation()),
+            ),
+            move |_| async move {
+                let _previous = replay_submissions.fetch_add(1, Ordering::SeqCst);
+                Ok(Some("duplicate-order-id".to_string()))
+            },
+        )
+        .await
+        .expect_err("an already-used Confirmation must fail closed");
+
+        assert!(error.contains("already used"), "got: {error}");
+        assert!(error.contains("stage a fresh order"), "got: {error}");
         assert_eq!(submissions.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn concurrent_confirmations_submit_exactly_once() {
+        let tools = tools();
+        let staged = run_order_round(
+            &tools.request_state_codec,
+            &tools.order_redemptions,
+            tools.order_confirmation_ttl,
+            "principal-a",
+            STOCK_ORDER_TOOL,
+            round(StagedOrder::Stock(stock_order()), None, None),
+            |_| async { Ok(Some("unused".to_string())) },
+        )
+        .await
+        .expect("valid order stages");
+        let state = sealed_state(&input_required(staged));
+        let submissions = Arc::new(AtomicUsize::new(0));
+        let first_submissions = Arc::clone(&submissions);
+        let second_submissions = Arc::clone(&submissions);
+
+        let first = run_order_round(
+            &tools.request_state_codec,
+            &tools.order_redemptions,
+            tools.order_confirmation_ttl,
+            "principal-a",
+            STOCK_ORDER_TOOL,
+            round(
+                StagedOrder::Stock(stock_order()),
+                Some(state.clone()),
+                Some(accepted_confirmation()),
+            ),
+            move |_| async move {
+                let _previous = first_submissions.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                Ok(Some("first-order-id".to_string()))
+            },
+        );
+        let second = run_order_round(
+            &tools.request_state_codec,
+            &tools.order_redemptions,
+            tools.order_confirmation_ttl,
+            "principal-a",
+            STOCK_ORDER_TOOL,
+            round(
+                StagedOrder::Stock(stock_order()),
+                Some(state),
+                Some(accepted_confirmation()),
+            ),
+            move |_| async move {
+                let _previous = second_submissions.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                Ok(Some("second-order-id".to_string()))
+            },
+        );
+
+        let (first_result, second_result) = tokio::join!(first, second);
+
+        assert!(matches!(
+            (&first_result, &second_result),
+            (Ok(_), Err(_)) | (Err(_), Ok(_))
+        ));
+        let replay_error = first_result.err().or_else(|| second_result.err());
+        assert!(replay_error.is_some_and(|error| error.contains("already used")));
+        assert_eq!(submissions.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn separately_staged_order_is_unaffected_by_prior_confirmation() {
+        let tools = tools();
+        let submissions = Arc::new(AtomicUsize::new(0));
+
+        for symbol in ["AAPL", "MSFT"] {
+            let mut staged_order = stock_order();
+            staged_order.symbol = symbol.to_string();
+            let staged = run_order_round(
+                &tools.request_state_codec,
+                &tools.order_redemptions,
+                tools.order_confirmation_ttl,
+                "principal-a",
+                STOCK_ORDER_TOOL,
+                round(StagedOrder::Stock(staged_order), None, None),
+                |_| async { Ok(Some("unused".to_string())) },
+            )
+            .await
+            .expect("valid order stages");
+            let state = sealed_state(&input_required(staged));
+            let counted_submissions = Arc::clone(&submissions);
+            let mut confirmed_order = stock_order();
+            confirmed_order.symbol = symbol.to_string();
+
+            run_order_round(
+                &tools.request_state_codec,
+                &tools.order_redemptions,
+                tools.order_confirmation_ttl,
+                "principal-a",
+                STOCK_ORDER_TOOL,
+                round(
+                    StagedOrder::Stock(confirmed_order),
+                    Some(state),
+                    Some(accepted_confirmation()),
+                ),
+                move |_| async move {
+                    let _previous = counted_submissions.fetch_add(1, Ordering::SeqCst);
+                    Ok(Some("submitted-order-id".to_string()))
+                },
+            )
+            .await
+            .expect("distinct staged order submits");
+        }
+
+        assert_eq!(submissions.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
@@ -670,6 +814,7 @@ mod tests {
         let tools = tools();
         let staged = run_order_round(
             &tools.request_state_codec,
+            &tools.order_redemptions,
             tools.order_confirmation_ttl,
             "principal-a",
             STOCK_ORDER_TOOL,
@@ -685,6 +830,7 @@ mod tests {
 
         let error = run_order_round(
             &tools.request_state_codec,
+            &tools.order_redemptions,
             tools.order_confirmation_ttl,
             "principal-a",
             STOCK_ORDER_TOOL,
@@ -710,6 +856,7 @@ mod tests {
         let tools = tools();
         let staged = run_order_round(
             &tools.request_state_codec,
+            &tools.order_redemptions,
             tools.order_confirmation_ttl,
             "principal-a",
             STOCK_ORDER_TOOL,
@@ -724,6 +871,7 @@ mod tests {
 
         let error = run_order_round(
             &tools.request_state_codec,
+            &tools.order_redemptions,
             tools.order_confirmation_ttl,
             "principal-b",
             STOCK_ORDER_TOOL,
@@ -749,6 +897,7 @@ mod tests {
         let tools = tools();
         let staged = run_order_round(
             &tools.request_state_codec,
+            &tools.order_redemptions,
             Duration::ZERO,
             "principal-a",
             STOCK_ORDER_TOOL,
@@ -762,6 +911,7 @@ mod tests {
 
         let error = run_order_round(
             &tools.request_state_codec,
+            &tools.order_redemptions,
             Duration::ZERO,
             "principal-a",
             STOCK_ORDER_TOOL,
@@ -784,6 +934,7 @@ mod tests {
         let tools = tools();
         let staged = run_order_round(
             &tools.request_state_codec,
+            &tools.order_redemptions,
             tools.order_confirmation_ttl,
             "principal-a",
             STOCK_ORDER_TOOL,
