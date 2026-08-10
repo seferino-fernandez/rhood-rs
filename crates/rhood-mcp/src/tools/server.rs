@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use axum::http::request::Parts;
 use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::model::{
     CacheScope, CallToolRequestParams, CallToolResponse, ErrorCode, Implementation,
@@ -11,6 +12,7 @@ use rmcp::{
     service::RequestContext,
 };
 
+use crate::middleware::oauth::{OAuthAuthenticated, OAuthPrincipal};
 use crate::tools::schema::{close_object_map, enforce_response_budget};
 
 use super::handler::RhoodTools;
@@ -27,6 +29,46 @@ fn close_tool_schemas(tool: &mut Tool) {
     if let Some(output) = tool.output_schema.as_mut() {
         close_object_map(Arc::make_mut(output));
     }
+}
+
+/// Returns the scope error for a write tool invoked through the OAuth transport.
+///
+/// Requests without HTTP parts are stdio, and requests whose HTTP parts lack
+/// both OAuth markers use `token` or `none` authentication. Those paths have
+/// no per-request OAuth scope and retain their existing behavior. Once either
+/// marker is present, a missing or malformed carrier denies the write tool.
+fn oauth_write_scope_error(
+    tool_name: &str,
+    context: &RequestContext<RoleServer>,
+) -> Option<McpError> {
+    oauth_write_scope_error_for_parts(tool_name, context.extensions.get::<Parts>())
+}
+
+fn oauth_write_scope_error_for_parts(tool_name: &str, parts: Option<&Parts>) -> Option<McpError> {
+    if !WRITE_TOOLS.contains(&tool_name) {
+        return None;
+    }
+
+    let parts = parts?;
+    let oauth_authenticated = parts.extensions.get::<OAuthAuthenticated>().is_some();
+    let authorization = parts.extensions.get::<OAuthPrincipal>();
+    if !oauth_authenticated && authorization.is_none() {
+        return None;
+    }
+
+    let has_write_scope = authorization.is_some_and(|authorization| {
+        !authorization.principal.is_empty()
+            && authorization.scopes.iter().any(|scope| scope == "write")
+    });
+    if has_write_scope {
+        return None;
+    }
+
+    Some(McpError::new(
+        ErrorCode::INVALID_PARAMS,
+        format!("Tool '{tool_name}' requires the 'write' OAuth scope"),
+        None,
+    ))
 }
 
 impl ServerHandler for RhoodTools {
@@ -101,6 +143,9 @@ impl ServerHandler for RhoodTools {
                 None,
             ));
         }
+        if let Some(error) = oauth_write_scope_error(&request.name, &context) {
+            return Err(error);
+        }
         let tool_name = request.name.to_string();
         let tool_call_context = ToolCallContext::new(self, request, context);
         match self.tool_router.call(tool_call_context).await {
@@ -130,5 +175,85 @@ impl ServerHandler for RhoodTools {
         let mut tool = self.tool_router.get(name).cloned()?;
         close_tool_schemas(&mut tool);
         Some(tool)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use axum::http::Request;
+    use rhood_core::{RhoodConfig, RobinhoodClient};
+    use rmcp::{Peer, RoleServer, ServerHandler};
+
+    use super::{
+        OAuthAuthenticated, OAuthPrincipal, Parts, RhoodTools, oauth_write_scope_error_for_parts,
+    };
+    use crate::config::McpConfig;
+
+    /// Builds a `RhoodTools` with no network access.
+    fn tools_with(read_only: bool) -> RhoodTools {
+        let client = RobinhoodClient::with_config(RhoodConfig::default())
+            .expect("default config builds a client");
+        let hook = Arc::new(|_c: RobinhoodClient, _p: Peer<RoleServer>| {
+            Box::pin(async { Ok(()) })
+                as std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>>
+        });
+        RhoodTools::new_lazy(client, hook, read_only, &McpConfig::default())
+    }
+
+    fn oauth_parts(principal: Option<OAuthPrincipal>) -> Parts {
+        let (mut parts, _body) = Request::new(()).into_parts();
+        parts.extensions.insert(OAuthAuthenticated);
+        if let Some(principal) = principal {
+            parts.extensions.insert(principal);
+        }
+        parts
+    }
+
+    #[test]
+    fn read_scope_rejects_write_tool() {
+        let tools = tools_with(false);
+        assert!(tools.get_tool("confirm_order").is_some());
+        let parts = oauth_parts(Some(OAuthPrincipal {
+            principal: "rhood_cid_read_only".to_string(),
+            scopes: vec!["read".to_string()],
+        }));
+
+        let error = oauth_write_scope_error_for_parts("confirm_order", Some(&parts));
+        assert!(error.is_some(), "read scope must reject confirm_order");
+        let Some(error) = error else {
+            return;
+        };
+        assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        assert!(error.message.contains("confirm_order"));
+        assert!(error.message.contains("write"));
+    }
+
+    #[test]
+    fn read_scope_allows_non_write_tool() {
+        let parts = oauth_parts(Some(OAuthPrincipal {
+            principal: "rhood_cid_read_only".to_string(),
+            scopes: vec!["read".to_string()],
+        }));
+
+        assert!(oauth_write_scope_error_for_parts("get_account_profile", Some(&parts)).is_none());
+    }
+
+    #[test]
+    fn write_scope_allows_write_tool() {
+        let parts = oauth_parts(Some(OAuthPrincipal {
+            principal: "rhood_cid_read_write".to_string(),
+            scopes: vec!["read".to_string(), "write".to_string()],
+        }));
+
+        assert!(oauth_write_scope_error_for_parts("confirm_order", Some(&parts)).is_none());
+    }
+
+    #[test]
+    fn oauth_request_without_principal_fails_closed_for_write_tool() {
+        let parts = oauth_parts(None);
+
+        assert!(oauth_write_scope_error_for_parts("confirm_order", Some(&parts)).is_some());
     }
 }
