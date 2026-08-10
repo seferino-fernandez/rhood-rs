@@ -295,27 +295,35 @@ impl RobinhoodClient {
             }
         })?;
 
-        // Surface API error detail when no actionable auth fields are present
-        if data.access_token.is_none()
-            && data.mfa_required.is_none()
-            && data.verification_workflow.is_none()
-            && data.challenge.is_none()
-        {
+        // A non-success status is always an API error, regardless of any auth-shaped
+        // fields in the response body. Preserve an API-provided detail when present.
+        if !status.is_success() {
             if let Some(detail) = &data.detail {
                 return Err(RhoodError::Api {
                     status: status.as_u16(),
                     message: detail.clone(),
                 });
             }
-            if !status.is_success() {
-                return Err(RhoodError::Api {
-                    status: status.as_u16(),
-                    message: format!(
-                        "Login failed with no actionable response: {}",
-                        super::transport::redacted_response_body_message(&body)
-                    ),
-                });
-            }
+            return Err(RhoodError::Api {
+                status: status.as_u16(),
+                message: format!(
+                    "Login failed with no actionable response: {}",
+                    super::transport::redacted_response_body_message(&body)
+                ),
+            });
+        }
+
+        // Surface API error detail when no actionable auth fields are present
+        if data.access_token.is_none()
+            && data.mfa_required.is_none()
+            && data.verification_workflow.is_none()
+            && data.challenge.is_none()
+            && let Some(detail) = &data.detail
+        {
+            return Err(RhoodError::Api {
+                status: status.as_u16(),
+                message: detail.clone(),
+            });
         }
 
         // Device verification: run the pathfinder flow, then retry login
@@ -339,6 +347,21 @@ impl RobinhoodClient {
                     status: retry_status.as_u16(),
                     message: format!("Failed to parse login retry response: {err}"),
                 })?;
+            if !retry_status.is_success() {
+                if let Some(detail) = &data.detail {
+                    return Err(RhoodError::Api {
+                        status: retry_status.as_u16(),
+                        message: detail.clone(),
+                    });
+                }
+                return Err(RhoodError::Api {
+                    status: retry_status.as_u16(),
+                    message: format!(
+                        "Login failed with no actionable response: {}",
+                        super::transport::redacted_response_body_message(&retry_body)
+                    ),
+                });
+            }
             return self
                 .handle_login_response(&data, mfa_secret.is_none())
                 .await;
@@ -841,6 +864,125 @@ mod tests {
                 message
             } if message == "invalid login"
         ));
+    }
+
+    #[tokio::test]
+    async fn login_headless_rejects_non_success_response_with_access_token() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/oauth2/token/"))
+            .respond_with(ResponseTemplate::new(500).set_body_json(serde_json::json!({
+                "access_token": "server-error-token"
+            })))
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server.uri()).await;
+
+        let err = client
+            .login_headless("user", "pass", None)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            RhoodError::Api {
+                status: 500,
+                message
+            } if message.contains("Login failed with no actionable response")
+                && !message.contains("server-error-token")
+        ));
+        assert!(!client.is_authenticated().await);
+    }
+
+    #[tokio::test]
+    async fn login_headless_handles_mfa_required_on_successful_response() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/oauth2/token/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "mfa_required": true
+            })))
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server.uri()).await;
+
+        let err = client
+            .login_headless("user", "pass", None)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, RhoodError::InvalidParameter(_)));
+        assert!(matches!(client.auth_state().await, AuthState::MfaRequired));
+    }
+
+    #[tokio::test]
+    async fn login_headless_rejects_non_success_retry_with_access_token() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/oauth2/token/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "verification_workflow": {
+                    "id": "wf-1",
+                    "workflow_status": "issued"
+                }
+            })))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/pathfinder/user_machine/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "machine-1"
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/pathfinder/inquiries/machine-1/user_view/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "context": {
+                    "sheriff_challenge": {
+                        "id": "challenge-1",
+                        "type": "prompt",
+                        "status": "validated"
+                    }
+                },
+                "type_context": null
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/pathfinder/inquiries/machine-1/user_view/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "context": null,
+                "type_context": {
+                    "result": "workflow_status_approved"
+                }
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/oauth2/token/"))
+            .respond_with(ResponseTemplate::new(502).set_body_json(serde_json::json!({
+                "access_token": "retry-error-token"
+            })))
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server.uri()).await;
+
+        let err = client
+            .login_headless("user", "pass", None)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            RhoodError::Api {
+                status: 502,
+                message
+            } if message.contains("Login failed with no actionable response")
+                && !message.contains("retry-error-token")
+        ));
+        assert!(!client.is_authenticated().await);
     }
 
     #[tokio::test]
