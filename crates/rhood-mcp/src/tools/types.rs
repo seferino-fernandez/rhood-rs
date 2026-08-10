@@ -1,12 +1,8 @@
-use chrono::{DateTime, Utc};
-use rhood_core::models::order::{OptionOrderRequest, StockOrderRequest};
-
 /// Tool names that perform write operations (order placement, cancellation).
 /// Filtered out of tool listings and blocked from execution in read-only mode.
 pub const WRITE_TOOLS: &[&str] = &[
     "place_stock_order",
     "place_option_order",
-    "confirm_order",
     "cancel_order",
     "cancel_option_order",
     "create_recurring_investment",
@@ -15,22 +11,6 @@ pub const WRITE_TOOLS: &[&str] = &[
     "add_to_watchlist",
     "remove_from_watchlist",
 ];
-
-/// A staged order awaiting user confirmation before submission.
-#[derive(Debug, Clone)]
-pub struct PendingOrder {
-    pub summary: String,
-    pub kind: PendingOrderKind,
-    /// When the order was staged. Informational staging metadata.
-    pub created_at: DateTime<Utc>,
-}
-
-/// The concrete order request wrapped inside a [`PendingOrder`].
-#[derive(Debug, Clone)]
-pub enum PendingOrderKind {
-    Stock(StockOrderRequest),
-    Option(OptionOrderRequest),
-}
 
 /// Convert a [`RhoodError`](rhood_core::RhoodError) into a structured JSON error string
 /// suitable for MCP tool responses.

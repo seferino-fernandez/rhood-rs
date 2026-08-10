@@ -50,6 +50,8 @@ rmcp = { version = "3.1.2", features = [
     "transport-streamable-http-server",
     "macros",
     "schemars",
+    "request-state",
+    "elicitation",
 ] }
 schemars.workspace = true
 uuid.workspace = true

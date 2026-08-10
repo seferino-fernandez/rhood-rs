@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,7 +21,6 @@ use rmcp::transport::streamable_http_server::{
 };
 use secrecy::ExposeSecret;
 use tokio::net::TcpListener;
-use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 pub async fn serve(config: &ServerConfig) -> anyhow::Result<()> {
@@ -53,7 +51,6 @@ pub async fn serve(config: &ServerConfig) -> anyhow::Result<()> {
     tracing::info!("Robinhood client authenticated successfully");
     let read_only = config.core.read_only;
     let mcp_config = config.mcp.clone();
-    let shared_pending_orders = Arc::new(Mutex::new(HashMap::new()));
 
     let cancellation_token = CancellationToken::new();
     let session_manager: Arc<LocalSessionManager> = Arc::default();
@@ -64,7 +61,6 @@ pub async fn serve(config: &ServerConfig) -> anyhow::Result<()> {
                     client.clone(),
                     read_only,
                     &mcp_config,
-                    shared_pending_orders.clone(),
                 ))
             },
             session_manager,
@@ -365,14 +361,12 @@ mod wire_tests {
     fn mcp_service(read_only: bool) -> StreamableHttpService<RhoodTools, LocalSessionManager> {
         let client =
             RobinhoodClient::with_config(RhoodConfig::default()).expect("default config builds");
-        let pending_orders = Arc::new(Mutex::new(HashMap::new()));
         StreamableHttpService::new(
             move || {
                 Ok(RhoodTools::new_eager(
                     client.clone(),
                     read_only,
                     &McpConfig::default(),
-                    pending_orders.clone(),
                 ))
             },
             Arc::default(),

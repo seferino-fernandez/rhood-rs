@@ -22,4 +22,4 @@ An MCP server for the Robinhood brokerage API. Tools are grouped by domain.
 
 **Market** - `get_markets`, `get_market_hours`, `get_market_today_hours`, `get_daily_movers` (top 20 daily movers).
 
-**Orders (two-step)** - Stage with `place_stock_order` or `place_option_order`, then submit with `confirm_order`. Cancel an open stock order with `cancel_order`, an open option order with `cancel_option_order`. In read-only mode, all order tools are disabled.
+**Orders (human-confirmed)** - `place_stock_order` and `place_option_order` use MCP elicitation to show the complete Staged Order to a human. After the human accepts, the client retries the same tool with its sealed request state and the tool submits the order. Cancel an open stock order with `cancel_order`, or an open option order with `cancel_option_order`. In read-only mode, all order tools are disabled.

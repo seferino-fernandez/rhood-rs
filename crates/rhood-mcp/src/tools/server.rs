@@ -237,19 +237,19 @@ mod tests {
     #[test]
     fn read_scope_rejects_write_tool() {
         let tools = tools_with(false);
-        assert!(tools.get_tool("confirm_order").is_some());
+        assert!(tools.get_tool("place_stock_order").is_some());
         let parts = oauth_parts(Some(OAuthPrincipal {
             principal: "rhood_cid_read_only".to_string(),
             scopes: vec!["read".to_string()],
         }));
 
-        let error = oauth_write_scope_error_for_parts("confirm_order", Some(&parts));
-        assert!(error.is_some(), "read scope must reject confirm_order");
+        let error = oauth_write_scope_error_for_parts("place_stock_order", Some(&parts));
+        assert!(error.is_some(), "read scope must reject place_stock_order");
         let Some(error) = error else {
             return;
         };
         assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
-        assert!(error.message.contains("confirm_order"));
+        assert!(error.message.contains("place_stock_order"));
         assert!(error.message.contains("write"));
     }
 
@@ -270,13 +270,13 @@ mod tests {
             scopes: vec!["read".to_string(), "write".to_string()],
         }));
 
-        assert!(oauth_write_scope_error_for_parts("confirm_order", Some(&parts)).is_none());
+        assert!(oauth_write_scope_error_for_parts("place_stock_order", Some(&parts)).is_none());
     }
 
     #[test]
     fn oauth_request_without_principal_fails_closed_for_write_tool() {
         let parts = oauth_parts(None);
 
-        assert!(oauth_write_scope_error_for_parts("confirm_order", Some(&parts)).is_some());
+        assert!(oauth_write_scope_error_for_parts("place_stock_order", Some(&parts)).is_some());
     }
 }

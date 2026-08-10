@@ -1,10 +1,10 @@
 use rhood_core::models::document::DocumentType;
 use rhood_core::models::option::OptionType;
-use rhood_core::models::order::{MarketHours, OrderType, Side, Trigger};
+use rhood_core::models::order::{MarketHours, OrderType, Side, TimeInForce, Trigger};
 use rhood_core::models::recurring::{RecurringFrequency, RecurringSource, RecurringState};
 use rhood_core::models::stock::{HistoricalInterval, HistoricalSpan};
 use schemars::JsonSchema;
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// Accepts a JSON number or a numeric string (e.g. `15` or `"15.00"`).
 #[derive(Deserialize)]
@@ -71,7 +71,7 @@ pub fn default_span() -> HistoricalSpan {
     HistoricalSpan::Week
 }
 
-#[derive(Deserialize, JsonSchema)]
+#[derive(Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PlaceStockOrderParams {
     /// Stock symbol
@@ -101,13 +101,8 @@ pub struct PlaceStockOrderParams {
     pub stop_price: Option<f64>,
     /// Trading session (default: regular_hours)
     pub market_hours: Option<MarketHours>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct ConfirmOrderParams {
-    /// The pending_order_id returned by place_stock_order
-    pub pending_order_id: String,
+    /// Duration policy for the order
+    pub time_in_force: TimeInForce,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -131,7 +126,7 @@ pub struct OptionChainParams {
     pub symbol: String,
 }
 
-#[derive(Deserialize, JsonSchema)]
+#[derive(Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PlaceOptionOrderParams {
     /// Stock symbol (e.g. "AAPL")
@@ -156,6 +151,8 @@ pub struct PlaceOptionOrderParams {
     #[serde(deserialize_with = "f64_or_str")]
     #[schemars(range(min = 0.0))]
     pub limit_price: f64,
+    /// Duration policy for the order
+    pub time_in_force: TimeInForce,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -426,11 +423,11 @@ mod tests {
     #[test]
     fn stock_order_accepts_string_and_number_prices() {
         let from_str: PlaceStockOrderParams = serde_json::from_str(
-            r#"{"symbol":"F","side":"buy","quantity":"1","order_type":"limit","limit_price":"15.00"}"#,
+            r#"{"symbol":"F","side":"buy","quantity":"1","order_type":"limit","limit_price":"15.00","time_in_force":"gtc"}"#,
         )
         .unwrap();
         let from_num: PlaceStockOrderParams = serde_json::from_str(
-            r#"{"symbol":"F","side":"buy","quantity":1,"order_type":"limit","limit_price":15.0}"#,
+            r#"{"symbol":"F","side":"buy","quantity":1,"order_type":"limit","limit_price":15.0,"time_in_force":"gfd"}"#,
         )
         .unwrap();
         assert_eq!(from_str.limit_price, Some(15.0));
@@ -441,7 +438,7 @@ mod tests {
     #[test]
     fn option_order_accepts_string_prices() {
         let parsed: PlaceOptionOrderParams = serde_json::from_str(
-            r#"{"symbol":"AAPL","expiration_date":"2026-06-18","strike_price":"400","option_type":"call","side":"buy","quantity":"1","limit_price":"0.01"}"#,
+            r#"{"symbol":"AAPL","expiration_date":"2026-06-18","strike_price":"400","option_type":"call","side":"buy","quantity":"1","limit_price":"0.01","time_in_force":"gtc"}"#,
         )
         .unwrap();
         assert_eq!(parsed.strike_price, 400.0);

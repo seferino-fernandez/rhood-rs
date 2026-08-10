@@ -2215,6 +2215,7 @@ dependencies = [
  "bytes",
  "chrono",
  "futures",
+ "hmac",
  "http",
  "http-body",
  "http-body-util",
@@ -2225,6 +2226,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "sha2",
  "sse-stream",
  "thiserror",
  "tokio",
@@ -2232,6 +2234,7 @@ dependencies = [
  "tokio-util",
  "tower-service",
  "tracing",
+ "url",
  "uuid",
 ]
 

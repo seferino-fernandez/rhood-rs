@@ -7,9 +7,8 @@
 //! 2.1 with PKCE, a static bearer token, or no authentication at all,
 //! controlled by the `[mcp].auth_mode` config field.
 //!
-//! Order placement uses a two-step confirmation flow: a `place_*` tool
-//! stages the order and returns a pending ID, then `confirm_order` submits
-//! it for execution.
+//! Order placement uses MCP elicitation to obtain human Confirmation before
+//! the retried `place_*` tool submits the sealed Staged Order.
 
 #![warn(missing_docs)]
 #![forbid(unsafe_code)]

@@ -1,15 +1,33 @@
 use rhood_core::RobinhoodClient;
-use rmcp::{Peer, RoleServer, handler::server::tool::ToolRouter};
+use rmcp::{
+    Peer, RoleServer,
+    handler::server::tool::ToolRouter,
+    model::{RequestStateCodec, RequestStateError},
+};
 
 use crate::config::McpConfig;
-use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::sync::Mutex;
 
-use super::types::PendingOrder;
+use uuid::Uuid;
+
+const ORDER_CONFIRMATION_TTL: Duration = Duration::from_secs(600);
+
+fn process_request_state_codec() -> RequestStateCodec {
+    static CODEC: OnceLock<RequestStateCodec> = OnceLock::new();
+    CODEC
+        .get_or_init(|| {
+            let mut key = Vec::with_capacity(32);
+            key.extend_from_slice(Uuid::new_v4().as_bytes());
+            key.extend_from_slice(Uuid::new_v4().as_bytes());
+            RequestStateCodec::new(key)
+        })
+        .clone()
+}
 
 /// Boxed future returned by a [`LazyAuthHook`].
 ///
@@ -33,7 +51,7 @@ pub type LazyAuthHook =
 
 /// MCP tool handler exposing Robinhood trading operations via the rmcp framework.
 ///
-/// Wraps a shared [`RobinhoodClient`] and holds staged pending-order state.
+/// Wraps a shared [`RobinhoodClient`] and a per-process request-state codec.
 /// Supports read-only mode that hides write tools.
 ///
 /// The client is a plain value that derives `Clone` internally over
@@ -53,7 +71,8 @@ pub struct RhoodTools {
     /// guard releases so the next caller can retry.
     lazy_auth_gate: Arc<Mutex<()>>,
     pub tool_router: ToolRouter<Self>,
-    pub(super) pending_orders: Arc<Mutex<HashMap<String, PendingOrder>>>,
+    pub(super) request_state_codec: RequestStateCodec,
+    pub(super) order_confirmation_ttl: Duration,
     pub(super) read_only: bool,
     /// Ceiling on the first-call lazy-auth wait, so a stuck login can't hold
     /// `lazy_auth_gate` and wedge every other first call.
@@ -67,21 +86,15 @@ impl RhoodTools {
     /// Creates a new `RhoodTools` with an already-authenticated client.
     ///
     /// Used by the HTTP transport, which authenticates once at startup and
-    /// shares the resulting client across sessions. The provided pending-order
-    /// maps are shared with other `RhoodTools` instances spawned by the same
-    /// HTTP service factory.
-    pub fn new_eager(
-        client: RobinhoodClient,
-        read_only: bool,
-        mcp_config: &McpConfig,
-        pending_orders: Arc<Mutex<HashMap<String, PendingOrder>>>,
-    ) -> Self {
+    /// shares the resulting client across sessions.
+    pub fn new_eager(client: RobinhoodClient, read_only: bool, mcp_config: &McpConfig) -> Self {
         Self {
             client,
             lazy_auth_hook: None,
             lazy_auth_gate: Arc::new(Mutex::new(())),
             tool_router: Self::combined_router(),
-            pending_orders,
+            request_state_codec: process_request_state_codec(),
+            order_confirmation_ttl: ORDER_CONFIRMATION_TTL,
             read_only,
             auth_timeout: Duration::from_secs(mcp_config.lazy_auth_timeout_secs),
             max_response_bytes: mcp_config.max_response_bytes,
@@ -106,10 +119,20 @@ impl RhoodTools {
             lazy_auth_hook: Some(lazy_auth_hook),
             lazy_auth_gate: Arc::new(Mutex::new(())),
             tool_router: Self::combined_router(),
-            pending_orders: Arc::new(Mutex::new(HashMap::new())),
+            request_state_codec: process_request_state_codec(),
+            order_confirmation_ttl: ORDER_CONFIRMATION_TTL,
             read_only,
             auth_timeout: Duration::from_secs(mcp_config.lazy_auth_timeout_secs),
             max_response_bytes: mcp_config.max_response_bytes,
+        }
+    }
+
+    pub(super) fn request_state_error(error: &RequestStateError) -> String {
+        match error {
+            RequestStateError::Expired => {
+                "Confirmation expired; stage the order again before submitting".to_string()
+            }
+            _ => "Confirmation is no longer valid; stage the order again (the state may have been altered or belongs to a different Principal)".to_string(),
         }
     }
 
