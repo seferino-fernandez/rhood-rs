@@ -14,6 +14,7 @@ mod market_tools;
 mod option_tools;
 mod order_tools;
 mod params;
+mod rate_limit;
 mod recurring_tools;
 mod research_tools;
 mod schema;
@@ -24,6 +25,7 @@ mod user_tools;
 mod watchlist_tools;
 
 pub use handler::{LazyAuthHook, RhoodTools};
+pub(crate) use rate_limit::{FallbackPrincipal, ToolRateLimiter};
 
 /// Tools gated off when the server runs in read-only mode.
 #[cfg(test)]

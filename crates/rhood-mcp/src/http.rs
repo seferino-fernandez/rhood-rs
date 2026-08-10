@@ -10,7 +10,7 @@ use crate::oauth;
 use crate::oauth::model::OAuthEndpointState;
 use crate::oauth::store::{OAuthStore, OAuthStoreConfig};
 use crate::shared::{create_authenticated_client, resolve_base_url};
-use crate::tools::RhoodTools;
+use crate::tools::{FallbackPrincipal, RhoodTools, ToolRateLimiter};
 use axum::{
     middleware::{self},
     routing::{get, post},
@@ -25,26 +25,32 @@ use tokio_util::sync::CancellationToken;
 
 pub async fn serve(config: &ServerConfig) -> anyhow::Result<()> {
     let addr: SocketAddr = format!("{}:{}", config.mcp.host, config.mcp.port).parse()?;
-    match config.mcp.auth_mode.as_str() {
+    let fallback_principal = match config.mcp.auth_mode.as_str() {
         "token" => {
             if config.mcp.token.is_none() {
                 anyhow::bail!(
                     "auth_mode=\"token\" requires a token. Set RHOOD_MCP_TOKEN, \
-                     pass --token <value>, or add [mcp] token = \"...\" to config.toml"
+                    pass --token <value>, or add [mcp] token = \"...\" to config.toml"
                 );
             }
+            FallbackPrincipal::HttpToken
         }
         "none" => {
             if !addr.ip().is_loopback() {
                 anyhow::bail!(
                     "auth_mode=\"none\" is only allowed on loopback addresses. \
-                     Current bind address: {addr}"
+                    Current bind address: {addr}"
                 );
             }
+            FallbackPrincipal::HttpNone
         }
-        "oauth" => config.mcp.validate_registered_clients()?,
+        "oauth" => {
+            config.mcp.validate_registered_clients()?;
+            FallbackPrincipal::HttpOAuth
+        }
         other => anyhow::bail!("Unknown auth_mode: {other}. Use \"token\", \"oauth\", or \"none\""),
-    }
+    };
+    let rate_limiter = ToolRateLimiter::new(&config.mcp.rate_limit)?;
 
     tracing::debug!("Authenticating Robinhood client...");
     let client = create_authenticated_client(config).await?;
@@ -61,6 +67,8 @@ pub async fn serve(config: &ServerConfig) -> anyhow::Result<()> {
                     client.clone(),
                     read_only,
                     &mcp_config,
+                    rate_limiter.clone(),
+                    fallback_principal,
                 ))
             },
             session_manager,
@@ -358,6 +366,7 @@ mod wire_tests {
         },
     };
     use serde_json::{Value, json};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tower::ServiceExt;
 
     const V_MODERN: &str = "2026-07-28";
@@ -367,19 +376,25 @@ mod wire_tests {
     fn mcp_service(read_only: bool) -> StreamableHttpService<RhoodTools, LocalSessionManager> {
         let client =
             RobinhoodClient::with_config(RhoodConfig::default()).expect("default config builds");
+        let mcp_config = McpConfig::default();
+        let rate_limiter =
+            ToolRateLimiter::new(&mcp_config.rate_limit).expect("default rate limits are valid");
+        let allowed_hosts = mcp_config.allowed_hosts.clone();
         StreamableHttpService::new(
             move || {
                 Ok(RhoodTools::new_eager(
                     client.clone(),
                     read_only,
-                    &McpConfig::default(),
+                    &mcp_config,
+                    rate_limiter.clone(),
+                    FallbackPrincipal::HttpNone,
                 ))
             },
             Arc::default(),
             StreamableHttpServerConfig::default()
                 .with_legacy_session_mode(false)
                 .with_stateless_protocol_metadata_required(true)
-                .with_allowed_hosts(McpConfig::default().allowed_hosts),
+                .with_allowed_hosts(allowed_hosts),
         )
     }
 
@@ -394,9 +409,17 @@ mod wire_tests {
             ..McpConfig::default()
         };
         let allowed_hosts = mcp_config.allowed_hosts.clone();
+        let rate_limiter =
+            ToolRateLimiter::new(&mcp_config.rate_limit).expect("default rate limits are valid");
         StreamableHttpService::new(
             move || {
-                let mut tools = RhoodTools::new_eager(client.clone(), false, &mcp_config);
+                let mut tools = RhoodTools::new_eager(
+                    client.clone(),
+                    false,
+                    &mcp_config,
+                    rate_limiter.clone(),
+                    FallbackPrincipal::HttpNone,
+                );
                 let response = response.clone();
                 tools.tool_router = ToolRouter::new().with_route(ToolRoute::new_dyn(
                     Tool::new(
@@ -407,6 +430,52 @@ mod wire_tests {
                     move |_context| {
                         let response = response.clone();
                         Box::pin(async move { Ok(response) })
+                    },
+                ));
+                Ok(tools)
+            },
+            Arc::default(),
+            StreamableHttpServerConfig::default()
+                .with_legacy_session_mode(false)
+                .with_stateless_protocol_metadata_required(true)
+                .with_allowed_hosts(allowed_hosts),
+        )
+    }
+
+    fn rate_limited_counting_service(
+        dispatches: Arc<AtomicUsize>,
+    ) -> StreamableHttpService<RhoodTools, LocalSessionManager> {
+        let client =
+            RobinhoodClient::with_config(RhoodConfig::default()).expect("default config builds");
+        let mut mcp_config = McpConfig::default();
+        mcp_config.rate_limit.read.per_principal_per_minute = 1;
+        mcp_config.rate_limit.read.per_principal_burst = 2;
+        mcp_config.rate_limit.read.global_per_minute = 1_000;
+        mcp_config.rate_limit.read.global_burst = 100;
+        let allowed_hosts = mcp_config.allowed_hosts.clone();
+        let rate_limiter =
+            ToolRateLimiter::new(&mcp_config.rate_limit).expect("test rate limits are valid");
+        StreamableHttpService::new(
+            move || {
+                let mut tools = RhoodTools::new_eager(
+                    client.clone(),
+                    false,
+                    &mcp_config,
+                    rate_limiter.clone(),
+                    FallbackPrincipal::HttpNone,
+                );
+                let dispatches = dispatches.clone();
+                tools.tool_router = ToolRouter::new().with_route(ToolRoute::new_dyn(
+                    Tool::new(
+                        TEST_TOOL,
+                        "Count actual dispatches",
+                        Arc::new(Default::default()),
+                    ),
+                    move |_context| {
+                        dispatches.fetch_add(1, Ordering::SeqCst);
+                        Box::pin(async move {
+                            Ok(CallToolResult::success(vec![ContentBlock::text("called")]).into())
+                        })
                     },
                 ));
                 Ok(tools)
@@ -761,6 +830,43 @@ mod wire_tests {
         assert_eq!(
             result["_meta"]["io.modelcontextprotocol/serverInfo"],
             expected_server_info()
+        );
+    }
+
+    #[tokio::test]
+    async fn stateless_http_handlers_share_rate_limit_and_stop_dispatch() {
+        let dispatches = Arc::new(AtomicUsize::new(0));
+        let service = rate_limited_counting_service(dispatches.clone());
+        let _ = post(&service, initialize(V_MODERN), None, None).await;
+
+        for expected_dispatches in 1..=2 {
+            let (status, _, payloads) =
+                post(&service, modern_tools_call(TEST_TOOL), None, Some(V_MODERN)).await;
+            assert!(status.is_success(), "tools/call failed: {payloads:?}");
+            assert_eq!(result_of(&payloads)["isError"], false);
+            assert_eq!(dispatches.load(Ordering::SeqCst), expected_dispatches);
+        }
+
+        let (status, _, payloads) =
+            post(&service, modern_tools_call(TEST_TOOL), None, Some(V_MODERN)).await;
+        assert!(
+            status.is_success(),
+            "rate limit is a tool result: {payloads:?}"
+        );
+        let result = result_of(&payloads);
+        assert_eq!(result["isError"], true);
+        assert_eq!(result["structuredContent"]["error"], "rate_limited");
+        assert_eq!(result["structuredContent"]["class"], "read");
+        assert_eq!(result["structuredContent"]["layer"], "principal");
+        assert_eq!(result["structuredContent"]["retry_after_seconds"], 60);
+        assert_eq!(
+            result["_meta"]["io.modelcontextprotocol/serverInfo"],
+            expected_server_info()
+        );
+        assert_eq!(
+            dispatches.load(Ordering::SeqCst),
+            2,
+            "rate-rejected invocation must not reach the tool router"
         );
     }
 

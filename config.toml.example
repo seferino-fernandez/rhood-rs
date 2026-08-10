@@ -148,3 +148,27 @@ level = "info"
 # Env: RHOOD_MCP_OAUTH_CORS_ORIGINS=http://localhost,http://127.0.0.1,http://[::1]
 [mcp.oauth_cors]
 # origins = ["http://localhost", "http://127.0.0.1", "http://[::1]"]
+
+# Tool invocation rate limits. Every allowed tools/call attempt consumes both
+# its authenticated Principal's allowance and the process-wide allowance.
+# Tokens refill continuously; all values must be greater than zero.
+[mcp.rate_limit.read]
+# Env: RHOOD_MCP_RATE_LIMIT_READ_PER_PRINCIPAL_PER_MINUTE
+# per_principal_per_minute = 60
+# Env: RHOOD_MCP_RATE_LIMIT_READ_PER_PRINCIPAL_BURST
+# per_principal_burst = 20
+# Env: RHOOD_MCP_RATE_LIMIT_READ_GLOBAL_PER_MINUTE
+# global_per_minute = 300
+# Env: RHOOD_MCP_RATE_LIMIT_READ_GLOBAL_BURST
+# global_burst = 100
+
+[mcp.rate_limit.write]
+# The default burst of 2 permits an order's stage and confirmation calls.
+# Env: RHOOD_MCP_RATE_LIMIT_WRITE_PER_PRINCIPAL_PER_MINUTE
+# per_principal_per_minute = 6
+# Env: RHOOD_MCP_RATE_LIMIT_WRITE_PER_PRINCIPAL_BURST
+# per_principal_burst = 2
+# Env: RHOOD_MCP_RATE_LIMIT_WRITE_GLOBAL_PER_MINUTE
+# global_per_minute = 30
+# Env: RHOOD_MCP_RATE_LIMIT_WRITE_GLOBAL_BURST
+# global_burst = 10

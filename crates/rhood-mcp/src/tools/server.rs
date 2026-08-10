@@ -3,7 +3,7 @@ use std::{borrow::Cow, sync::Arc};
 use axum::http::request::Parts;
 use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::model::{
-    CacheScope, CallToolRequestParams, CallToolResponse, ErrorCode, Implementation,
+    CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, ErrorCode, Implementation,
     InitializeRequestParams, MetaObject, PaginatedRequestParams, ProtocolVersion,
     ServerCapabilities, Tool,
 };
@@ -17,6 +17,7 @@ use crate::middleware::oauth::{OAuthAuthenticated, OAuthPrincipal};
 use crate::tools::schema::{close_object_map, enforce_response_budget};
 
 use super::handler::RhoodTools;
+use super::rate_limit::{FallbackPrincipal, ToolClass};
 use super::types::WRITE_TOOLS;
 
 const SERVER_INFO_META_KEY: &str = "io.modelcontextprotocol/serverInfo";
@@ -85,6 +86,36 @@ fn oauth_write_scope_error_for_parts(tool_name: &str, parts: Option<&Parts>) -> 
         format!("Tool '{tool_name}' requires the 'write' OAuth scope"),
         None,
     ))
+}
+
+fn rate_limit_principal(
+    context: &RequestContext<RoleServer>,
+    fallback: FallbackPrincipal,
+) -> Result<String, McpError> {
+    rate_limit_principal_for_parts(context.extensions.get::<Parts>(), fallback)
+}
+
+fn rate_limit_principal_for_parts(
+    parts: Option<&Parts>,
+    fallback: FallbackPrincipal,
+) -> Result<String, McpError> {
+    let oauth_authenticated = parts
+        .and_then(|parts| parts.extensions.get::<OAuthAuthenticated>())
+        .is_some();
+    let authorization = parts.and_then(|parts| parts.extensions.get::<OAuthPrincipal>());
+
+    match (oauth_authenticated, authorization) {
+        (true, Some(authorization)) if !authorization.principal.is_empty() => {
+            Ok(authorization.principal.clone())
+        }
+        (true, _) | (false, Some(_)) => Err(McpError::internal_error(
+            "validated OAuth Principal is unavailable",
+            None,
+        )),
+        (false, None) => fallback.as_str().map(str::to_string).ok_or_else(|| {
+            McpError::internal_error("validated OAuth Principal is unavailable", None)
+        }),
+    }
 }
 
 impl ServerHandler for RhoodTools {
@@ -187,6 +218,39 @@ impl ServerHandler for RhoodTools {
         }
         let tool_name = request.name.to_string();
         let server_info = self.get_info().server_info;
+        let class = if WRITE_TOOLS.contains(&request.name.as_ref()) {
+            ToolClass::Write
+        } else {
+            ToolClass::Read
+        };
+        let principal = rate_limit_principal(&context, self.fallback_principal)?;
+        match self.rate_limiter.check(&principal, class) {
+            Ok(None) => {}
+            Ok(Some(rejection)) => {
+                tracing::warn!(
+                    principal,
+                    class = rejection.class.as_str(),
+                    layer = rejection.layer.as_str(),
+                    retry_after_seconds = rejection.retry_after_seconds,
+                    "tool invocation rate limited"
+                );
+                let mut result = enforce_response_budget(
+                    CallToolResult::structured_error(serde_json::json!({
+                        "error": "rate_limited",
+                        "class": rejection.class.as_str(),
+                        "layer": rejection.layer.as_str(),
+                        "retry_after_seconds": rejection.retry_after_seconds,
+                    })),
+                    self.max_response_bytes,
+                );
+                insert_server_info(&mut result.meta, &server_info);
+                return Ok(result.into());
+            }
+            Err(error) => {
+                tracing::error!(error = %error, "tool rate limiter failed closed");
+                return Err(McpError::internal_error(error.to_string(), None));
+            }
+        }
         let tool_call_context = ToolCallContext::new(self, request, context);
         match self.tool_router.call(tool_call_context).await {
             Ok(CallToolResponse::Complete(result)) => {
@@ -244,10 +308,12 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{
-        Implementation, OAuthAuthenticated, OAuthPrincipal, Parts, RhoodTools,
+        FallbackPrincipal, Implementation, OAuthAuthenticated, OAuthPrincipal, Parts, RhoodTools,
         SERVER_INFO_META_KEY, insert_server_info, oauth_write_scope_error_for_parts,
+        rate_limit_principal_for_parts,
     };
     use crate::config::McpConfig;
+    use crate::tools::ToolRateLimiter;
 
     /// Builds a `RhoodTools` with no network access.
     fn tools_with(read_only: bool) -> RhoodTools {
@@ -257,7 +323,10 @@ mod tests {
             Box::pin(async { Ok(()) })
                 as std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>>
         });
-        RhoodTools::new_lazy(client, hook, read_only, &McpConfig::default())
+        let config = McpConfig::default();
+        let rate_limiter =
+            ToolRateLimiter::new(&config.rate_limit).expect("default rate limits are valid");
+        RhoodTools::new_lazy(client, hook, read_only, &config, rate_limiter)
     }
 
     fn oauth_parts(principal: Option<OAuthPrincipal>) -> Parts {
@@ -358,5 +427,52 @@ mod tests {
         let parts = oauth_parts(None);
 
         assert!(oauth_write_scope_error_for_parts("place_stock_order", Some(&parts)).is_some());
+    }
+
+    #[test]
+    fn validated_oauth_client_id_is_the_rate_limit_principal() {
+        let parts = oauth_parts(Some(OAuthPrincipal {
+            principal: "registered-client".to_string(),
+            scopes: vec!["read".to_string()],
+        }));
+
+        assert_eq!(
+            rate_limit_principal_for_parts(Some(&parts), FallbackPrincipal::HttpOAuth)
+                .expect("validated Principal is accepted"),
+            "registered-client"
+        );
+    }
+
+    #[test]
+    fn bounded_transport_principals_cover_non_oauth_modes() {
+        let (parts, _body) = Request::new(()).into_parts();
+        assert_eq!(
+            rate_limit_principal_for_parts(None, FallbackPrincipal::Stdio)
+                .expect("stdio has a synthetic Principal"),
+            "transport:stdio"
+        );
+        assert_eq!(
+            rate_limit_principal_for_parts(Some(&parts), FallbackPrincipal::HttpToken)
+                .expect("token auth has a synthetic Principal"),
+            "transport:http-token"
+        );
+        assert_eq!(
+            rate_limit_principal_for_parts(Some(&parts), FallbackPrincipal::HttpNone)
+                .expect("no-auth has a synthetic Principal"),
+            "transport:http-none"
+        );
+    }
+
+    #[test]
+    fn oauth_rate_limit_identity_fails_closed_without_validated_principal() {
+        let parts = oauth_parts(None);
+        let _missing_principal =
+            rate_limit_principal_for_parts(Some(&parts), FallbackPrincipal::HttpOAuth)
+                .expect_err("OAuth marker without a Principal must fail closed");
+
+        let (plain_parts, _body) = Request::new(()).into_parts();
+        let _missing_marker =
+            rate_limit_principal_for_parts(Some(&plain_parts), FallbackPrincipal::HttpOAuth)
+                .expect_err("OAuth transport without validated markers must fail closed");
     }
 }

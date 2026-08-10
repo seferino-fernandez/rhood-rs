@@ -16,6 +16,8 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use uuid::Uuid;
 
+use super::rate_limit::{FallbackPrincipal, ToolRateLimiter};
+
 const ORDER_CONFIRMATION_TTL: Duration = Duration::from_secs(600);
 // A consumed Confirmation stays recorded for twice the sealed state's TTL so
 // its replay guard cannot disappear while that state might still be valid.
@@ -145,6 +147,8 @@ pub struct RhoodTools {
     /// Ceiling on a single tool response payload, in bytes. Oversized responses
     /// are replaced with a bounded JSON error in `call_tool`.
     pub(super) max_response_bytes: usize,
+    pub(super) rate_limiter: Arc<ToolRateLimiter>,
+    pub(super) fallback_principal: FallbackPrincipal,
 }
 
 impl RhoodTools {
@@ -152,7 +156,13 @@ impl RhoodTools {
     ///
     /// Used by the HTTP transport, which authenticates once at startup and
     /// shares the resulting client across sessions.
-    pub fn new_eager(client: RobinhoodClient, read_only: bool, mcp_config: &McpConfig) -> Self {
+    pub(crate) fn new_eager(
+        client: RobinhoodClient,
+        read_only: bool,
+        mcp_config: &McpConfig,
+        rate_limiter: Arc<ToolRateLimiter>,
+        fallback_principal: FallbackPrincipal,
+    ) -> Self {
         Self {
             client,
             lazy_auth_hook: None,
@@ -164,6 +174,8 @@ impl RhoodTools {
             read_only,
             auth_timeout: Duration::from_secs(mcp_config.lazy_auth_timeout_secs),
             max_response_bytes: mcp_config.max_response_bytes,
+            rate_limiter,
+            fallback_principal,
         }
     }
 
@@ -174,11 +186,12 @@ impl RhoodTools {
     /// invocation so the MCP handshake completes instantly. The `lazy_auth_hook`
     /// receives the client and peer, drives the login flow, and sends progress
     /// notifications to the connected MCP client.
-    pub fn new_lazy(
+    pub(crate) fn new_lazy(
         client: RobinhoodClient,
         lazy_auth_hook: LazyAuthHook,
         read_only: bool,
         mcp_config: &McpConfig,
+        rate_limiter: Arc<ToolRateLimiter>,
     ) -> Self {
         Self {
             client,
@@ -191,6 +204,8 @@ impl RhoodTools {
             read_only,
             auth_timeout: Duration::from_secs(mcp_config.lazy_auth_timeout_secs),
             max_response_bytes: mcp_config.max_response_bytes,
+            rate_limiter,
+            fallback_principal: FallbackPrincipal::Stdio,
         }
     }
 

@@ -28,6 +28,20 @@ const ENV_MCP_OAUTH_SWEEP_INTERVAL_SECS: &str = "RHOOD_MCP_OAUTH_SWEEP_INTERVAL_
 const ENV_MCP_OAUTH_CORS_ORIGINS: &str = "RHOOD_MCP_OAUTH_CORS_ORIGINS";
 const ENV_MCP_MAX_RESPONSE_BYTES: &str = "RHOOD_MCP_MAX_RESPONSE_BYTES";
 const ENV_MCP_ALLOWED_HOSTS: &str = "RHOOD_MCP_ALLOWED_HOSTS";
+const ENV_MCP_RATE_LIMIT_READ_PER_PRINCIPAL_PER_MINUTE: &str =
+    "RHOOD_MCP_RATE_LIMIT_READ_PER_PRINCIPAL_PER_MINUTE";
+const ENV_MCP_RATE_LIMIT_READ_PER_PRINCIPAL_BURST: &str =
+    "RHOOD_MCP_RATE_LIMIT_READ_PER_PRINCIPAL_BURST";
+const ENV_MCP_RATE_LIMIT_READ_GLOBAL_PER_MINUTE: &str =
+    "RHOOD_MCP_RATE_LIMIT_READ_GLOBAL_PER_MINUTE";
+const ENV_MCP_RATE_LIMIT_READ_GLOBAL_BURST: &str = "RHOOD_MCP_RATE_LIMIT_READ_GLOBAL_BURST";
+const ENV_MCP_RATE_LIMIT_WRITE_PER_PRINCIPAL_PER_MINUTE: &str =
+    "RHOOD_MCP_RATE_LIMIT_WRITE_PER_PRINCIPAL_PER_MINUTE";
+const ENV_MCP_RATE_LIMIT_WRITE_PER_PRINCIPAL_BURST: &str =
+    "RHOOD_MCP_RATE_LIMIT_WRITE_PER_PRINCIPAL_BURST";
+const ENV_MCP_RATE_LIMIT_WRITE_GLOBAL_PER_MINUTE: &str =
+    "RHOOD_MCP_RATE_LIMIT_WRITE_GLOBAL_PER_MINUTE";
+const ENV_MCP_RATE_LIMIT_WRITE_GLOBAL_BURST: &str = "RHOOD_MCP_RATE_LIMIT_WRITE_GLOBAL_BURST";
 
 const DEFAULT_MCP_HOST: &str = "127.0.0.1";
 const DEFAULT_MCP_PORT: u16 = 8080;
@@ -44,6 +58,14 @@ const DEFAULT_OAUTH_SWEEP_INTERVAL_SECS: u64 = 300;
 
 /// Default ceiling on a single tool response payload, in bytes (256 KiB).
 const DEFAULT_MCP_MAX_RESPONSE_BYTES: usize = 256 * 1024;
+const DEFAULT_READ_PER_PRINCIPAL_PER_MINUTE: u32 = 60;
+const DEFAULT_READ_PER_PRINCIPAL_BURST: u32 = 20;
+const DEFAULT_READ_GLOBAL_PER_MINUTE: u32 = 300;
+const DEFAULT_READ_GLOBAL_BURST: u32 = 100;
+const DEFAULT_WRITE_PER_PRINCIPAL_PER_MINUTE: u32 = 6;
+const DEFAULT_WRITE_PER_PRINCIPAL_BURST: u32 = 2;
+const DEFAULT_WRITE_GLOBAL_PER_MINUTE: u32 = 30;
+const DEFAULT_WRITE_GLOBAL_BURST: u32 = 10;
 
 /// Default `Host` allow-list for the streamable HTTP transport: loopback only.
 ///
@@ -55,6 +77,109 @@ fn default_allowed_hosts() -> Vec<String> {
         .iter()
         .map(|host| (*host).to_string())
         .collect()
+}
+
+fn env_non_empty_u32(env: &impl Env, key: &str) -> Option<u32> {
+    env_non_empty(env, key).and_then(|value| value.parse().ok())
+}
+
+/// Rate and burst settings for read-only tool invocations.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct ReadRateLimitConfig {
+    /// Continuously refilled per-Principal allowance per minute.
+    pub per_principal_per_minute: u32,
+    /// Maximum immediately available per-Principal read allowance.
+    pub per_principal_burst: u32,
+    /// Continuously refilled process-wide allowance per minute.
+    pub global_per_minute: u32,
+    /// Maximum immediately available process-wide read allowance.
+    pub global_burst: u32,
+}
+
+impl Default for ReadRateLimitConfig {
+    fn default() -> Self {
+        Self {
+            per_principal_per_minute: DEFAULT_READ_PER_PRINCIPAL_PER_MINUTE,
+            per_principal_burst: DEFAULT_READ_PER_PRINCIPAL_BURST,
+            global_per_minute: DEFAULT_READ_GLOBAL_PER_MINUTE,
+            global_burst: DEFAULT_READ_GLOBAL_BURST,
+        }
+    }
+}
+
+/// Rate and burst settings for write-tool invocations.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct WriteRateLimitConfig {
+    /// Continuously refilled per-Principal allowance per minute.
+    pub per_principal_per_minute: u32,
+    /// Maximum immediately available per-Principal write allowance.
+    pub per_principal_burst: u32,
+    /// Continuously refilled process-wide allowance per minute.
+    pub global_per_minute: u32,
+    /// Maximum immediately available process-wide write allowance.
+    pub global_burst: u32,
+}
+
+impl Default for WriteRateLimitConfig {
+    fn default() -> Self {
+        Self {
+            per_principal_per_minute: DEFAULT_WRITE_PER_PRINCIPAL_PER_MINUTE,
+            per_principal_burst: DEFAULT_WRITE_PER_PRINCIPAL_BURST,
+            global_per_minute: DEFAULT_WRITE_GLOBAL_PER_MINUTE,
+            global_burst: DEFAULT_WRITE_GLOBAL_BURST,
+        }
+    }
+}
+
+/// Hierarchical tool-invocation rate limits.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct ToolRateLimitConfig {
+    /// Read-tool limits.
+    pub read: ReadRateLimitConfig,
+    /// Write-tool limits.
+    pub write: WriteRateLimitConfig,
+}
+
+impl ToolRateLimitConfig {
+    pub(crate) fn validate(&self) -> anyhow::Result<()> {
+        let values = [
+            (
+                "mcp.rate_limit.read.per_principal_per_minute",
+                self.read.per_principal_per_minute,
+            ),
+            (
+                "mcp.rate_limit.read.per_principal_burst",
+                self.read.per_principal_burst,
+            ),
+            (
+                "mcp.rate_limit.read.global_per_minute",
+                self.read.global_per_minute,
+            ),
+            ("mcp.rate_limit.read.global_burst", self.read.global_burst),
+            (
+                "mcp.rate_limit.write.per_principal_per_minute",
+                self.write.per_principal_per_minute,
+            ),
+            (
+                "mcp.rate_limit.write.per_principal_burst",
+                self.write.per_principal_burst,
+            ),
+            (
+                "mcp.rate_limit.write.global_per_minute",
+                self.write.global_per_minute,
+            ),
+            ("mcp.rate_limit.write.global_burst", self.write.global_burst),
+        ];
+        for (path, value) in values {
+            if value == 0 {
+                anyhow::bail!("{path} must be greater than zero");
+            }
+        }
+        Ok(())
+    }
 }
 
 /// CORS configuration for the MCP OAuth routes.
@@ -125,6 +250,9 @@ pub struct McpConfig {
     /// Otherwise every request is rejected with 403 before reaching a handler.
     /// Entries may include a port, e.g. `"example.com:8443"`.
     pub allowed_hosts: Vec<String>,
+    /// Per-Principal and process-wide tool-invocation rate limits.
+    #[serde(default)]
+    pub rate_limit: ToolRateLimitConfig,
 }
 
 impl Default for McpConfig {
@@ -147,6 +275,7 @@ impl Default for McpConfig {
             oauth_cors: OAuthCorsConfig::default(),
             max_response_bytes: DEFAULT_MCP_MAX_RESPONSE_BYTES,
             allowed_hosts: default_allowed_hosts(),
+            rate_limit: ToolRateLimitConfig::default(),
         }
     }
 }
@@ -194,6 +323,10 @@ impl McpConfig {
         }
         Ok(())
     }
+
+    pub(crate) fn validate_rate_limits(&self) -> anyhow::Result<()> {
+        self.rate_limit.validate()
+    }
 }
 
 impl std::fmt::Debug for McpConfig {
@@ -214,6 +347,7 @@ impl std::fmt::Debug for McpConfig {
             .field("oauth_cors", &self.oauth_cors)
             .field("max_response_bytes", &self.max_response_bytes)
             .field("allowed_hosts", &self.allowed_hosts)
+            .field("rate_limit", &self.rate_limit)
             .finish()
     }
 }
@@ -284,6 +418,7 @@ impl ServerConfig {
             .apply_env_overrides_and_normalize_with_env(env)?;
         config.apply_mcp_env_overrides(env);
         config.resolve_mcp_secrets()?;
+        config.mcp.validate_rate_limits()?;
         Ok(config)
     }
 
@@ -370,6 +505,34 @@ impl ServerConfig {
                 self.mcp.allowed_hosts = hosts;
             }
         }
+        if let Some(value) =
+            env_non_empty_u32(env, ENV_MCP_RATE_LIMIT_READ_PER_PRINCIPAL_PER_MINUTE)
+        {
+            self.mcp.rate_limit.read.per_principal_per_minute = value;
+        }
+        if let Some(value) = env_non_empty_u32(env, ENV_MCP_RATE_LIMIT_READ_PER_PRINCIPAL_BURST) {
+            self.mcp.rate_limit.read.per_principal_burst = value;
+        }
+        if let Some(value) = env_non_empty_u32(env, ENV_MCP_RATE_LIMIT_READ_GLOBAL_PER_MINUTE) {
+            self.mcp.rate_limit.read.global_per_minute = value;
+        }
+        if let Some(value) = env_non_empty_u32(env, ENV_MCP_RATE_LIMIT_READ_GLOBAL_BURST) {
+            self.mcp.rate_limit.read.global_burst = value;
+        }
+        if let Some(value) =
+            env_non_empty_u32(env, ENV_MCP_RATE_LIMIT_WRITE_PER_PRINCIPAL_PER_MINUTE)
+        {
+            self.mcp.rate_limit.write.per_principal_per_minute = value;
+        }
+        if let Some(value) = env_non_empty_u32(env, ENV_MCP_RATE_LIMIT_WRITE_PER_PRINCIPAL_BURST) {
+            self.mcp.rate_limit.write.per_principal_burst = value;
+        }
+        if let Some(value) = env_non_empty_u32(env, ENV_MCP_RATE_LIMIT_WRITE_GLOBAL_PER_MINUTE) {
+            self.mcp.rate_limit.write.global_per_minute = value;
+        }
+        if let Some(value) = env_non_empty_u32(env, ENV_MCP_RATE_LIMIT_WRITE_GLOBAL_BURST) {
+            self.mcp.rate_limit.write.global_burst = value;
+        }
     }
 
     fn resolve_mcp_secrets(&mut self) -> anyhow::Result<()> {
@@ -426,6 +589,71 @@ mod tests {
         assert_eq!(config.mcp.auth_mode, "token");
         assert!(config.mcp.oauth_pin.is_none());
         assert_eq!(config.mcp.oauth_token_expiry_secs, 3600);
+        assert_eq!(config.mcp.rate_limit.read.per_principal_per_minute, 60);
+        assert_eq!(config.mcp.rate_limit.read.per_principal_burst, 20);
+        assert_eq!(config.mcp.rate_limit.read.global_per_minute, 300);
+        assert_eq!(config.mcp.rate_limit.read.global_burst, 100);
+        assert_eq!(config.mcp.rate_limit.write.per_principal_per_minute, 6);
+        assert_eq!(config.mcp.rate_limit.write.per_principal_burst, 2);
+        assert_eq!(config.mcp.rate_limit.write.global_per_minute, 30);
+        assert_eq!(config.mcp.rate_limit.write.global_burst, 10);
+    }
+
+    #[test]
+    fn partial_rate_limit_toml_retains_class_defaults() {
+        let config: ServerConfig = toml::from_str(
+            r#"
+[mcp.rate_limit.write]
+per_principal_per_minute = 12
+global_burst = 25
+"#,
+        )
+        .expect("partial rate-limit config parses");
+
+        assert_eq!(config.mcp.rate_limit.read.per_principal_per_minute, 60);
+        assert_eq!(config.mcp.rate_limit.write.per_principal_per_minute, 12);
+        assert_eq!(config.mcp.rate_limit.write.per_principal_burst, 2);
+        assert_eq!(config.mcp.rate_limit.write.global_per_minute, 30);
+        assert_eq!(config.mcp.rate_limit.write.global_burst, 25);
+    }
+
+    #[test]
+    fn rate_limit_environment_overrides_apply() {
+        let env = rhood_core::env::MapEnv::new()
+            .with(ENV_MCP_RATE_LIMIT_READ_PER_PRINCIPAL_PER_MINUTE, "61")
+            .with(ENV_MCP_RATE_LIMIT_READ_PER_PRINCIPAL_BURST, "21")
+            .with(ENV_MCP_RATE_LIMIT_READ_GLOBAL_PER_MINUTE, "301")
+            .with(ENV_MCP_RATE_LIMIT_READ_GLOBAL_BURST, "101")
+            .with(ENV_MCP_RATE_LIMIT_WRITE_PER_PRINCIPAL_PER_MINUTE, "7")
+            .with(ENV_MCP_RATE_LIMIT_WRITE_PER_PRINCIPAL_BURST, "3")
+            .with(ENV_MCP_RATE_LIMIT_WRITE_GLOBAL_PER_MINUTE, "31")
+            .with(ENV_MCP_RATE_LIMIT_WRITE_GLOBAL_BURST, "11");
+        let mut config = ServerConfig::default();
+        config.apply_mcp_env_overrides(&env);
+
+        assert_eq!(config.mcp.rate_limit.read.per_principal_per_minute, 61);
+        assert_eq!(config.mcp.rate_limit.read.per_principal_burst, 21);
+        assert_eq!(config.mcp.rate_limit.read.global_per_minute, 301);
+        assert_eq!(config.mcp.rate_limit.read.global_burst, 101);
+        assert_eq!(config.mcp.rate_limit.write.per_principal_per_minute, 7);
+        assert_eq!(config.mcp.rate_limit.write.per_principal_burst, 3);
+        assert_eq!(config.mcp.rate_limit.write.global_per_minute, 31);
+        assert_eq!(config.mcp.rate_limit.write.global_burst, 11);
+    }
+
+    #[test]
+    fn zero_rate_limit_is_rejected() {
+        let mut config = McpConfig::default();
+        config.rate_limit.write.per_principal_burst = 0;
+
+        let error = config
+            .validate_rate_limits()
+            .expect_err("zero would disable the mandatory limiter");
+        assert!(
+            error
+                .to_string()
+                .contains("mcp.rate_limit.write.per_principal_burst must be greater than zero")
+        );
     }
 
     /// The default must be the explicit loopback trio, never an empty `Vec`.

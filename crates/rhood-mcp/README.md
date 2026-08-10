@@ -54,6 +54,20 @@ The streamable HTTP transport rejects requests whose `Host` header is not in
 `RHOOD_MCP_ALLOWED_HOSTS` (comma-separated); otherwise every request is rejected
 with 403 before reaching a handler. An empty list disables the check entirely.
 
+### Tool rate limits
+
+Every `tools/call` invocation is subject to both a per-Principal and a
+process-wide token bucket. Read and write tools have separate quotas; write
+tools default to a much smaller allowance. The limiter covers HTTP and stdio,
+and rate-rejected calls return an MCP tool error with a retry delay without
+reaching Robinhood.
+
+Configure the eight nonzero rate and burst values under
+`[mcp.rate_limit.read]` and `[mcp.rate_limit.write]`, or through their matching
+`RHOOD_MCP_RATE_LIMIT_*` environment variables. See the repository's
+`config.toml.example` for names and defaults. Limits are process-local; a
+multi-process deployment needs an additional shared gateway limit.
+
 ### Logging
 
 MCP logging (`notifications/message`, `logging/setLevel`) was deprecated by

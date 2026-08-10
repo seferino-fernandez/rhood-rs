@@ -512,6 +512,7 @@ mod tests {
         CONFIRMATION_REQUEST_ID, OPTION_ORDER_TOOL, OrderRoundRequest, STOCK_ORDER_TOOL,
         StagedOrder, run_order_round, validate_positive, validate_symbol_format,
     };
+    use crate::tools::ToolRateLimiter;
     use crate::tools::params::{PlaceOptionOrderParams, PlaceStockOrderParams};
 
     fn tools() -> RhoodTools {
@@ -525,7 +526,10 @@ mod tests {
                     >
             },
         );
-        let mut tools = RhoodTools::new_lazy(client, hook, false, &McpConfig::default());
+        let config = McpConfig::default();
+        let rate_limiter =
+            ToolRateLimiter::new(&config.rate_limit).expect("default rate limits are valid");
+        let mut tools = RhoodTools::new_lazy(client, hook, false, &config, rate_limiter);
         tools.order_redemptions = Arc::new(OrderRedemptionStore::new(Duration::from_secs(1_200)));
         tools
     }

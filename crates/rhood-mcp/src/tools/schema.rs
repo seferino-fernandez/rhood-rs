@@ -161,6 +161,7 @@ mod tests {
 mod router_tests {
     use super::close_object_schemas;
     use crate::config::McpConfig;
+    use crate::tools::ToolRateLimiter;
     use crate::tools::WRITE_TOOLS;
     use crate::tools::handler::RhoodTools;
     use rhood_core::{RhoodConfig, RobinhoodClient};
@@ -180,7 +181,10 @@ mod router_tests {
             Box::pin(async { Ok(()) })
                 as std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>>
         });
-        RhoodTools::new_lazy(client, hook, read_only, &McpConfig::default())
+        let config = McpConfig::default();
+        let rate_limiter =
+            ToolRateLimiter::new(&config.rate_limit).expect("default rate limits are valid");
+        RhoodTools::new_lazy(client, hook, read_only, &config, rate_limiter)
     }
 
     /// Pins the advertised protocol version so a future rmcp bump that moves
