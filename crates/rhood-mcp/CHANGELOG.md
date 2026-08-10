@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/seferino-fernandez/rhood-rs/compare/rhood-mcp-v0.1.4...rhood-mcp-v0.2.0) - 2026-08-10
+
+### Added
+
+- *(mcp)* paginate tool discovery
+- *(mcp)* paginate large collection tools
+- *(options)* support explicit position effects
+- *(mcp)* quote held options by instrument URL
+- *(mcp)* rate limit tool invocations
+- *(options)* Expose equity contract search
+- *(mcp)* Confirm trades with MRTR elicitation instead of a staged-order map
+- *(mcp)* Serve MCP 2026-07-28 only, with per-request metadata enforced
+- *(mcp)* Enforce the OAuth write scope on write tools
+- *(config)* Refuse secret-bearing config files with loose permissions
+- created BACKLOG.md, enabled lints
+
+### Fixed
+
+- formatting
+- *(core)* sanitize unusable instrument diagnostics
+- *(mcp)* Harden tool rate limiter and config overrides
+- *(mcp)* Bind consent to trusted client
+- *(mcp)* Validate OAuth redirects first
+- *(mcp)* preregister OAuth clients
+- *(mcp)* Add server info to tool results
+- *(mcp)* Make an accepted Confirmation single-use
+- Extract API error diagnostics once, render them per surface
+
+### Other
+
+- remove internal planning records
+- clarify lint suppression assumptions
+- *(core)* make API diagnostics extensible
+- *(mcp)* document strict protocol support
+- *(mcp)* cover security boundary entry points
+- *(mcp)* apply rustfmt to rate limiter hardening
+- *(mcp)* Clarify stock price tool selection
+- *(mcp)* Guide opaque ID discovery
+- Describe the elicitation flow in both READMEs
+
 ## [0.1.4](https://github.com/seferino-fernandez/rhood-rs/compare/rhood-mcp-v0.1.3...rhood-mcp-v0.1.4) - 2026-08-09
 
 ### Other

@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/seferino-fernandez/rhood-rs/compare/v0.1.4...v0.2.0) - 2026-08-10
+
+### Added
+
+- created BACKLOG.md, enabled lints
+
+### Fixed
+
+- formatting
+
+### Other
+
+- remove internal planning records
+- clarify lint suppression assumptions
+
 ## [0.1.4](https://github.com/seferino-fernandez/rhood-rs/compare/v0.1.3...v0.1.4) - 2026-08-09
 
 ### Other
