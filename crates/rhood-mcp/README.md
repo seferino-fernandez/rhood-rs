@@ -41,8 +41,9 @@ receives an unsupported-protocol error during initialization.
 
 SEP-2567 removed sessions from this revision, so HTTP is stateless: there is no
 `Mcp-Session-Id`, GET/DELETE session route, or resumption. Results carry `resultType`,
-and `tools/list` carries SEP-2549 `ttlMs` / `cacheScope` hints. Each HTTP request must
-also carry the protocol metadata required by MCP 2026-07-28.
+and `tools/list` returns deterministic 20-definition pages with SEP-2549 `ttlMs` and
+`cacheScope` hints. Each HTTP request must also carry the protocol metadata required by
+MCP 2026-07-28.
 
 ### Host validation
 
@@ -256,7 +257,9 @@ Tools are grouped by domain. The complete authoritative list is what `tools/list
 - **Market** - exchange listings, trading hours (any date or today), and daily movers.
 - **Orders** - human-confirmed placement (`place_stock_order`, `place_option_order`) and cancellation (`cancel_order`, `cancel_option_order`).
 
-For the live list, call MCP `tools/list` against the running server.
+For the live list, page through MCP `tools/list` against the running server. Pass a
+non-null `nextCursor` back as `cursor` unchanged. Read-only and read-write surfaces use
+different cursor scopes, so restart without a cursor after changing server mode.
 
 `get_option_positions`, `get_transfers`, and `get_documents` return bounded pages with `items` and `next_cursor`. They accept an optional `limit` (default 50, maximum 100); pass a non-null `next_cursor` back as `cursor` unchanged to continue, keeping the same document-type filter between `get_documents` calls. Cursors are positional rather than snapshots, so restart without a cursor if the collection changes while paging.
 
@@ -335,3 +338,14 @@ entry.
 All authorization codes use PKCE (S256). The server returns the client's OAuth
 `state` value unchanged. Tokens, codes, and CSRF nonces are swept periodically
 by a background task.
+
+## Verification
+
+```bash
+cargo test -p rhood-mcp --all-features
+cargo clippy -p rhood-mcp --all-targets --all-features -- -D warnings
+```
+
+## License
+
+[MIT](../../LICENSE.md)

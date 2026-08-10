@@ -13,6 +13,16 @@ Powers the [`rhood-cli`](https://github.com/seferino-fernandez/rhood-rs/tree/mai
 - Typed error model (`RhoodError`) covering challenges, rate limits, read-only mode, and API errors.
 - Configuration via TOML files, environment variables, or programmatic construction.
 
+## Configuration and Safety
+
+The client defaults to read-only mode. Configuration can come from
+`~/.config/rhood/config.toml`, environment variables, or direct `RhoodConfig`
+construction. See [config.toml.example](../../config.toml.example) for all fields.
+
+On Unix, configuration and secret files containing credentials must grant access only
+to their owner. Cached OAuth tokens are written with owner-only permissions and replaced
+atomically so a failed refresh does not destroy the previous session.
+
 ## Example
 
 ```rust,no_run
@@ -31,6 +41,13 @@ for quote in quotes {
 ```
 
 See the [API documentation](https://docs.rs/rhood-core) for the full reference.
+
+## Verification
+
+```bash
+cargo test -p rhood-core --all-features
+cargo clippy -p rhood-core --all-targets --all-features -- -D warnings
+```
 
 ## License
 

@@ -47,6 +47,10 @@ The command prompts for username, password, and MFA code (one-time code or TOTP 
 
 Tokens are cached on disk (default: `~/.rhood/.rhood-token`) so subsequent commands do not re-authenticate. The cache path can be overridden with `--token-cache` or the `RHOOD_TOKEN_CACHE_PATH` environment variable.
 
+On Unix, files containing inline credentials or file-backed secrets must grant access
+only to their owner. The CLI rejects group-readable or world-readable secret-bearing
+files and reports the required `chmod` command.
+
 To clear the saved session:
 
 ```bash
@@ -438,3 +442,14 @@ See [config.toml.example](../../config.toml.example) for all available fields an
 | `auth.password` / `RHOOD_PASSWORD`                 | Pre-configure Robinhood password                     |
 | `auth.mfa_secret` / `RHOOD_MFA`                    | TOTP secret for MFA                                  |
 | `log.level` / `RHOOD_LOG_LEVEL`                    | Log level: `trace`, `debug`, `info`, `warn`, `error` |
+
+## Verification
+
+```bash
+cargo test -p rhood-cli --all-features
+cargo clippy -p rhood-cli --all-targets --all-features -- -D warnings
+```
+
+## License
+
+[MIT](../../LICENSE.md)

@@ -776,7 +776,7 @@ mod wire_tests {
         );
     }
 
-    /// ADR-0001 serves only 2026-07-28, so an older client receives the protocol
+    /// The server serves only 2026-07-28, so an older client receives the protocol
     /// negotiation error instead of falling back to a legacy session.
     #[tokio::test]
     async fn legacy_client_is_rejected_with_unsupported_protocol_version() {
