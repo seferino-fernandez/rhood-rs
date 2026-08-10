@@ -40,7 +40,10 @@ impl RobinhoodClient {
     /// Returns [`RhoodError::ChallengeRequired`] if SMS/email verification is needed.
     /// Returns [`RhoodError::DeviceVerificationRequired`] if push verification is needed
     /// (for push challenges, the library polls automatically during `login_headless`).
-    /// Returns transport or API errors on network failures.
+    /// Returns cache, transport, or API errors.
+    ///
+    /// In particular, an insecure token-cache file permission mode is returned
+    /// so the caller can correct it before logging in again.
     pub async fn login(
         &self,
         username: &str,
@@ -48,7 +51,7 @@ impl RobinhoodClient {
         mfa_secret: Option<&str>,
     ) -> Result<()> {
         // Step 1: Try loading from cache
-        if let Ok(Some(cached)) = self.token_cache.load() {
+        if let Some(cached) = self.token_cache.load()? {
             tracing::debug!("Found cached token, restoring auth state");
             self.device_token
                 .write()
@@ -557,6 +560,13 @@ mod tests {
     use wiremock::matchers::{body_string_contains, header, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    #[cfg(unix)]
+    fn set_mode(path: &std::path::Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
     async fn client_for_server(base_url: &str) -> (tempfile::TempDir, RobinhoodClient) {
         let dir = tempfile::tempdir().unwrap();
         let mut config = test_config_with_tempdir(&dir);
@@ -838,6 +848,100 @@ mod tests {
             Some("Bearer cached-access")
         );
         assert_eq!(&*client.device_token.read().await, "cached-device");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn login_restores_owner_only_cached_token() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/positions/"))
+            .and(query_param("nonzero", "true"))
+            .and(header("Authorization", "Bearer cached-access"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": []
+            })))
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let cache_path = dir.path().join("token.json");
+        let mut config = test_config(cache_path.to_str().unwrap());
+        config.api.base_url = server.uri();
+        let client = RobinhoodClient::with_config(config).unwrap();
+        client
+            .token_cache
+            .save(&CachedToken {
+                access_token: SecretString::from("cached-access"),
+                refresh_token: SecretString::from("cached-refresh"),
+                token_type: "Bearer".into(),
+                device_token: "cached-device".into(),
+                expires_at: Some(Utc::now().timestamp() + 60),
+            })
+            .unwrap();
+        set_mode(&cache_path, 0o600);
+
+        client.login("user", "pass", None).await.unwrap();
+
+        assert_eq!(
+            client.auth_state().await.authorization_header().as_deref(),
+            Some("Bearer cached-access")
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn login_rejects_world_readable_cached_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache_path = dir.path().join("token.json");
+        let client =
+            RobinhoodClient::with_config(test_config(cache_path.to_str().unwrap())).unwrap();
+        client
+            .token_cache
+            .save(&CachedToken {
+                access_token: SecretString::from("cached-access"),
+                refresh_token: SecretString::from("cached-refresh"),
+                token_type: "Bearer".into(),
+                device_token: "cached-device".into(),
+                expires_at: Some(Utc::now().timestamp() + 60),
+            })
+            .unwrap();
+        set_mode(&cache_path, 0o644);
+
+        let error = client.login("user", "pass", None).await.unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains(&cache_path.display().to_string())
+        );
+        assert!(error.to_string().contains("chmod 600"));
+    }
+
+    #[tokio::test]
+    async fn login_falls_through_when_cache_is_absent() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/oauth2/token/"))
+            .and(body_string_contains("grant_type=password"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "login-access",
+                "token_type": "Bearer",
+                "refresh_token": "login-refresh"
+            })))
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let cache_path = dir.path().join("token.json");
+        let mut config = test_config(cache_path.to_str().unwrap());
+        config.api.base_url = server.uri();
+        let client = RobinhoodClient::with_config(config).unwrap();
+
+        client.login("user", "pass", None).await.unwrap();
+
+        assert_eq!(
+            client.auth_state().await.authorization_header().as_deref(),
+            Some("Bearer login-access")
+        );
     }
 
     #[tokio::test]
