@@ -45,6 +45,11 @@ fn normalize_api_body(status: u16, body: &str) -> String {
             rhood_core::error::ApiErrorDetail::Message(message) => {
                 return format!("API error ({status}): {message}");
             }
+            rhood_core::error::ApiErrorDetail::UnusableMissingInstruments => {
+                return format!(
+                    "API error ({status}): upstream reported unrecognized instruments without usable symbols"
+                );
+            }
             _ => {
                 return format!(
                     "API error ({status}): upstream returned an unrecognized diagnostic"
@@ -110,6 +115,24 @@ mod tests {
             message: r#"{"missing_instruments":[],"detail":"insufficient buying power"}"#.into(),
         });
         assert_eq!(m, "API error (400): insufficient buying power");
+    }
+
+    #[test]
+    fn sanitizes_unusable_missing_instruments() {
+        for message in [
+            r#"{"missing_instruments":[]}"#,
+            r#"{"missing_instruments":[17,{"symbol":"NOTAREALSYM"}]}"#,
+        ] {
+            let m = msg(RhoodError::Api {
+                status: 400,
+                message: message.into(),
+            });
+            assert_eq!(
+                m,
+                "API error (400): upstream reported unrecognized instruments without usable symbols"
+            );
+            assert!(!m.contains('{'), "raw JSON leaked: {m}");
+        }
     }
 
     #[test]

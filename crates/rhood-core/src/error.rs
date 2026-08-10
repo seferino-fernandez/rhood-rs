@@ -17,6 +17,7 @@ use thiserror::Error;
 ///     match detail {
 ///         ApiErrorDetail::MissingInstruments(_) => {}
 ///         ApiErrorDetail::Message(_) => {}
+///         ApiErrorDetail::UnusableMissingInstruments => {}
 ///     }
 /// }
 /// ```
@@ -27,28 +28,32 @@ pub enum ApiErrorDetail {
     MissingInstruments(Vec<String>),
     /// A human-readable diagnostic supplied by the API.
     Message(String),
+    /// The API reported missing instruments without any usable symbol strings.
+    UnusableMissingInstruments,
 }
 
 /// Extracts a recognized diagnostic from a JSON API error body.
 ///
 /// Non-empty `missing_instruments` takes precedence, followed by top-level
-/// `message`, top-level `detail`, and nested `error.message`. Returns `None`
-/// when the body is not JSON or contains none of those diagnostics.
+/// `message`, top-level `detail`, and nested `error.message`. A present
+/// `missing_instruments` field with no usable symbol strings produces
+/// [`ApiErrorDetail::UnusableMissingInstruments`] only when no human-readable
+/// diagnostic is available. Returns `None` when the body is not JSON or
+/// contains none of those diagnostics.
 pub fn extract_api_error_detail(body: &str) -> Option<ApiErrorDetail> {
     let parsed = serde_json::from_str::<serde_json::Value>(body).ok()?;
 
-    let missing_instruments = parsed
-        .get("missing_instruments")
-        .and_then(serde_json::Value::as_array)
-        .map(|missing| {
-            missing
-                .iter()
-                .filter_map(serde_json::Value::as_str)
-                .map(str::to_owned)
-                .collect::<Vec<_>>()
-        })
-        .filter(|missing| !missing.is_empty());
-    if let Some(missing_instruments) = missing_instruments {
+    let missing_instruments = parsed.get("missing_instruments").map(|missing| {
+        missing
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    });
+    let had_missing_instruments = missing_instruments.is_some();
+    if let Some(missing_instruments) = missing_instruments.filter(|missing| !missing.is_empty()) {
         return Some(ApiErrorDetail::MissingInstruments(missing_instruments));
     }
 
@@ -64,6 +69,7 @@ pub fn extract_api_error_detail(body: &str) -> Option<ApiErrorDetail> {
                 .and_then(serde_json::Value::as_str)
                 .map(|message| ApiErrorDetail::Message(message.to_owned()))
         })
+        .or_else(|| had_missing_instruments.then_some(ApiErrorDetail::UnusableMissingInstruments))
 }
 
 /// Formats an API error for display.
@@ -82,6 +88,9 @@ fn display_api_error(status: u16, body: &str) -> String {
                 format!("unknown symbol(s): {}", symbols.join(", "))
             }
             ApiErrorDetail::Message(message) => message,
+            ApiErrorDetail::UnusableMissingInstruments => {
+                "upstream reported unrecognized instruments without usable symbols".to_string()
+            }
             _ => "upstream returned an unrecognized diagnostic".to_string(),
         };
         return format!("API error ({status}): {message}");
@@ -279,6 +288,25 @@ mod tests {
             err.to_string(),
             "API error (400): insufficient buying power"
         );
+    }
+
+    #[test]
+    fn api_error_display_sanitizes_unusable_missing_instruments() {
+        for message in [
+            r#"{"missing_instruments":[]}"#,
+            r#"{"missing_instruments":[17,{"symbol":"NOTAREALSYM"}]}"#,
+        ] {
+            let err = RhoodError::Api {
+                status: 400,
+                message: message.into(),
+            };
+            let display = err.to_string();
+            assert_eq!(
+                display,
+                "API error (400): upstream reported unrecognized instruments without usable symbols"
+            );
+            assert!(!display.contains('{'), "raw JSON leaked: {display}");
+        }
     }
 
     #[test]
