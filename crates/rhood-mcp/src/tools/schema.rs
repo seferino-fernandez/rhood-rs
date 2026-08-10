@@ -387,6 +387,57 @@ mod router_tests {
     }
 
     #[test]
+    fn place_option_order_requires_an_explicit_position_effect() {
+        let tools = tools_with(false);
+        let tool = tools
+            .tool_router
+            .list_all()
+            .into_iter()
+            .find(|tool| tool.name == "place_option_order")
+            .expect("place_option_order must be advertised");
+        let schema = Value::Object((*tool.input_schema).clone());
+        let required = schema["required"]
+            .as_array()
+            .expect("place_option_order must list required fields");
+        assert!(
+            required.contains(&serde_json::json!("position_effect")),
+            "position_effect must be required: {required:?}"
+        );
+
+        let position_effect_ref = schema["properties"]["position_effect"]["$ref"]
+            .as_str()
+            .expect("position_effect must reference its enum schema");
+        let position_effect_name = position_effect_ref
+            .strip_prefix("#/$defs/")
+            .expect("position_effect schema reference must use $defs");
+        let values: Vec<_> = schema["$defs"][position_effect_name]["oneOf"]
+            .as_array()
+            .expect("position_effect must be a string enum")
+            .iter()
+            .map(|variant| {
+                variant["const"]
+                    .as_str()
+                    .expect("position-effect variants must be strings")
+            })
+            .collect();
+        assert_eq!(values, ["open", "close"]);
+        let description = schema["properties"]["position_effect"]["description"]
+            .as_str()
+            .expect("position_effect must explain the four actions");
+        for action in [
+            "buy-to-open",
+            "sell-to-open",
+            "sell-to-close",
+            "buy-to-close",
+        ] {
+            assert!(
+                description.contains(action),
+                "position_effect must explain {action}: {description}"
+            );
+        }
+    }
+
+    #[test]
     fn option_quotes_advertises_two_exclusive_read_only_modes() {
         use rmcp::ServerHandler;
 

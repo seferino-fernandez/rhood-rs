@@ -235,10 +235,13 @@ impl RobinhoodClient {
 
         let payload = OptionOrderPayload {
             account: account_url,
-            direction: req.credit_or_debit.clone(),
+            direction: match req.side {
+                Side::Buy => "debit".to_string(),
+                Side::Sell => "credit".to_string(),
+            },
             time_in_force: req.time_in_force,
             legs: vec![OptionLeg {
-                position_effect: req.position_effect.clone(),
+                position_effect: req.position_effect,
                 side: req.side,
                 ratio_quantity: 1,
                 option: option_url.to_string(),
@@ -710,9 +713,11 @@ mod tests {
 mod endpoint_tests {
     use crate::client::RobinhoodClient;
     use crate::config::RhoodConfig;
-    use crate::models::order::CancelAllFailure;
+    use crate::models::order::{
+        CancelAllFailure, OptionOrderRequest, OptionPositionEffect, Side, TimeInForce,
+    };
     use secrecy::SecretString;
-    use wiremock::matchers::{method, path};
+    use wiremock::matchers::{body_partial_json, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     async fn client_for_server(base_url: &str) -> (tempfile::TempDir, RobinhoodClient) {
@@ -739,6 +744,110 @@ mod endpoint_tests {
             )
             .await;
         (dir, client)
+    }
+
+    async fn assert_option_order_action(
+        side: Side,
+        position_effect: OptionPositionEffect,
+        expected_direction: &str,
+    ) {
+        let server = MockServer::start().await;
+        let option_url = format!("{}/options/instruments/contract-aapl/", server.uri());
+        let account_url = format!("{}/accounts/account-1/", server.uri());
+
+        Mock::given(method("GET"))
+            .and(path("/instruments/"))
+            .and(query_param("symbol", "AAPL"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [{"symbol": "AAPL", "tradable_chain_id": "chain-aapl"}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/options/instruments/"))
+            .and(query_param("chain_id", "chain-aapl"))
+            .and(query_param("expiration_dates", "2026-09-18"))
+            .and(query_param("type", "call"))
+            .and(query_param("state", "active"))
+            .and(query_param("strike_price", "200.0000"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [{
+                    "chain_id": "chain-aapl",
+                    "chain_symbol": "AAPL",
+                    "expiration_date": "2026-09-18",
+                    "id": "contract-aapl",
+                    "state": "active",
+                    "strike_price": "200.0000",
+                    "type": "call",
+                    "url": option_url
+                }],
+                "next": null,
+                "previous": null
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/accounts/"))
+            .and(query_param("default_to_all_accounts", "true"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [{"url": account_url}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/options/orders/"))
+            .and(body_partial_json(serde_json::json!({
+                "direction": expected_direction,
+                "time_in_force": "gtc",
+                "legs": [{
+                    "position_effect": position_effect,
+                    "side": side,
+                    "ratio_quantity": 1,
+                    "option": option_url
+                }],
+                "type": "limit",
+                "trigger": "immediate",
+                "price": "2.50",
+                "quantity": "1"
+            })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": "placed-order"})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server.uri()).await;
+        let request = OptionOrderRequest {
+            symbol: "AAPL".to_string(),
+            expiration_date: "2026-09-18".to_string(),
+            strike_price: 200.0,
+            option_type: "call".to_string(),
+            side,
+            quantity: 1.0,
+            limit_price: 2.5,
+            position_effect,
+            time_in_force: TimeInForce::Gtc,
+        };
+
+        let order = client.place_option_order(&request).await.unwrap();
+
+        assert_eq!(order.id.as_deref(), Some("placed-order"));
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn place_option_order_supports_all_four_position_actions() {
+        for (side, position_effect, expected_direction) in [
+            (Side::Buy, OptionPositionEffect::Open, "debit"),
+            (Side::Sell, OptionPositionEffect::Close, "credit"),
+            (Side::Sell, OptionPositionEffect::Open, "credit"),
+            (Side::Buy, OptionPositionEffect::Close, "debit"),
+        ] {
+            assert_option_order_action(side, position_effect, expected_direction).await;
+        }
     }
 
     #[tokio::test]

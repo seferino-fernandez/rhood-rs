@@ -170,9 +170,9 @@ fn prepare_option_order(params: &PlaceOptionOrderParams) -> Result<PreparedOrder
     validate_positive("strike_price", params.strike_price)?;
     validate_positive("quantity", params.quantity)?;
     validate_positive("limit_price", params.limit_price)?;
-    let (position_effect, credit_or_debit) = match params.side {
-        Side::Buy => ("open".to_string(), "debit".to_string()),
-        Side::Sell => ("close".to_string(), "credit".to_string()),
+    let credit_or_debit = match params.side {
+        Side::Buy => "debit",
+        Side::Sell => "credit",
     };
     let summary = format!(
         "Confirm option order: side={}; quantity={} contracts; symbol={}; option type={}; strike price=${:.2}; expiration={}; order type=limit; limit price=${:.2}; position effect={}; credit or debit={}; time in force={}",
@@ -183,7 +183,7 @@ fn prepare_option_order(params: &PlaceOptionOrderParams) -> Result<PreparedOrder
         params.strike_price,
         params.expiration_date,
         params.limit_price,
-        position_effect,
+        params.position_effect,
         credit_or_debit,
         time_in_force_name(params.time_in_force),
     );
@@ -195,8 +195,7 @@ fn prepare_option_order(params: &PlaceOptionOrderParams) -> Result<PreparedOrder
         side: params.side,
         quantity: params.quantity,
         limit_price: params.limit_price,
-        position_effect,
-        credit_or_debit,
+        position_effect: params.position_effect,
         time_in_force: params.time_in_force,
     };
     Ok(PreparedOrder {
@@ -395,7 +394,7 @@ impl RhoodTools {
 
     #[tool(
         name = "place_option_order",
-        description = "Stage an option order and request human Confirmation through MCP elicitation; the accepted retry submits it.",
+        description = "Stage a single-leg option limit order with explicit side and position_effect (open or close), then request human Confirmation through MCP elicitation; the accepted retry submits it.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -499,7 +498,7 @@ mod tests {
 
     use axum::http::Request;
     use rhood_core::models::option::OptionType;
-    use rhood_core::models::order::{OrderType, Side, TimeInForce};
+    use rhood_core::models::order::{OptionPositionEffect, OrderType, Side, TimeInForce};
     use rhood_core::{RhoodConfig, RobinhoodClient};
     use rmcp::model::{
         CallToolResponse, ElicitRequestParams, ElicitResult, ElicitationAction, Extensions,
@@ -512,9 +511,9 @@ mod tests {
     use crate::tools::handler::{ORDER_REDEMPTION_RETENTION, OrderRedemptionStore, RhoodTools};
 
     use super::{
-        CONFIRMATION_REQUEST_ID, NON_OAUTH_HTTP_PRINCIPAL, OPTION_ORDER_TOOL, OrderRoundRequest,
-        STDIO_PRINCIPAL, STOCK_ORDER_TOOL, StagedOrder, request_principal, run_order_round,
-        validate_positive, validate_symbol_format,
+        CONFIRMATION_REQUEST_ID, NON_OAUTH_HTTP_PRINCIPAL, OPTION_ORDER_TOOL, OrderRequest,
+        OrderRoundRequest, STDIO_PRINCIPAL, STOCK_ORDER_TOOL, StagedOrder, prepare_option_order,
+        request_principal, run_order_round, side_name, validate_positive, validate_symbol_format,
     };
     use crate::tools::ToolRateLimiter;
     use crate::tools::params::{PlaceOptionOrderParams, PlaceStockOrderParams};
@@ -610,9 +609,48 @@ mod tests {
             strike_price: 200.0,
             option_type: OptionType::Call,
             side: Side::Buy,
+            position_effect: OptionPositionEffect::Open,
             quantity: 1.0,
             limit_price: 2.5,
             time_in_force: TimeInForce::Gfd,
+        }
+    }
+
+    #[test]
+    fn option_order_preparation_supports_all_four_position_actions() {
+        let cases = [
+            (Side::Buy, OptionPositionEffect::Open, "debit"),
+            (Side::Sell, OptionPositionEffect::Close, "credit"),
+            (Side::Sell, OptionPositionEffect::Open, "credit"),
+            (Side::Buy, OptionPositionEffect::Close, "debit"),
+        ];
+
+        for (side, position_effect, expected_direction) in cases {
+            let mut params = option_order();
+            params.side = side;
+            params.position_effect = position_effect;
+
+            let prepared = prepare_option_order(&params).expect("valid option order prepares");
+            let OrderRequest::Option(request) = prepared.request else {
+                panic!("option parameters must produce an option request");
+            };
+            assert_eq!(request.side, side);
+            assert_eq!(request.position_effect, position_effect);
+            assert!(
+                prepared
+                    .summary
+                    .contains(&format!("side={}", side_name(side)))
+            );
+            assert!(
+                prepared
+                    .summary
+                    .contains(&format!("position effect={position_effect}"))
+            );
+            assert!(
+                prepared
+                    .summary
+                    .contains(&format!("credit or debit={expected_direction}"))
+            );
         }
     }
 

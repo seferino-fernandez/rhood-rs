@@ -19,6 +19,26 @@ pub enum Side {
     Sell,
 }
 
+/// Specifies whether an option order opens a new position or closes an existing one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum OptionPositionEffect {
+    /// Open a new long or short option position.
+    Open,
+    /// Close an existing long or short option position.
+    Close,
+}
+
+impl fmt::Display for OptionPositionEffect {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Open => write!(formatter, "open"),
+            Self::Close => write!(formatter, "close"),
+        }
+    }
+}
+
 /// Represents the execution type of an order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
@@ -244,10 +264,8 @@ pub struct OptionOrderRequest {
     pub quantity: f64,
     /// Limit price per contract.
     pub limit_price: f64,
-    /// Position effect ("open" or "close").
-    pub position_effect: String,
-    /// Whether the order results in a credit or debit ("credit" or "debit").
-    pub credit_or_debit: String,
+    /// Whether this order opens a new position or closes an existing one.
+    pub position_effect: OptionPositionEffect,
     /// Duration policy for the order.
     pub time_in_force: TimeInForce,
 }
@@ -297,7 +315,7 @@ pub(crate) struct OptionOrderPayload {
 
 #[derive(Debug, Serialize)]
 pub(crate) struct OptionLeg {
-    pub position_effect: String,
+    pub position_effect: OptionPositionEffect,
     pub side: Side,
     pub ratio_quantity: u32,
     pub option: String,

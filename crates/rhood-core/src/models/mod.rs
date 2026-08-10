@@ -40,8 +40,8 @@ pub use option::{
     OptionChain, OptionContractSpec, OptionInstrument, OptionMarketData, OptionPosition, OptionType,
 };
 pub use order::{
-    OptionOrder, OptionOrderRequest, OrderAmount, OrderType, Side, StockOrder, StockOrderRequest,
-    TimeInForce, Trigger,
+    OptionOrder, OptionOrderRequest, OptionPositionEffect, OrderAmount, OrderType, Side,
+    StockOrder, StockOrderRequest, TimeInForce, Trigger,
 };
 pub use recurring::{
     CreateRecurringRequest, NextInvestmentDate, RecurringFrequency, RecurringInvestment,

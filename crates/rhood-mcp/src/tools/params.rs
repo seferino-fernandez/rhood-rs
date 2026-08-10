@@ -1,6 +1,8 @@
 use rhood_core::models::document::DocumentType;
 use rhood_core::models::option::OptionType;
-use rhood_core::models::order::{MarketHours, OrderType, Side, TimeInForce, Trigger};
+use rhood_core::models::order::{
+    MarketHours, OptionPositionEffect, OrderType, Side, TimeInForce, Trigger,
+};
 use rhood_core::models::recurring::{RecurringFrequency, RecurringSource, RecurringState};
 use rhood_core::models::stock::{HistoricalInterval, HistoricalSpan};
 use schemars::JsonSchema;
@@ -162,6 +164,10 @@ pub struct PlaceOptionOrderParams {
     pub option_type: OptionType,
     /// Buy or sell
     pub side: Side,
+    /// Whether to open a new position or close an existing one. Use `open` with buy for
+    /// buy-to-open or sell for sell-to-open; use `close` with sell for sell-to-close or buy
+    /// for buy-to-close.
+    pub position_effect: OptionPositionEffect,
     /// Number of contracts
     #[serde(deserialize_with = "f64_or_str")]
     #[schemars(range(min = 0.0))]
@@ -775,7 +781,7 @@ mod tests {
     #[test]
     fn option_order_accepts_string_prices() {
         let parsed: PlaceOptionOrderParams = serde_json::from_str(
-            r#"{"symbol":"AAPL","expiration_date":"2026-06-18","strike_price":"400","option_type":"call","side":"buy","quantity":"1","limit_price":"0.01","time_in_force":"gtc"}"#,
+            r#"{"symbol":"AAPL","expiration_date":"2026-06-18","strike_price":"400","option_type":"call","side":"buy","position_effect":"open","quantity":"1","limit_price":"0.01","time_in_force":"gtc"}"#,
         )
         .unwrap();
         assert_eq!(parsed.strike_price, 400.0);
@@ -786,9 +792,25 @@ mod tests {
     #[test]
     fn rejects_non_numeric_string() {
         let err = serde_json::from_str::<PlaceOptionOrderParams>(
-            r#"{"symbol":"AAPL","expiration_date":"2026-06-18","strike_price":"abc","option_type":"call","side":"buy","quantity":"1","limit_price":"0.01"}"#,
+            r#"{"symbol":"AAPL","expiration_date":"2026-06-18","strike_price":"abc","option_type":"call","side":"buy","position_effect":"open","quantity":"1","limit_price":"0.01","time_in_force":"gtc"}"#,
         );
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn option_order_requires_a_known_position_effect() {
+        let missing = serde_json::from_str::<PlaceOptionOrderParams>(
+            r#"{"symbol":"AAPL","expiration_date":"2026-06-18","strike_price":"400","option_type":"call","side":"buy","quantity":"1","limit_price":"0.01","time_in_force":"gtc"}"#,
+        );
+        assert!(missing.is_err(), "position_effect must be required");
+
+        let unknown = serde_json::from_str::<PlaceOptionOrderParams>(
+            r#"{"symbol":"AAPL","expiration_date":"2026-06-18","strike_price":"400","option_type":"call","side":"buy","position_effect":"roll","quantity":"1","limit_price":"0.01","time_in_force":"gtc"}"#,
+        );
+        assert!(
+            unknown.is_err(),
+            "unknown position effects must be rejected"
+        );
     }
 
     #[test]
