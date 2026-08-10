@@ -258,10 +258,12 @@ Tools are grouped by domain. The complete authoritative list is what `tools/list
 
 For the live list, call MCP `tools/list` against the running server.
 
+`get_option_positions`, `get_transfers`, and `get_documents` return bounded pages with `items` and `next_cursor`. They accept an optional `limit` (default 50, maximum 100); pass a non-null `next_cursor` back as `cursor` unchanged to continue, keeping the same document-type filter between `get_documents` calls. Cursors are positional rather than snapshots, so restart without a cursor if the collection changes while paging.
+
 `get_option_quotes` supports two mutually exclusive inputs:
 
 - Use `{"symbol":"AAPL","contracts":[{"strike_price":310.0,"expiration_date":"2026-06-18","option_type":"call"}]}` to discover and quote contracts by attributes. This mode returns the existing enriched records containing symbol, strike, expiration, and option type.
-- Use `{"instrument_urls":["https://api.robinhood.com/options/instruments/<id>/"]}` to value held contracts from the `option` URLs returned by `get_option_positions`. This mode queries market data directly, returns Robinhood's market-data records identified by their `instrument` field, and does not promise input-order preservation.
+- Use `{"instrument_urls":["https://api.robinhood.com/options/instruments/<id>/"]}` to value held contracts from the `option` URLs in `get_option_positions.items`. This mode queries market data directly, returns Robinhood's market-data records identified by their `instrument` field, and does not promise input-order preservation.
 
 Each list must be non-empty. Do not combine the modes.
 

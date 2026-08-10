@@ -68,7 +68,7 @@ pub fn enforce_response_budget(result: CallToolResult, max_bytes: usize) -> Call
         "error": "response_too_large",
         "bytes": size,
         "limit": max_bytes,
-        "hint": "narrow the query (smaller span/interval, fewer symbols)"
+        "hint": "retry with a smaller limit or narrower filters (smaller span/interval, fewer symbols)"
     });
     let mut replacement = CallToolResult::success(vec![ContentBlock::text(body.to_string())]);
     replacement.is_error = was_error;
@@ -387,6 +387,59 @@ mod router_tests {
     }
 
     #[test]
+    fn bl16_collections_advertise_bounded_cursor_pagination() {
+        let tools = tools_with(false);
+        for name in ["get_option_positions", "get_transfers", "get_documents"] {
+            let tool = tools
+                .tool_router
+                .list_all()
+                .into_iter()
+                .find(|tool| tool.name == name)
+                .unwrap_or_else(|| panic!("{name} must be advertised"));
+            let description = tool
+                .description
+                .as_deref()
+                .unwrap_or_else(|| panic!("{name} must describe pagination"));
+            assert!(
+                description.contains("cursor-paginated page"),
+                "{name} must tell callers it returns one page: {description}"
+            );
+
+            let mut schema = Value::Object((*tool.input_schema).clone());
+            close_object_schemas(&mut schema);
+            assert_eq!(schema["required"], serde_json::json!([]));
+            assert_eq!(
+                schema["properties"]["cursor"]["maxLength"],
+                serde_json::json!(128),
+                "{name} must bound cursor input"
+            );
+            assert_eq!(
+                schema["properties"]["limit"]["minimum"],
+                serde_json::json!(1),
+                "{name} must reject an empty page size"
+            );
+            assert_eq!(
+                schema["properties"]["limit"]["maximum"],
+                serde_json::json!(100),
+                "{name} must cap each response page"
+            );
+        }
+
+        let documents = tools
+            .tool_router
+            .list_all()
+            .into_iter()
+            .find(|tool| tool.name == "get_documents")
+            .expect("get_documents must be advertised");
+        let mut schema = Value::Object((*documents.input_schema).clone());
+        close_object_schemas(&mut schema);
+        assert!(
+            schema["properties"].get("doc_type").is_some(),
+            "pagination must preserve the existing document type filter"
+        );
+    }
+
+    #[test]
     fn place_option_order_requires_an_explicit_position_effect() {
         let tools = tools_with(false);
         let tool = tools
@@ -514,6 +567,7 @@ mod budget_tests {
         let guarded = enforce_response_budget(original, 256);
         let text = serde_json::to_string(&guarded.content).unwrap();
         assert!(text.contains("response_too_large"), "got: {text}");
+        assert!(text.contains("smaller limit"), "got: {text}");
         assert!(
             text.len() < 512,
             "guard payload must be small: {}",

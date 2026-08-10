@@ -4,6 +4,7 @@ use rmcp::{Peer, RoleServer, handler::server::wrapper::Parameters, tool, tool_ro
 use serde::Serialize;
 
 use super::handler::RhoodTools;
+use super::pagination::CollectionPager;
 use super::params::*;
 use super::types::format_tool_error;
 
@@ -168,7 +169,7 @@ impl RhoodTools {
 
     #[tool(
         name = "get_documents",
-        description = "Get account documents (statements, tax forms, trade confirmations)",
+        description = "Get one cursor-paginated page of account documents (statements, tax forms, trade confirmations)",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn get_documents(
@@ -176,12 +177,21 @@ impl RhoodTools {
         peer: Peer<RoleServer>,
         Parameters(params): Parameters<DocumentsParams>,
     ) -> Result<String, String> {
+        use rhood_core::models::document::DocumentType;
+
+        let scope = match params.doc_type {
+            None => "documents-all",
+            Some(DocumentType::AccountStatement) => "documents-account-statement",
+            Some(DocumentType::TradeConfirm) => "documents-trade-confirm",
+            Some(DocumentType::Tax1099) => "documents-1099",
+        };
+        let pager = CollectionPager::new(scope, params.cursor.as_deref(), params.limit)?;
         let client = self.ensure_client(&peer).await?;
         let documents = client
             .get_documents(params.doc_type)
             .await
             .map_err(|rhood_error| format_tool_error(&rhood_error))?;
-        serde_json::to_string_pretty(&documents).map_err(|error| error.to_string())
+        pager.serialize(documents)
     }
 }
 

@@ -3,6 +3,7 @@ use rmcp::{Peer, RoleServer, handler::server::wrapper::Parameters, tool, tool_ro
 use crate::tools::enrichment::{apply_resolved_symbols, resolve_urls_to_symbols};
 
 use super::handler::RhoodTools;
+use super::pagination::CollectionPager;
 use super::params::*;
 use super::types::format_tool_error;
 use rhood_core::models::transfer::Transfer;
@@ -96,17 +97,22 @@ impl RhoodTools {
 
     #[tool(
         name = "get_transfers",
-        description = "Get all unified transfers (ACH, wire, debit card) in a single view",
+        description = "Get one cursor-paginated page of unified transfers (ACH, wire, debit card)",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
-    async fn get_transfers(&self, peer: Peer<RoleServer>) -> Result<String, String> {
+    async fn get_transfers(
+        &self,
+        peer: Peer<RoleServer>,
+        Parameters(params): Parameters<CollectionPageParams>,
+    ) -> Result<String, String> {
+        let pager = CollectionPager::new("transfers", params.cursor.as_deref(), params.limit)?;
         let client = self.ensure_client(&peer).await?;
         let transfers = client
             .get_transfers()
             .await
             .map_err(|rhood_error| format_tool_error(&rhood_error))?;
         let views: Vec<TransferView> = transfers.iter().map(TransferView::from).collect();
-        serde_json::to_string_pretty(&views).map_err(|error| error.to_string())
+        pager.serialize(views)
     }
 }
 

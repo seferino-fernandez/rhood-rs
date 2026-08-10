@@ -1,6 +1,7 @@
 use rmcp::{Peer, RoleServer, handler::server::wrapper::Parameters, tool, tool_router};
 
 use super::handler::RhoodTools;
+use super::pagination::CollectionPager;
 use super::params::*;
 use super::types::format_tool_error;
 
@@ -22,16 +23,22 @@ struct OptionQuoteView {
 impl RhoodTools {
     #[tool(
         name = "get_option_positions",
-        description = "Get all open option positions (contracts currently held)",
+        description = "Get one cursor-paginated page of open option positions (contracts currently held)",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
-    async fn get_option_positions(&self, peer: Peer<RoleServer>) -> Result<String, String> {
+    async fn get_option_positions(
+        &self,
+        peer: Peer<RoleServer>,
+        Parameters(params): Parameters<CollectionPageParams>,
+    ) -> Result<String, String> {
+        let pager =
+            CollectionPager::new("option-positions", params.cursor.as_deref(), params.limit)?;
         let client = self.ensure_client(&peer).await?;
         let positions = client
             .get_open_option_positions()
             .await
             .map_err(|rhood_error| format_tool_error(&rhood_error))?;
-        serde_json::to_string_pretty(&positions).map_err(|error| error.to_string())
+        pager.serialize(positions)
     }
 
     #[tool(

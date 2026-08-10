@@ -615,10 +615,29 @@ pub struct WatchlistModifyParams {
     pub symbols: Vec<String>,
 }
 
+/// Paging controls shared by bounded collection tools.
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CollectionPageParams {
+    /// Opaque continuation cursor returned as `next_cursor` by the previous call.
+    #[schemars(length(max = 128))]
+    pub cursor: Option<String>,
+    /// Maximum items to return. Defaults to 50 and cannot exceed 100.
+    #[schemars(range(min = 1, max = 100))]
+    pub limit: Option<usize>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DocumentsParams {
     /// Document type filter (optional)
     pub doc_type: Option<DocumentType>,
+    /// Opaque continuation cursor returned as `next_cursor` by the previous call.
+    #[schemars(length(max = 128))]
+    pub cursor: Option<String>,
+    /// Maximum items to return. Defaults to 50 and cannot exceed 100.
+    #[schemars(range(min = 1, max = 100))]
+    pub limit: Option<usize>,
 }
 
 #[cfg(test)]
