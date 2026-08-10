@@ -5,6 +5,8 @@
 //! with restricted file permissions on Unix.
 
 use crate::Result;
+#[cfg(unix)]
+use crate::config::ensure_secret_file_permissions;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -92,6 +94,8 @@ impl TokenCache {
         if !self.path.exists() {
             return Ok(None);
         }
+        #[cfg(unix)]
+        ensure_secret_file_permissions(&self.path)?;
         let data = std::fs::read_to_string(&self.path)?;
         let on_disk: CachedTokenOnDisk = match serde_json::from_str(&data) {
             Ok(v) => v,
@@ -134,13 +138,14 @@ impl TokenCache {
     #[cfg(unix)]
     fn write_restricted(path: &std::path::Path, data: &[u8]) -> Result<()> {
         use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
         let mut file = std::fs::OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(true)
             .mode(0o600)
             .open(path)?;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
         file.write_all(data)?;
         Ok(())
     }
@@ -207,6 +212,8 @@ mod tests {
         let path = dir.path().join("token.json");
         // Write malformed JSON that will fail CachedTokenOnDisk deserialization.
         std::fs::write(&path, b"{\"not_a_token\": true}").unwrap();
+        #[cfg(unix)]
+        set_mode(&path, 0o600);
         let cache = TokenCache::with_path(path);
         // A corrupt cache should be treated as absent, not as a hard error.
         let result = cache.load().unwrap();
@@ -221,8 +228,64 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("token.json");
         std::fs::write(&path, b"this is not json at all!!!").unwrap();
+        #[cfg(unix)]
+        set_mode(&path, 0o600);
         let cache = TokenCache::with_path(path);
         assert!(cache.load().unwrap().is_none());
+    }
+
+    #[cfg(unix)]
+    fn set_mode(path: &std::path::Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn owner_only_token_file_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("token.json");
+        let cache = TokenCache::with_path(path.clone());
+        let token = make_token("secret", Some(chrono::Utc::now().timestamp() + 3600));
+
+        cache.save(&token).unwrap();
+        set_mode(&path, 0o600);
+
+        assert!(cache.load().unwrap().is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn group_readable_token_file_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("token.json");
+        let cache = TokenCache::with_path(path.clone());
+        let token = make_token("secret", Some(chrono::Utc::now().timestamp() + 3600));
+
+        cache.save(&token).unwrap();
+        set_mode(&path, 0o644);
+
+        let error = cache.load().unwrap_err();
+        assert!(error.to_string().contains(&path.display().to_string()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_tightens_existing_token_file_permissions() {
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("token.json");
+        let cache = TokenCache::with_path(path.clone());
+        let token = make_token("secret", Some(chrono::Utc::now().timestamp() + 3600));
+
+        cache.save(&token).unwrap();
+        set_mode(&path, 0o644);
+        cache.save(&token).unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().mode() & 0o777;
+        assert_eq!(mode, 0o600, "Token file should be owner-only (0600)");
     }
 
     #[cfg(unix)]
