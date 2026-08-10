@@ -6,12 +6,13 @@
 //! `std::env::var` directly, every env read goes through an
 //! [`&impl Env`](crate::env::Env).
 //!
-//! [`env_non_empty`](crate::env::env_non_empty) and
-//! [`env_non_empty_u64`](crate::env::env_non_empty_u64) treat empty strings
-//! as "unset" and parse `u64` values, matching how every `RHOOD_*` variable
-//! is interpreted across the workspace.
+//! [`env_non_empty`](crate::env::env_non_empty) treats empty strings as
+//! "unset", while [`env_parsed`](crate::env::env_parsed) parses typed values
+//! and rejects malformed environment overrides.
 
 use std::collections::HashMap;
+
+use crate::{Result, RhoodError};
 
 /// Source of configuration environment variables.
 ///
@@ -78,10 +79,23 @@ pub fn env_non_empty(env: &impl Env, key: &str) -> Option<String> {
     env.get(key).filter(|value| !value.is_empty())
 }
 
-/// Returns the value of `key` from `env` parsed as `u64`, if set and valid.
+/// Returns the value of `key` from `env` parsed as `T`, if set and non-empty.
 ///
-/// Builds on [`env_non_empty`]: unset, empty, or non-numeric values return
-/// `None`, leaving the caller's current value untouched.
-pub fn env_non_empty_u64(env: &impl Env, key: &str) -> Option<u64> {
-    env_non_empty(env, key).and_then(|value| value.parse().ok())
+/// Builds on [`env_non_empty`]: unset and empty values return `Ok(None)`.
+/// A present-but-unparseable value is an error so configuration does not
+/// silently retain a default the operator intended to override.
+pub fn env_parsed<T>(env: &impl Env, key: &str) -> Result<Option<T>>
+where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
+    let Some(value) = env_non_empty(env, key) else {
+        return Ok(None);
+    };
+
+    value.parse().map(Some).map_err(|error| {
+        RhoodError::InvalidParameter(format!(
+            "environment variable {key} has invalid value {value:?}: {error}"
+        ))
+    })
 }

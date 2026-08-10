@@ -11,7 +11,7 @@ use serde::Deserialize;
 
 use crate::{Result, RhoodError};
 
-use crate::env::{Env, SystemEnv, env_non_empty, env_non_empty_u64};
+use crate::env::{Env, SystemEnv, env_non_empty, env_parsed};
 
 const DEFAULT_CLIENT_ID: &str = "c82SH0WZOsabOXGP2sxqcj34FxkvfnWRZBKlBjFS";
 const DEFAULT_TOKEN_EXPIRY_SECS: u64 = 86400;
@@ -402,7 +402,7 @@ impl RhoodConfig {
     /// # Errors
     ///
     /// Returns an error if an explicitly provided file does not exist, the TOML
-    /// is invalid, or secret file resolution fails.
+    /// is invalid, an environment override is malformed, or secret file resolution fails.
     pub fn load(path: Option<&Path>) -> Result<Self> {
         Self::load_with_env(path, &SystemEnv)
     }
@@ -415,7 +415,7 @@ impl RhoodConfig {
     /// # Errors
     ///
     /// Returns an error if an explicitly provided file does not exist, the TOML
-    /// is invalid, or secret file resolution fails.
+    /// is invalid, an environment override is malformed, or secret file resolution fails.
     pub fn load_with_env(path: Option<&Path>, env: &impl Env) -> Result<Self> {
         let explicit = path.is_some();
         let file_path = Self::resolve_path(path, env);
@@ -442,7 +442,7 @@ impl RhoodConfig {
             ensure_secret_file_permissions(config_path)?;
         }
 
-        config.apply_env_overrides(env);
+        config.apply_env_overrides(env)?;
         config.resolve_secret_files()?;
         config.normalize();
         Ok(config)
@@ -456,7 +456,8 @@ impl RhoodConfig {
     ///
     /// # Errors
     ///
-    /// Returns an error if the TOML is invalid or secret file resolution fails.
+    /// Returns an error if the TOML is invalid, an environment override is malformed,
+    /// or secret file resolution fails.
     pub fn from_toml(toml_str: &str) -> Result<Self> {
         Self::from_toml_with_env(toml_str, &SystemEnv)
     }
@@ -465,12 +466,13 @@ impl RhoodConfig {
     ///
     /// # Errors
     ///
-    /// Returns an error if the TOML is invalid or secret file resolution fails.
+    /// Returns an error if the TOML is invalid, an environment override is malformed,
+    /// or secret file resolution fails.
     pub fn from_toml_with_env(toml_str: &str, env: &impl Env) -> Result<Self> {
         let mut config: RhoodConfig = toml::from_str(toml_str).map_err(|error| {
             RhoodError::InvalidParameter(format!("Invalid config TOML: {error}"))
         })?;
-        config.apply_env_overrides(env);
+        config.apply_env_overrides(env)?;
         config.resolve_secret_files()?;
         config.normalize();
         Ok(config)
@@ -512,7 +514,7 @@ impl RhoodConfig {
     ///
     /// # Errors
     ///
-    /// Returns an error if secret file resolution fails.
+    /// Returns an error if an environment override is malformed or secret file resolution fails.
     pub fn apply_env_overrides_and_normalize(&mut self) -> Result<()> {
         self.apply_env_overrides_and_normalize_with_env(&SystemEnv)
     }
@@ -522,15 +524,15 @@ impl RhoodConfig {
     ///
     /// # Errors
     ///
-    /// Returns an error if secret file resolution fails.
+    /// Returns an error if an environment override is malformed or secret file resolution fails.
     pub fn apply_env_overrides_and_normalize_with_env(&mut self, env: &impl Env) -> Result<()> {
-        self.apply_env_overrides(env);
+        self.apply_env_overrides(env)?;
         self.resolve_secret_files()?;
         self.normalize();
         Ok(())
     }
 
-    fn apply_env_overrides(&mut self, env: &impl Env) {
+    fn apply_env_overrides(&mut self, env: &impl Env) -> Result<()> {
         if let Some(v) = env_non_empty(env, ENV_USERNAME) {
             self.auth.username = Some(v);
         }
@@ -549,7 +551,7 @@ impl RhoodConfig {
             self.auth.device_token = Some(SecretString::from(val));
             self.auth.device_token_file = None;
         }
-        if let Some(v) = env_non_empty_u64(env, ENV_TOKEN_EXPIRY_SECS) {
+        if let Some(v) = env_parsed::<u64>(env, ENV_TOKEN_EXPIRY_SECS)? {
             self.auth.token_expiry_secs = v;
         }
         if let Some(v) = env_non_empty(env, ENV_TOKEN_CACHE_PATH) {
@@ -564,43 +566,43 @@ impl RhoodConfig {
         if let Some(v) = env_non_empty(env, ENV_BONFIRE_URL) {
             self.api.bonfire_url = v;
         }
-        if let Some(v) = env_non_empty_u64(env, ENV_DV_POLL_INTERVAL_SECS) {
+        if let Some(v) = env_parsed::<u64>(env, ENV_DV_POLL_INTERVAL_SECS)? {
             self.device_verification.poll_interval_secs = v;
         }
-        if let Some(v) = env_non_empty_u64(env, ENV_DV_TIMEOUT_SECS) {
+        if let Some(v) = env_parsed::<u64>(env, ENV_DV_TIMEOUT_SECS)? {
             self.device_verification.timeout_secs = v;
         }
-        if let Some(v) = env_non_empty_u64(env, ENV_HTTP_REQUEST_TIMEOUT_SECS) {
+        if let Some(v) = env_parsed::<u64>(env, ENV_HTTP_REQUEST_TIMEOUT_SECS)? {
             self.http.request_timeout_secs = v;
         }
-        if let Some(v) = env_non_empty_u64(env, ENV_HTTP_CONNECT_TIMEOUT_SECS) {
+        if let Some(v) = env_parsed::<u64>(env, ENV_HTTP_CONNECT_TIMEOUT_SECS)? {
             self.http.connect_timeout_secs = v;
         }
         if let Some(v) = env_non_empty(env, ENV_CACHE_ENABLED) {
             self.cache.enabled = v.eq_ignore_ascii_case("true") || v == "1";
         }
-        if let Some(v) = env_non_empty_u64(env, ENV_CACHE_INSTRUMENT_TTL_SECS) {
+        if let Some(v) = env_parsed::<u64>(env, ENV_CACHE_INSTRUMENT_TTL_SECS)? {
             self.cache.instrument_ttl_secs = v;
         }
-        if let Some(v) = env_non_empty_u64(env, ENV_CACHE_INSTRUMENT_MAX_ENTRIES) {
+        if let Some(v) = env_parsed::<u64>(env, ENV_CACHE_INSTRUMENT_MAX_ENTRIES)? {
             self.cache.instrument_max_entries = v;
         }
-        if let Some(v) = env_non_empty_u64(env, ENV_CACHE_INSTRUMENT_ID_TTL_SECS) {
+        if let Some(v) = env_parsed::<u64>(env, ENV_CACHE_INSTRUMENT_ID_TTL_SECS)? {
             self.cache.instrument_id_ttl_secs = v;
         }
-        if let Some(v) = env_non_empty_u64(env, ENV_CACHE_INSTRUMENT_ID_MAX_ENTRIES) {
+        if let Some(v) = env_parsed::<u64>(env, ENV_CACHE_INSTRUMENT_ID_MAX_ENTRIES)? {
             self.cache.instrument_id_max_entries = v;
         }
-        if let Some(v) = env_non_empty_u64(env, ENV_CACHE_INDEX_TTL_SECS) {
+        if let Some(v) = env_parsed::<u64>(env, ENV_CACHE_INDEX_TTL_SECS)? {
             self.cache.index_ttl_secs = v;
         }
-        if let Some(v) = env_non_empty_u64(env, ENV_CACHE_INDEX_MAX_ENTRIES) {
+        if let Some(v) = env_parsed::<u64>(env, ENV_CACHE_INDEX_MAX_ENTRIES)? {
             self.cache.index_max_entries = v;
         }
-        if let Some(v) = env_non_empty_u64(env, ENV_CACHE_FUTURES_TTL_SECS) {
+        if let Some(v) = env_parsed::<u64>(env, ENV_CACHE_FUTURES_TTL_SECS)? {
             self.cache.futures_ttl_secs = v;
         }
-        if let Some(v) = env_non_empty_u64(env, ENV_CACHE_FUTURES_MAX_ENTRIES) {
+        if let Some(v) = env_parsed::<u64>(env, ENV_CACHE_FUTURES_MAX_ENTRIES)? {
             self.cache.futures_max_entries = v;
         }
         if let Some(v) = env_non_empty(env, ENV_CACHE_ENRICHMENT_BATCH_SIZE) {
@@ -627,6 +629,7 @@ impl RhoodConfig {
         if let Some(v) = env_non_empty(env, ENV_DEVICE_TOKEN_FILE) {
             self.auth.device_token_file = Some(v);
         }
+        Ok(())
     }
 
     fn resolve_secret_files(&mut self) -> Result<()> {
@@ -1220,9 +1223,30 @@ device_token = "device-123"
             .with(ENV_HTTP_REQUEST_TIMEOUT_SECS, "45")
             .with(ENV_HTTP_CONNECT_TIMEOUT_SECS, "5");
         let mut cfg = RhoodConfig::default();
-        cfg.apply_env_overrides(&env);
+        cfg.apply_env_overrides(&env).unwrap();
         assert_eq!(cfg.http.request_timeout_secs, 45);
         assert_eq!(cfg.http.connect_timeout_secs, 5);
+    }
+
+    #[test]
+    fn malformed_numeric_environment_override_fails_configuration_loading() {
+        let env = MapEnv::new().with(ENV_HTTP_REQUEST_TIMEOUT_SECS, "not-a-number");
+
+        let error = RhoodConfig::from_toml_with_env("", &env)
+            .expect_err("malformed override must not fall back to defaults");
+        let message = error.to_string();
+
+        assert!(message.contains(ENV_HTTP_REQUEST_TIMEOUT_SECS));
+        assert!(message.contains("\"not-a-number\""));
+    }
+
+    #[test]
+    fn empty_numeric_environment_override_does_not_override_toml() {
+        let env = MapEnv::new().with(ENV_HTTP_REQUEST_TIMEOUT_SECS, "");
+        let config =
+            RhoodConfig::from_toml_with_env("[http]\nrequest_timeout_secs = 45\n", &env).unwrap();
+
+        assert_eq!(config.http.request_timeout_secs, 45);
     }
 
     #[test]
@@ -1266,7 +1290,7 @@ device_token = "device-123"
             .with(ENV_CACHE_FUTURES_MAX_ENTRIES, "50")
             .with(ENV_CACHE_ENRICHMENT_BATCH_SIZE, "25");
         let mut cfg = RhoodConfig::default();
-        cfg.apply_env_overrides(&env);
+        cfg.apply_env_overrides(&env).unwrap();
         assert!(!cfg.cache.enabled);
         assert_eq!(cfg.cache.instrument_ttl_secs, 60);
         assert_eq!(cfg.cache.instrument_max_entries, 1234);
