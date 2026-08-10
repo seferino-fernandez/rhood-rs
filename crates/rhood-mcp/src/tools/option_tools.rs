@@ -53,6 +53,31 @@ impl RhoodTools {
     }
 
     #[tool(
+        name = "find_options",
+        description = "Search for equity option contracts by expiration, type, and optional strike",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    async fn find_options(
+        &self,
+        peer: Peer<RoleServer>,
+        Parameters(params): Parameters<FindOptionsParams>,
+    ) -> Result<String, String> {
+        let client = self.ensure_client(&peer).await?;
+        let strike_str = params.strike_price.map(|price| format!("{price:.4}"));
+        let option_type = params.option_type.to_string();
+        let options = client
+            .find_options(
+                &params.symbol,
+                &params.expiration_date,
+                &option_type,
+                strike_str.as_deref(),
+            )
+            .await
+            .map_err(|rhood_error| format_tool_error(&rhood_error))?;
+        serde_json::to_string_pretty(&options).map_err(|error| error.to_string())
+    }
+
+    #[tool(
         name = "get_option_quotes",
         description = "Get live quotes for specific option contracts including bid/ask, Greeks, volume, and open interest",
         annotations(read_only_hint = true, open_world_hint = false)

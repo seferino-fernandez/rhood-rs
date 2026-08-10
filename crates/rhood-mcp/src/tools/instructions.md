@@ -2,7 +2,7 @@ An MCP server for the Robinhood brokerage API. Tools are grouped by domain.
 
 **Stocks** - `get_latest_prices` is the compact choice when you only need one current trade price per symbol; use `get_stock_quotes` for full quote detail. `get_stock_history` and `get_fundamentals` provide other market data; `get_open_orders` and `get_all_stock_orders` provide stock order history.
 
-**Options** - `get_option_chain` and `get_option_quotes` (live bid/ask, Greeks, volume) for chain data; `get_option_positions`, `get_option_orders`, `get_open_option_orders` for positions and order history.
+**Options** - For an equity contract, use `get_option_chain` -> `find_options` -> `get_option_quotes` / `place_option_order`. `get_option_quotes` returns live bid/ask, Greeks, and volume; `get_option_positions`, `get_option_orders`, `get_open_option_orders` cover positions and order history.
 
 **Futures** - `get_futures_contract` to look up contracts, `get_futures_quotes` for real-time quotes, `get_all_futures_orders` for order history, `get_futures_account` to discover the futures account ID.
 

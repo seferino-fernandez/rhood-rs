@@ -242,9 +242,116 @@ impl RobinhoodClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::RhoodConfig;
     use crate::models::option::{OptionContractSpec, OptionMarketData, OptionPosition};
     use crate::models::order::OptionOrder;
     use crate::models::stock::{IndexInstrument, IndexQuoteWrapper};
+    use secrecy::SecretString;
+    use wiremock::matchers::{method, path, query_param, query_param_is_missing};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    async fn client_for_server(base_url: &str) -> (tempfile::TempDir, RobinhoodClient) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = RhoodConfig::default();
+        config.auth.token_cache_path = dir
+            .path()
+            .join("nonexistent-token.json")
+            .to_str()
+            .unwrap()
+            .to_string();
+        config.api.base_url = base_url.to_string();
+        let client = RobinhoodClient::with_config(config).unwrap();
+        client
+            .inject_test_auth(
+                SecretString::from("access-token"),
+                "Bearer".to_string(),
+                SecretString::from("refresh-token"),
+            )
+            .await;
+        (dir, client)
+    }
+
+    async fn mount_equity_option_lookup(server: &MockServer) {
+        Mock::given(method("GET"))
+            .and(path("/instruments/"))
+            .and(query_param("symbol", "AAPL"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [{"symbol": "AAPL", "tradable_chain_id": "chain-aapl"}]
+            })))
+            .expect(1)
+            .mount(server)
+            .await;
+    }
+
+    fn option_search_response() -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "results": [{
+                "chain_id": "chain-aapl",
+                "chain_symbol": "AAPL",
+                "expiration_date": "2026-06-18",
+                "id": "call-310",
+                "state": "active",
+                "strike_price": "310.0000",
+                "type": "call"
+            }],
+            "next": null,
+            "previous": null
+        }))
+    }
+
+    #[tokio::test]
+    async fn find_options_omits_optional_strike_filter() {
+        let server = MockServer::start().await;
+        mount_equity_option_lookup(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/options/instruments/"))
+            .and(query_param("chain_id", "chain-aapl"))
+            .and(query_param("expiration_dates", "2026-06-18"))
+            .and(query_param("type", "call"))
+            .and(query_param("state", "active"))
+            .and(query_param_is_missing("strike_price"))
+            .respond_with(option_search_response())
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server.uri()).await;
+
+        let options = client
+            .find_options("AAPL", "2026-06-18", "call", None)
+            .await
+            .unwrap();
+
+        assert_eq!(options.len(), 1);
+        assert_eq!(options[0].strike_price.as_deref(), Some("310.0000"));
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn find_options_includes_optional_strike_filter() {
+        let server = MockServer::start().await;
+        mount_equity_option_lookup(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/options/instruments/"))
+            .and(query_param("chain_id", "chain-aapl"))
+            .and(query_param("expiration_dates", "2026-06-18"))
+            .and(query_param("type", "call"))
+            .and(query_param("state", "active"))
+            .and(query_param("strike_price", "310.0000"))
+            .respond_with(option_search_response())
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server.uri()).await;
+
+        let options = client
+            .find_options("AAPL", "2026-06-18", "call", Some("310.0000"))
+            .await
+            .unwrap();
+
+        assert_eq!(options.len(), 1);
+        assert_eq!(options[0].id.as_deref(), Some("call-310"));
+        server.verify().await;
+    }
 
     #[test]
     fn option_contract_spec_fields_pass_through() {

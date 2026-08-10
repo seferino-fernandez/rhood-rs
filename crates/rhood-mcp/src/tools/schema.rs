@@ -330,6 +330,57 @@ mod router_tests {
             "get_stock_quotes must describe full quote detail and point to get_latest_prices for price-only queries: {stock_quotes}"
         );
     }
+
+    #[test]
+    fn find_options_advertises_contract_search_schema() {
+        let tools = tools_with(false);
+        let tool = tools
+            .tool_router
+            .list_all()
+            .into_iter()
+            .find(|tool| tool.name == "find_options")
+            .expect("find_options must be advertised");
+
+        assert!(
+            tool.annotations
+                .as_ref()
+                .is_some_and(|annotations| annotations.read_only_hint == Some(true))
+        );
+        let schema = Value::Object((*tool.input_schema).clone());
+        assert_eq!(
+            schema["required"],
+            serde_json::json!(["symbol", "expiration_date", "option_type"])
+        );
+        assert_eq!(
+            schema["properties"]["symbol"]["pattern"],
+            serde_json::json!("^[A-Za-z0-9.]{1,12}$")
+        );
+        assert_eq!(
+            schema["properties"]["expiration_date"]["pattern"],
+            serde_json::json!("^\\d{4}-\\d{2}-\\d{2}$")
+        );
+        let option_type_ref = schema["properties"]["option_type"]["$ref"]
+            .as_str()
+            .expect("option_type must reference its enum schema");
+        let option_type_name = option_type_ref
+            .strip_prefix("#/$defs/")
+            .expect("option_type schema reference must use $defs");
+        let option_type_values: Vec<_> = schema["$defs"][option_type_name]["oneOf"]
+            .as_array()
+            .expect("option_type must be a string enum")
+            .iter()
+            .map(|variant| {
+                variant["const"]
+                    .as_str()
+                    .expect("option_type enum variants must be strings")
+            })
+            .collect();
+        assert_eq!(option_type_values, ["call", "put"]);
+        assert_eq!(
+            schema["properties"]["strike_price"]["type"],
+            serde_json::json!(["number", "null"])
+        );
+    }
 }
 
 #[cfg(test)]

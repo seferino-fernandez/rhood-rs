@@ -126,6 +126,20 @@ pub struct OptionChainParams {
     pub symbol: String,
 }
 
+#[derive(Deserialize, JsonSchema)]
+pub struct FindOptionsParams {
+    /// Stock symbol (e.g. "AAPL")
+    #[schemars(length(max = 12), regex(pattern = r"^[A-Za-z0-9.]{1,12}$"))]
+    pub symbol: String,
+    /// Expiration date in YYYY-MM-DD format
+    #[schemars(regex(pattern = r"^\d{4}-\d{2}-\d{2}$"))]
+    pub expiration_date: String,
+    /// "call" or "put"
+    pub option_type: OptionType,
+    /// Strike price (optional filter)
+    pub strike_price: Option<f64>,
+}
+
 #[derive(Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PlaceOptionOrderParams {
