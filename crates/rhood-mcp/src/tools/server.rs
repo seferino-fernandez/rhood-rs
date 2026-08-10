@@ -1,10 +1,10 @@
-use std::sync::Arc;
+use std::{borrow::Cow, sync::Arc};
 
 use axum::http::request::Parts;
 use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::model::{
     CacheScope, CallToolRequestParams, CallToolResponse, ErrorCode, Implementation,
-    PaginatedRequestParams, ProtocolVersion, ServerCapabilities, Tool,
+    InitializeRequestParams, PaginatedRequestParams, ProtocolVersion, ServerCapabilities, Tool,
 };
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
@@ -80,9 +80,8 @@ impl ServerHandler for RhoodTools {
         // changing what this server advertises; `advertises_current_protocol_version`
         // turns any such change into a reviewed diff.
         //
-        // Note this value is only the fallback for clients requesting an unknown
-        // version: `negotiate_protocol_version` echoes back any version in
-        // `ProtocolVersion::KNOWN_VERSIONS`, so older clients still negotiate down.
+        // This is the sole revision the server supports; `initialize` rejects
+        // every other requested version rather than negotiating down.
         info.protocol_version = ProtocolVersion::V_2026_07_28;
         // No `enable_logging()`: SEP-2577 deprecated MCP logging, and rmcp 3.1
         // marks the whole surface `#[deprecated]`. Server-side diagnostics go to
@@ -95,6 +94,30 @@ impl ServerHandler for RhoodTools {
             .with_description(env!("CARGO_PKG_DESCRIPTION"));
         info.instructions = Some(include_str!("instructions.md").to_string());
         info
+    }
+
+    fn supported_protocol_versions(&self) -> Cow<'static, [ProtocolVersion]> {
+        Cow::Borrowed(&[ProtocolVersion::V_2026_07_28])
+    }
+
+    async fn initialize(
+        &self,
+        request: InitializeRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<rmcp::model::InitializeResult, McpError> {
+        if request.protocol_version != ProtocolVersion::V_2026_07_28 {
+            return Err(McpError::unsupported_protocol_version(
+                request.protocol_version,
+                &[ProtocolVersion::V_2026_07_28],
+            ));
+        }
+
+        // This is `ServerHandler`'s default initialize behavior after the
+        // strict version check above. The trait has no super-call syntax.
+        context.peer.set_peer_info(request.clone());
+        let mut info = self.get_info();
+        info.protocol_version = request.protocol_version;
+        Ok(info)
     }
 
     async fn list_tools(

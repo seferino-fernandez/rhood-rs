@@ -69,12 +69,10 @@ pub async fn serve(config: &ServerConfig) -> anyhow::Result<()> {
             },
             session_manager,
             StreamableHttpServerConfig::default()
-                // Sessions apply only to protocol versions older than 2026-07-28.
-                // Per SEP-2567 the 2026-07-28 protocol removed them, so modern
-                // clients are served statelessly regardless of this setting;
-                // keeping it on preserves sessions and resumability for older
-                // clients.
-                .with_legacy_session_mode(true)
+                // Strict per-request metadata validation runs only on the
+                // stateless path, so legacy session routing must stay disabled.
+                .with_legacy_session_mode(false)
+                .with_stateless_protocol_metadata_required(true)
                 .with_cancellation_token(cancellation_token.child_token())
                 // Guards against DNS rebinding. Defaults to loopback only, so a
                 // non-loopback deployment must list its own hostnames here.
@@ -379,7 +377,8 @@ mod wire_tests {
             },
             Arc::default(),
             StreamableHttpServerConfig::default()
-                .with_legacy_session_mode(true)
+                .with_legacy_session_mode(false)
+                .with_stateless_protocol_metadata_required(true)
                 .with_allowed_hosts(McpConfig::default().allowed_hosts),
         )
     }
@@ -490,10 +489,6 @@ mod wire_tests {
         })
     }
 
-    fn legacy_tools_list() -> Value {
-        json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" })
-    }
-
     fn result_of(payloads: &[Value]) -> Value {
         payloads
             .iter()
@@ -520,7 +515,7 @@ mod wire_tests {
     }
 
     /// Per SEP-2567 the 2026-07-28 protocol removed sessions, so a modern client
-    /// is served statelessly even though `legacy_session_mode` is on.
+    /// is served statelessly.
     #[tokio::test]
     async fn modern_client_negotiates_2026_07_28_without_a_session() {
         let service = mcp_service(false);
@@ -537,22 +532,18 @@ mod wire_tests {
         );
     }
 
-    /// The other half of dual mode: `legacy_session_mode` still gives pre-2026
-    /// clients a session, so they keep resumability.
+    /// ADR-0001 serves only 2026-07-28, so an older client receives the protocol
+    /// negotiation error instead of falling back to a legacy session.
     #[tokio::test]
-    async fn legacy_client_still_gets_a_session() {
+    async fn legacy_client_is_rejected_with_unsupported_protocol_version() {
         let service = mcp_service(false);
-        let (status, headers, payloads) = post(&service, initialize(V_LEGACY), None, None).await;
+        let (status, _, payloads) = post(&service, initialize(V_LEGACY), None, None).await;
 
         assert!(
             status.is_success(),
-            "initialize failed: {status} {payloads:?}"
+            "initialize must return a JSON-RPC error: {status} {payloads:?}"
         );
-        assert_eq!(result_of(&payloads)["protocolVersion"], V_LEGACY);
-        assert!(
-            headers.get("mcp-session-id").is_some(),
-            "legacy sessions must still be issued, got {headers:?}"
-        );
+        assert_eq!(error_of(&payloads)["code"], -32022);
     }
 
     /// A modern peer gets the SEP-2322 `resultType` discriminator and the
@@ -577,29 +568,29 @@ mod wire_tests {
         );
     }
 
-    /// The legacy wire shape is unchanged: rmcp clears `resultType` before
-    /// replying to a peer that negotiated an older version.
+    /// Strict stateless mode requires the per-request protocol version in
+    /// `_meta`; a matching HTTP header alone is insufficient.
     #[tokio::test]
-    async fn legacy_tools_list_omits_result_type() {
+    async fn tools_list_missing_protocol_metadata_is_rejected() {
         let service = mcp_service(false);
-        let (_, headers, _) = post(&service, initialize(V_LEGACY), None, None).await;
-        let session = headers
-            .get("mcp-session-id")
-            .and_then(|value| value.to_str().ok())
-            .expect("legacy initialize issues a session")
-            .to_string();
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list",
+            "params": {
+                "_meta": {
+                    "io.modelcontextprotocol/clientInfo": {
+                        "name": "wire-test",
+                        "version": "0"
+                    },
+                    "io.modelcontextprotocol/clientCapabilities": {}
+                }
+            }
+        });
 
-        let (status, _, payloads) = post(&service, legacy_tools_list(), Some(&session), None).await;
-        assert!(
-            status.is_success(),
-            "tools/list failed: {status} {payloads:?}"
-        );
-        let result = result_of(&payloads);
-        assert!(
-            result.get("resultType").is_none(),
-            "legacy peers must not receive resultType: {result}"
-        );
-        assert!(!tool_names(&result).is_empty());
+        let (status, _, payloads) = post(&service, body, None, Some(V_LEGACY)).await;
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(error_of(&payloads)["code"], -32602);
     }
 
     /// First of the three read-only enforcement points: `list_tools` must not
