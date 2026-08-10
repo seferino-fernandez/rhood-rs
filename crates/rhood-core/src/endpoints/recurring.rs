@@ -161,6 +161,10 @@ impl RobinhoodClient {
 // (compiled under `cfg(test)`) to get past `require_auth`. These run on every
 // `cargo test` / `cargo nextest run` and count toward coverage.
 #[cfg(test)]
+#[expect(
+    clippy::assertions_on_result_states,
+    reason = "this endpoint test intentionally asserts the propagated error state without unwrapping"
+)]
 mod endpoint_tests {
     use crate::client::RobinhoodClient;
     use crate::config::RhoodConfig;

@@ -85,6 +85,10 @@ pub async fn serve(config: &ServerConfig) -> anyhow::Result<()> {
     let router = match config.mcp.auth_mode.as_str() {
         "token" => {
             tracing::info!("Using static bearer token authentication");
+            #[expect(
+                clippy::unwrap_used,
+                reason = "the auth-mode validation above rejects token mode without an MCP token"
+            )]
             let token = config
                 .mcp
                 .token
@@ -175,6 +179,10 @@ pub async fn serve(config: &ServerConfig) -> anyhow::Result<()> {
             tracing::warn!("Running with auth_mode=none, no authentication on MCP endpoints");
             axum::Router::new().nest_service("/mcp", service)
         }
+        #[expect(
+            clippy::unreachable,
+            reason = "the auth-mode validation above admits only token, oauth, and none"
+        )]
         _ => unreachable!(),
     };
 
@@ -218,6 +226,10 @@ pub async fn serve(config: &ServerConfig) -> anyhow::Result<()> {
 /// SIGTERM handling matters for container orchestrators (Docker, Kubernetes) that
 /// request graceful shutdown via SIGTERM before escalating to SIGKILL.
 async fn shutdown_signal(cancellation_token: CancellationToken) {
+    #[expect(
+        clippy::expect_used,
+        reason = "without a SIGINT handler the server cannot provide its documented graceful shutdown path"
+    )]
     let ctrl_c = async {
         tokio::signal::ctrl_c()
             .await
@@ -225,6 +237,10 @@ async fn shutdown_signal(cancellation_token: CancellationToken) {
     };
 
     #[cfg(unix)]
+    #[expect(
+        clippy::expect_used,
+        reason = "without a SIGTERM handler Unix deployments cannot provide their documented graceful shutdown path"
+    )]
     let terminate = async {
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
             .expect("failed to install SIGTERM handler")

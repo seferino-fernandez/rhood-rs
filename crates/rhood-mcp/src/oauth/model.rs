@@ -9,7 +9,10 @@ pub struct ApprovalForm {
     pub scope: String,
     pub state: Option<String>,
     pub code_challenge: String,
-    #[allow(dead_code)] // validated on GET /authorize; carried through form for completeness
+    #[expect(
+        dead_code,
+        reason = "validated on GET /authorize; carried through form for completeness"
+    )]
     pub code_challenge_method: String,
     pub approved: String,
     pub pin: Option<String>,

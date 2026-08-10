@@ -5,6 +5,10 @@
 //! than being arbitrarily placed in a single domain's `mod tests` block.
 
 #[cfg(test)]
+#[expect(
+    clippy::let_underscore_must_use,
+    reason = "compile-only async helpers prove cross-cutting public method signatures without executing requests"
+)]
 mod tests {
     #[test]
     fn validate_token_is_public_method() {

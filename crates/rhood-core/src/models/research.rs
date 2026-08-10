@@ -66,6 +66,10 @@ pub struct RatingSummary {
 
 impl RatingSummary {
     /// Total number of analyst ratings.
+    #[expect(
+        clippy::arithmetic_side_effects,
+        reason = "the analyst-rating counts from the upstream API response are assumed to sum within i32; no in-code bound enforces this"
+    )]
     pub fn total(&self) -> i32 {
         self.num_buy_ratings.unwrap_or(0)
             + self.num_hold_ratings.unwrap_or(0)

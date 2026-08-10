@@ -6,7 +6,11 @@
 //! env vars) and are marked `#[ignore]` so `cargo test` / `just test`
 //! skips them. Run explicitly via `just integration`.
 
-#![allow(dead_code)]
+#![expect(
+    clippy::expect_used,
+    clippy::panic,
+    reason = "live-API test helpers use explicit diagnostics when the CLI binary or JSON output is unavailable"
+)]
 
 use assert_cmd::Command;
 use serde_json::Value;

@@ -7,6 +7,10 @@ pub const STRIKE_PRICE_DECIMALS: usize = 4;
 /// at parse time (exit code 2) so no malformed value reaches the API.
 pub fn parse_date(value: &str) -> Result<String, String> {
     let bytes = value.as_bytes();
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "the shaped check requires bytes.len() == 10 before checking separator positions"
+    )]
     let shaped = bytes.len() == 10
         && bytes[4] == b'-'
         && bytes[7] == b'-'
@@ -16,12 +20,20 @@ pub fn parse_date(value: &str) -> Result<String, String> {
     if !shaped {
         return Err(format!("must be in {DATE_FORMAT_PATTERN} format"));
     }
+    #[expect(
+        clippy::string_slice,
+        reason = "the shaped check has verified ASCII digits and fixed YYYY-MM-DD byte positions"
+    )]
     let month: u8 = value[5..7]
         .parse()
-        .map_err(|_| "invalid month".to_string())?;
+        .map_err(|error| format!("invalid month: {error}"))?;
+    #[expect(
+        clippy::string_slice,
+        reason = "the shaped check has verified ASCII digits and fixed YYYY-MM-DD byte positions"
+    )]
     let day: u8 = value[8..10]
         .parse()
-        .map_err(|_| "invalid day".to_string())?;
+        .map_err(|error| format!("invalid day: {error}"))?;
     if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
         return Err(format!(
             "must be a real calendar date in {DATE_FORMAT_PATTERN} format"
@@ -50,6 +62,10 @@ pub fn parse_uuid(value: &str) -> Result<String, String> {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::assertions_on_result_states,
+    reason = "the rejection tests check Result state without extracting an error because unwrap_used is denied"
+)]
 mod tests {
     use super::*;
 

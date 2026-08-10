@@ -46,6 +46,10 @@ impl RobinhoodClient {
         let mut dividends: Vec<Dividend> = self
             .get_paginated(&self.api_url(paths::DIVIDENDS), &params)
             .await?;
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the documented best-effort enrichment contract returns raw dividends when symbol resolution fails"
+        )]
         let _ = self.enrich_dividend_symbols(&mut dividends).await;
         Ok(dividends)
     }
@@ -106,6 +110,10 @@ impl RobinhoodClient {
 // (compiled under `cfg(test)`) to get past `require_auth`. These run on every
 // `cargo test` / `cargo nextest run` and count toward coverage.
 #[cfg(test)]
+#[expect(
+    clippy::assertions_on_result_states,
+    reason = "this endpoint test intentionally asserts the propagated error state without unwrapping"
+)]
 mod endpoint_tests {
     use crate::client::RobinhoodClient;
     use crate::config::RhoodConfig;

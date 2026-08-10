@@ -269,6 +269,10 @@ impl RobinhoodClient {
         let count = open.len();
         for order in &open {
             if let Some(id) = &order.id {
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "cancel-all discards per-order failures and returns the count found, not cancelled; fixing that needs a partial-failure design decision, tracked as BL-25"
+                )]
                 let _ = self.cancel_stock_order(id).await;
             }
         }
@@ -289,6 +293,10 @@ impl RobinhoodClient {
         let count = open.len();
         for order in &open {
             if let Some(id) = &order.id {
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "cancel-all discards per-order failures and returns the count found, not cancelled; fixing that needs a partial-failure design decision, tracked as BL-25"
+                )]
                 let _ = self.cancel_option_order(id).await;
             }
         }
@@ -337,6 +345,10 @@ impl RobinhoodClient {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::assertions_on_result_states,
+    reason = "these validation tests intentionally assert Result state without unwrapping"
+)]
 mod tests {
     use super::*;
     use crate::RhoodError;

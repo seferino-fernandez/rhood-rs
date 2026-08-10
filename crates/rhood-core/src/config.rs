@@ -401,10 +401,10 @@ impl RhoodConfig {
                     RhoodError::InvalidParameter(format!("Invalid config TOML: {error}"))
                 })?
             }
-            Some(_) if explicit => {
+            Some(p) if explicit => {
                 return Err(RhoodError::InvalidParameter(format!(
                     "Config file not found: {}",
-                    path.unwrap().display()
+                    p.display()
                 )));
             }
             _ => RhoodConfig::default(),

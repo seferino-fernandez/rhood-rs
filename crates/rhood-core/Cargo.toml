@@ -12,6 +12,9 @@ readme = "README.md"
 keywords = ["robinhood", "trading", "finance", "stocks"]
 categories = ["api-bindings", "finance"]
 
+[lints]
+workspace = true
+
 [features]
 clap = ["dep:clap"]
 schemars = ["dep:schemars"]

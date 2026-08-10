@@ -12,6 +12,9 @@ readme = "README.md"
 keywords = ["robinhood", "trading", "cli", "stocks"]
 categories = ["command-line-utilities", "finance"]
 
+[lints]
+workspace = true
+
 [[bin]]
 name = "rhood"
 path = "src/main.rs"

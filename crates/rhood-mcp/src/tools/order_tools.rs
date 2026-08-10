@@ -117,7 +117,12 @@ impl RhoodTools {
         let type_str = if order_type == OrderType::Market {
             "market".to_string()
         } else {
-            format!("limit @ ${:.2}", params.limit_price.unwrap())
+            #[expect(
+                clippy::unwrap_used,
+                reason = "OrderType has only Market and Limit variants, and the earlier Limit check requires a price"
+            )]
+            let limit_price = params.limit_price.unwrap();
+            format!("limit @ ${limit_price:.2}")
         };
         let amount_str = match amount {
             OrderAmount::Quantity(q) => format!("{q}x"),
@@ -304,6 +309,10 @@ impl RhoodTools {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::assertions_on_result_states,
+    reason = "these validation tests deliberately assert accepted and rejected Result states without unwrapping successes"
+)]
 mod tests {
     use super::{staged_order_response, validate_positive, validate_symbol_format};
     use chrono::Utc;

@@ -68,6 +68,11 @@ impl RobinhoodClient {
     ///
     /// Excludes positions that have been fully closed (quantity of zero).
     ///
+    /// Instrument URLs are resolved to ticker symbols on a best-effort basis
+    /// via [`enrich_position_symbols`]; any failure, including a failure of
+    /// the batched symbol-resolution request, is silently ignored so that the
+    /// caller always receives the raw positions.
+    ///
     /// # Errors
     ///
     /// Returns an error if the HTTP request fails or the response cannot be
@@ -76,11 +81,20 @@ impl RobinhoodClient {
         let mut positions: Vec<Position> = self
             .get_paginated(&self.api_url(paths::POSITIONS), &[("nonzero", "true")])
             .await?;
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the function's documented best-effort enrichment contract returns raw positions when symbol resolution fails"
+        )]
         let _ = self.enrich_position_symbols(&mut positions).await;
         Ok(positions)
     }
 
     /// Fetches all stock positions, including those with a zero quantity.
+    ///
+    /// Instrument URLs are resolved to ticker symbols on a best-effort basis
+    /// via [`enrich_position_symbols`]; any failure, including a failure of
+    /// the batched symbol-resolution request, is silently ignored so that the
+    /// caller always receives the raw positions.
     ///
     /// # Errors
     ///
@@ -90,6 +104,10 @@ impl RobinhoodClient {
         let mut positions: Vec<Position> = self
             .get_paginated(&self.api_url(paths::POSITIONS), &[])
             .await?;
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the function's documented best-effort enrichment contract returns raw positions when symbol resolution fails"
+        )]
         let _ = self.enrich_position_symbols(&mut positions).await;
         Ok(positions)
     }

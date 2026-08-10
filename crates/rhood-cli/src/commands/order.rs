@@ -130,6 +130,10 @@ pub async fn run(
                 (Some(q), None) => OrderAmount::Quantity(*q),
                 (None, Some(d)) => OrderAmount::DollarAmount(*d),
                 (None, None) => anyhow::bail!("Specify --quantity or --dollar-amount"),
+                #[expect(
+                    clippy::unreachable,
+                    reason = "Clap's amount_spec group prevents both amount flags from reaching this command"
+                )]
                 _ => unreachable!("clap group prevents both"),
             };
             let amount_str = match amount {
@@ -139,7 +143,14 @@ pub async fn run(
             let type_str = if *r#type == OrderType::Market {
                 "market".to_string()
             } else {
-                format!("limit @ ${:.2}", limit.unwrap())
+                let limit = {
+                    #[expect(
+                        clippy::unwrap_used,
+                        reason = "the preceding limit-order guard rejects a missing limit price"
+                    )]
+                    limit.unwrap()
+                };
+                format!("limit @ ${limit:.2}")
             };
             println!("Buy {amount_str} {symbol} at {type_str}");
             if !confirm_order(*yes)? {
@@ -180,7 +191,14 @@ pub async fn run(
             let type_str = if *r#type == OrderType::Market {
                 "market".to_string()
             } else {
-                format!("limit @ ${:.2}", limit.unwrap())
+                let limit = {
+                    #[expect(
+                        clippy::unwrap_used,
+                        reason = "the preceding limit-order guard rejects a missing limit price"
+                    )]
+                    limit.unwrap()
+                };
+                format!("limit @ ${limit:.2}")
             };
             println!("Sell {quantity}x {symbol} at {type_str}");
             if !confirm_order(*yes)? {
@@ -209,6 +227,10 @@ pub async fn run(
             };
             // Best-effort symbol resolution: don't fail the listing if a
             // per-instrument lookup errors out.
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "symbol enrichment is optional and must not make an order listing fail"
+            )]
             let _ = client.enrich_order_symbols(&mut orders).await;
             let headers = &["ID", "Symbol", "Side", "Qty", "State", "Type", "Created"];
             let rows: Vec<Vec<String>> = orders

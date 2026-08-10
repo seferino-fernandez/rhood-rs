@@ -410,13 +410,17 @@ impl RobinhoodClient {
             refresh_token: refresh_token.clone(),
         };
 
+        #[expect(
+            clippy::arithmetic_side_effects,
+            reason = "the externally configured AuthConfig::token_expiry_secs value is assumed to fit a signed Unix timestamp; no in-code bound enforces this"
+        )]
         let cached = CachedToken {
             access_token,
             refresh_token,
             token_type,
             device_token: self.device_token.read().await.clone(),
             expires_at: Some({
-                Utc::now().timestamp() + self.config.auth.token_expiry_secs as i64
+                Utc::now().timestamp() + self.config.auth.token_expiry_secs.cast_signed()
             }),
         };
         self.token_cache.save(&cached)?;
@@ -505,6 +509,10 @@ impl RobinhoodClient {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::let_underscore_must_use,
+    reason = "compile-only async helpers prove public method signatures without executing requests"
+)]
 mod tests {
     use super::super::{default_oauth_response, test_config, test_config_with_tempdir};
     use super::*;

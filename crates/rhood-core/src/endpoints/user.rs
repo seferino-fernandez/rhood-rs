@@ -66,6 +66,11 @@ impl RobinhoodClient {
             self.api_url(paths::DAY_TRADES)
         );
         let recent: RecentDayTradesResponse = self.get(&url).await?;
+        #[expect(
+            clippy::arithmetic_side_effects,
+            clippy::cast_possible_wrap,
+            reason = "API response collections are bounded by allocatable vector length, which is below i64::MAX"
+        )]
         let day_trade_count =
             (recent.equity_day_trades.len() + recent.option_day_trades.len()) as i64;
         Ok(DayTradeCheck {

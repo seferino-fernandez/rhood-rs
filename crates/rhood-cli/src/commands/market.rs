@@ -111,8 +111,14 @@ pub async fn run(
                             .map_or_else(String::new, |percent_change| {
                                 format!("{percent_change:+.2}%")
                             }),
-                        item.volume
-                            .map_or_else(String::new, |volume| format!("{}", volume as i64)),
+                        item.volume.map_or_else(String::new, |volume| {
+                            #[expect(
+                                clippy::cast_possible_truncation,
+                                reason = "trading volume is a whole-share count in the daily-movers API"
+                            )]
+                            let volume = volume as i64;
+                            format!("{volume}")
+                        }),
                     ]
                 })
                 .collect();

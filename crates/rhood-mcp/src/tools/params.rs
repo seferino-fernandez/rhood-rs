@@ -20,7 +20,7 @@ fn coerce(value: NumOrStr) -> Result<f64, String> {
         NumOrStr::Str(s) => s
             .trim()
             .parse::<f64>()
-            .map_err(|_| format!("expected a number, got string {s:?}")),
+            .map_err(|error| format!("expected a number, got string {s:?}: {error}")),
     }
 }
 
@@ -416,6 +416,10 @@ pub struct DocumentsParams {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::float_cmp,
+    reason = "these deserialization tests verify exact parsing of string-encoded decimal literals"
+)]
 mod tests {
     use super::*;
 

@@ -28,6 +28,9 @@ pkg-fmt = "zip"
 name = "rhood-mcp"
 path = "src/main.rs"
 
+[lints]
+workspace = true
+
 [dependencies]
 rhood-core = { workspace = true, features = ["clap", "schemars"] }
 chrono.workspace = true

@@ -212,7 +212,12 @@ impl ServerConfig {
                     .map_err(|err| anyhow::anyhow!("Invalid config TOML: {err}"))?
             }
             Some(_) if explicit => {
-                anyhow::bail!("Config file not found: {}", path.unwrap().display());
+                #[expect(
+                    clippy::unwrap_used,
+                    reason = "`explicit` is derived from `path.is_some()`, so this match arm only runs with a path"
+                )]
+                let explicit_path = path.unwrap();
+                anyhow::bail!("Config file not found: {}", explicit_path.display());
             }
             _ => ServerConfig::default(),
         };

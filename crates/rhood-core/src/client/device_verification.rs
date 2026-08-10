@@ -149,7 +149,7 @@ impl RobinhoodClient {
             let res = self.http.post(inquiry_url).json(&payload).send().await?;
 
             if res.status().is_server_error() {
-                server_error_count += 1;
+                server_error_count = server_error_count.saturating_add(1);
                 if server_error_count >= MAX_SERVER_ERROR_RETRIES {
                     return Err(RhoodError::Api {
                         status: res.status().as_u16(),

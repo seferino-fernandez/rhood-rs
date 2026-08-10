@@ -104,6 +104,10 @@ impl RobinhoodClient {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::let_underscore_must_use,
+    reason = "compile-only async helpers prove public endpoint signatures without executing requests"
+)]
 mod tests {
     use crate::models::research::{Earnings, NewsArticle, RatingSummary, StockSplit, TagResult};
 

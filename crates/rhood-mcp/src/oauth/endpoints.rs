@@ -248,6 +248,10 @@ pub async fn approve(
 
     let mut redirect_url = format!("{}?code={}", form.redirect_uri, code);
     if !state_param.is_empty() {
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "writing formatted data to a String cannot fail"
+        )]
         let _ = write!(redirect_url, "&state={}", urlencoding::encode(state_param));
     }
     Redirect::to(&redirect_url).into_response()
@@ -431,6 +435,10 @@ fn redirect_with_error(
         urlencoding::encode(description)
     );
     if !state.is_empty() {
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "writing formatted data to a String cannot fail"
+        )]
         let _ = write!(url, "&state={}", urlencoding::encode(state));
     }
     Redirect::to(&url).into_response()

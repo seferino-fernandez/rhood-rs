@@ -114,6 +114,10 @@ impl RhoodTools {
     }
 
     /// Combines all domain-specific tool routers into one.
+    #[expect(
+        clippy::arithmetic_side_effects,
+        reason = "the operator is a router-combining Add impl, not numeric addition"
+    )]
     fn combined_router() -> ToolRouter<Self> {
         Self::stock_router()
             + Self::option_router()
@@ -181,6 +185,10 @@ async fn run_auth_with_timeout(
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::assertions_on_result_states,
+    reason = "these tests deliberately assert successful authentication results without unwrapping them"
+)]
 mod tests {
     use super::run_auth_with_timeout;
     use std::time::Duration;

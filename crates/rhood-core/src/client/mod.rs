@@ -282,6 +282,10 @@ fn default_oauth_response() -> crate::models::auth::OAuthResponse {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::assertions_on_result_states,
+    reason = "these tests intentionally assert Result state without unwrapping so they remain compatible with unwrap_used"
+)]
 mod tests {
     use super::*;
 
