@@ -9,7 +9,7 @@ use crate::Result;
 use crate::config::ensure_secret_file_permissions;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Represents a set of cached OAuth credentials for a Robinhood session.
 #[derive(Clone)]
@@ -86,12 +86,19 @@ impl TokenCache {
         Self { path }
     }
 
-    /// Loads a cached token from disk, returning `None` if the file does not exist,
-    /// cannot be read, or contains malformed/unrecognized JSON. A corrupt cache is
-    /// treated the same as an absent one so the caller can prompt the user to log in
-    /// again rather than surfacing a raw deserialization error.
+    /// Loads a cached token from disk.
+    ///
+    /// Returns `None` if the file does not exist, contains malformed or unrecognized
+    /// JSON, or holds an expired token. A corrupt cache is treated the same as an
+    /// absent one so the caller can prompt the user to log in again rather than
+    /// surfacing a raw deserialization error.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the cache has insecure permissions or another filesystem
+    /// I/O operation fails.
     pub fn load(&self) -> Result<Option<CachedToken>> {
-        if !self.path.exists() {
+        if !self.path.try_exists()? {
             return Ok(None);
         }
         #[cfg(unix)]
@@ -103,7 +110,7 @@ impl TokenCache {
                 tracing::warn!(
                     path = %self.path.display(),
                     %err,
-                    "Token cache is corrupt or unreadable so treating as absent; \
+                    "Token cache is corrupt or unrecognized so treating as absent; \
                      run `rhood login` to create a fresh session"
                 );
                 return Ok(None);
@@ -135,25 +142,55 @@ impl TokenCache {
         Ok(())
     }
 
-    #[cfg(unix)]
-    fn write_restricted(path: &std::path::Path, data: &[u8]) -> Result<()> {
+    fn write_restricted(path: &Path, data: &[u8]) -> Result<()> {
         use std::io::Write;
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(path)?;
-        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-        file.write_all(data)?;
+
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let mut temporary = tempfile::Builder::new()
+            .prefix(".rhood-token-")
+            .tempfile_in(parent)?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            if let Err(error) = temporary
+                .as_file()
+                .set_permissions(std::fs::Permissions::from_mode(0o600))
+            {
+                return Self::fail_and_cleanup(temporary, error);
+            }
+        }
+
+        if let Err(error) = temporary.write_all(data) {
+            return Self::fail_and_cleanup(temporary, error);
+        }
+        if let Err(error) = temporary.as_file().sync_all() {
+            return Self::fail_and_cleanup(temporary, error);
+        }
+
+        match temporary.persist(path) {
+            Ok(file) => drop(file),
+            Err(error) => return Self::fail_and_cleanup(error.file, error.error),
+        }
+
+        #[cfg(unix)]
+        std::fs::File::open(parent)?.sync_all()?;
+
         Ok(())
     }
 
-    #[cfg(not(unix))]
-    fn write_restricted(path: &std::path::Path, data: &[u8]) -> Result<()> {
-        std::fs::write(path, data)?;
-        Ok(())
+    fn fail_and_cleanup(
+        temporary: tempfile::NamedTempFile,
+        operation_error: std::io::Error,
+    ) -> Result<()> {
+        if let Err(cleanup_error) = temporary.close() {
+            tracing::warn!(%cleanup_error, "Failed to clean up token-cache temporary file");
+        }
+        Err(operation_error.into())
     }
 
     /// Deletes the cached token file from disk, if it exists.
@@ -194,6 +231,36 @@ mod tests {
 
         cache.clear().unwrap();
         assert!(cache.load().unwrap().is_none());
+    }
+
+    #[test]
+    fn save_atomically_replaces_existing_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("token.json");
+        let cache = TokenCache::with_path(path);
+
+        cache.save(&make_token("old", None)).unwrap();
+        cache.save(&make_token("new", None)).unwrap();
+
+        let loaded = cache.load().unwrap().unwrap();
+        assert_eq!(loaded.access_token.expose_secret(), "new");
+    }
+
+    #[test]
+    fn failed_replacement_cleans_up_temporary_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("token.json");
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(path.join("keep"), b"force replacement failure").unwrap();
+        let cache = TokenCache::with_path(path.clone());
+
+        assert!(cache.save(&make_token("new", None)).is_err());
+
+        let entries = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(entries, vec![path.file_name().unwrap()]);
     }
 
     #[test]
@@ -286,6 +353,23 @@ mod tests {
 
         let mode = std::fs::metadata(&path).unwrap().mode() & 0o777;
         assert_eq!(mode, 0o600, "Token file should be owner-only (0600)");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_save_preserves_existing_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("token.json");
+        let cache = TokenCache::with_path(path);
+        cache.save(&make_token("old", None)).unwrap();
+
+        set_mode(dir.path(), 0o500);
+        let result = cache.save(&make_token("new", None));
+        set_mode(dir.path(), 0o700);
+
+        assert!(result.is_err());
+        let loaded = cache.load().unwrap().unwrap();
+        assert_eq!(loaded.access_token.expose_secret(), "old");
     }
 
     #[cfg(unix)]
