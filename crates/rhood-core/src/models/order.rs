@@ -109,7 +109,7 @@ pub enum OrderAmount {
 }
 
 /// The outcome of attempting to cancel every open order.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CancelAllOutcome {
     /// IDs of orders that were successfully cancelled.
     pub cancelled: Vec<String>,
@@ -118,7 +118,7 @@ pub struct CancelAllOutcome {
 }
 
 /// A single order that could not be cancelled as part of a bulk cancellation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CancelAllFailure {
     /// The order ID, or `None` when the open-order response did not include one.
     pub order_id: Option<String>,
@@ -301,4 +301,31 @@ pub(crate) struct OptionLeg {
     pub side: Side,
     pub ratio_quantity: u32,
     pub option: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CancelAllFailure, CancelAllOutcome};
+
+    #[test]
+    fn cancel_all_outcome_serializes_round_trip() {
+        let outcome = CancelAllOutcome {
+            cancelled: vec!["order-1".to_string(), "order-2".to_string()],
+            failed: vec![
+                CancelAllFailure {
+                    order_id: Some("order-3".to_string()),
+                    error: "already filled".to_string(),
+                },
+                CancelAllFailure {
+                    order_id: None,
+                    error: "open order was missing an ID".to_string(),
+                },
+            ],
+        };
+
+        let json = serde_json::to_string(&outcome).unwrap();
+        let round_tripped: CancelAllOutcome = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(round_tripped, outcome);
+    }
 }
