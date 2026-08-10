@@ -108,6 +108,24 @@ pub enum OrderAmount {
     DollarAmount(f64),
 }
 
+/// The outcome of attempting to cancel every open order.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CancelAllOutcome {
+    /// IDs of orders that were successfully cancelled.
+    pub cancelled: Vec<String>,
+    /// Orders that could not be cancelled, with the reason for each failure.
+    pub failed: Vec<CancelAllFailure>,
+}
+
+/// A single order that could not be cancelled as part of a bulk cancellation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CancelAllFailure {
+    /// The order ID, or `None` when the open-order response did not include one.
+    pub order_id: Option<String>,
+    /// The cancellation error, or the reason an attempt could not be made.
+    pub error: String,
+}
+
 /// Represents a stock order response from the Robinhood API.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct StockOrder {

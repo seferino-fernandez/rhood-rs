@@ -27,8 +27,10 @@ mod tests {
             let _ = client.get_documents(None).await;
             let _ = client.get_user_profile().await;
             let _ = client.get_day_trades().await;
-            let _ = client.cancel_all_stock_orders().await;
-            let _ = client.cancel_all_option_orders().await;
+            let _: crate::Result<crate::models::order::CancelAllOutcome> =
+                client.cancel_all_stock_orders().await;
+            let _: crate::Result<crate::models::order::CancelAllOutcome> =
+                client.cancel_all_option_orders().await;
         }
     }
 }

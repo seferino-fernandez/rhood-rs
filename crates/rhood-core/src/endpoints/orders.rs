@@ -4,8 +4,9 @@ use crate::api::paths;
 use crate::client::RobinhoodClient;
 use crate::models::account::AccountProfile;
 use crate::models::order::{
-    DollarBasedAmount, MarketHours, OptionLeg, OptionOrder, OptionOrderPayload, OptionOrderRequest,
-    OrderAmount, OrderType, Side, StockOrder, StockOrderPayload, StockOrderRequest, Trigger,
+    CancelAllFailure, CancelAllOutcome, DollarBasedAmount, MarketHours, OptionLeg, OptionOrder,
+    OptionOrderPayload, OptionOrderRequest, OrderAmount, OrderType, Side, StockOrder,
+    StockOrderPayload, StockOrderRequest, Trigger,
 };
 use crate::models::stock::Instrument;
 use crate::pagination::ResultsResponse;
@@ -257,50 +258,70 @@ impl RobinhoodClient {
 
     /// Cancels all open (cancellable) stock orders.
     ///
-    /// Fetches open orders, then cancels each one. Requires writable mode.
-    /// Returns the number of orders cancelled.
+    /// Fetches open orders, then attempts to cancel each one. Requires writable
+    /// mode. Returns the IDs cancelled successfully and every per-order failure.
+    /// An open order without an ID is returned as a failure because it cannot be
+    /// cancelled by ID.
     ///
     /// # Errors
     ///
     /// Returns [`RhoodError::ReadOnlyMode`] if the client is in read-only mode.
-    pub async fn cancel_all_stock_orders(&self) -> Result<usize> {
+    /// Returns an error if fetching the open orders fails.
+    pub async fn cancel_all_stock_orders(&self) -> Result<CancelAllOutcome> {
         self.require_writable()?;
         let open = self.get_open_stock_orders().await?;
-        let count = open.len();
-        for order in &open {
-            if let Some(id) = &order.id {
-                #[expect(
-                    clippy::let_underscore_must_use,
-                    reason = "cancel-all discards per-order failures and returns the count found, not cancelled; fixing that needs a partial-failure design decision, tracked as BL-25"
-                )]
-                let _ = self.cancel_stock_order(id).await;
+        let mut outcome = CancelAllOutcome::default();
+        for order in open {
+            let Some(id) = order.id else {
+                outcome.failed.push(CancelAllFailure {
+                    order_id: None,
+                    error: "open order is missing an ID".to_string(),
+                });
+                continue;
+            };
+            match self.cancel_stock_order(&id).await {
+                Ok(()) => outcome.cancelled.push(id),
+                Err(error) => outcome.failed.push(CancelAllFailure {
+                    order_id: Some(id),
+                    error: error.to_string(),
+                }),
             }
         }
-        Ok(count)
+        Ok(outcome)
     }
 
     /// Cancels all open (cancellable) option orders.
     ///
-    /// Fetches open orders, then cancels each one. Requires writable mode.
-    /// Returns the number of orders cancelled.
+    /// Fetches open orders, then attempts to cancel each one. Requires writable
+    /// mode. Returns the IDs cancelled successfully and every per-order failure.
+    /// An open order without an ID is returned as a failure because it cannot be
+    /// cancelled by ID.
     ///
     /// # Errors
     ///
     /// Returns [`RhoodError::ReadOnlyMode`] if the client is in read-only mode.
-    pub async fn cancel_all_option_orders(&self) -> Result<usize> {
+    /// Returns an error if fetching the open orders fails.
+    pub async fn cancel_all_option_orders(&self) -> Result<CancelAllOutcome> {
         self.require_writable()?;
         let open = self.get_open_option_orders().await?;
-        let count = open.len();
-        for order in &open {
-            if let Some(id) = &order.id {
-                #[expect(
-                    clippy::let_underscore_must_use,
-                    reason = "cancel-all discards per-order failures and returns the count found, not cancelled; fixing that needs a partial-failure design decision, tracked as BL-25"
-                )]
-                let _ = self.cancel_option_order(id).await;
+        let mut outcome = CancelAllOutcome::default();
+        for order in open {
+            let Some(id) = order.id else {
+                outcome.failed.push(CancelAllFailure {
+                    order_id: None,
+                    error: "open order is missing an ID".to_string(),
+                });
+                continue;
+            };
+            match self.cancel_option_order(&id).await {
+                Ok(()) => outcome.cancelled.push(id),
+                Err(error) => outcome.failed.push(CancelAllFailure {
+                    order_id: Some(id),
+                    error: error.to_string(),
+                }),
             }
         }
-        Ok(count)
+        Ok(outcome)
     }
 
     /// Fills in missing `symbol` fields on stock orders by resolving their
@@ -682,5 +703,155 @@ mod tests {
         }"#;
         let order: StockOrder = serde_json::from_str(json).unwrap();
         assert!(order.cancel.is_some());
+    }
+}
+
+#[cfg(test)]
+mod endpoint_tests {
+    use crate::client::RobinhoodClient;
+    use crate::config::RhoodConfig;
+    use crate::models::order::CancelAllFailure;
+    use secrecy::SecretString;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    async fn client_for_server(base_url: &str) -> (tempfile::TempDir, RobinhoodClient) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = RhoodConfig {
+            read_only: false,
+            ..RhoodConfig::default()
+        };
+        config.auth.token_cache_path = dir
+            .path()
+            .join("nonexistent-token.json")
+            .to_str()
+            .unwrap()
+            .to_string();
+        config.api.base_url = base_url.to_string();
+        config.api.phoenix_url = base_url.to_string();
+        config.api.bonfire_url = base_url.to_string();
+        let client = RobinhoodClient::with_config(config).unwrap();
+        client
+            .inject_test_auth(
+                SecretString::from("access-token"),
+                "Bearer".to_string(),
+                SecretString::from("refresh-token"),
+            )
+            .await;
+        (dir, client)
+    }
+
+    #[tokio::test]
+    async fn cancel_all_stock_orders_reports_failures_and_attempts_every_identified_order() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/orders/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [
+                    {"id": "stock-success", "cancel": "https://example.test/stock-success/cancel/"},
+                    {"id": "stock-failure", "cancel": "https://example.test/stock-failure/cancel/"},
+                    {"id": "stock-later", "cancel": "https://example.test/stock-later/cancel/"},
+                    {"id": null, "cancel": "https://example.test/missing-id/cancel/"}
+                ],
+                "next": null,
+                "previous": null
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/orders/stock-success/cancel/"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/orders/stock-failure/cancel/"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("stock cancellation failed"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/orders/stock-later/cancel/"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server.uri()).await;
+
+        let outcome = client.cancel_all_stock_orders().await.unwrap();
+
+        assert_eq!(outcome.cancelled, ["stock-success", "stock-later"]);
+        assert_eq!(
+            outcome.failed,
+            [
+                CancelAllFailure {
+                    order_id: Some("stock-failure".to_string()),
+                    error: "API error (500): stock cancellation failed".to_string(),
+                },
+                CancelAllFailure {
+                    order_id: None,
+                    error: "open order is missing an ID".to_string(),
+                },
+            ]
+        );
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn cancel_all_option_orders_reports_failures_and_attempts_every_identified_order() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/options/orders/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [
+                    {"id": "option-success", "cancel_url": "https://example.test/option-success/cancel/"},
+                    {"id": "option-failure", "cancel_url": "https://example.test/option-failure/cancel/"},
+                    {"id": "option-later", "cancel_url": "https://example.test/option-later/cancel/"},
+                    {"id": null, "cancel_url": "https://example.test/missing-id/cancel/"}
+                ],
+                "next": null,
+                "previous": null
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/options/orders/option-success/cancel/"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/options/orders/option-failure/cancel/"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("option cancellation failed"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/options/orders/option-later/cancel/"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server.uri()).await;
+
+        let outcome = client.cancel_all_option_orders().await.unwrap();
+
+        assert_eq!(outcome.cancelled, ["option-success", "option-later"]);
+        assert_eq!(
+            outcome.failed,
+            [
+                CancelAllFailure {
+                    order_id: Some("option-failure".to_string()),
+                    error: "API error (500): option cancellation failed".to_string(),
+                },
+                CancelAllFailure {
+                    order_id: None,
+                    error: "open order is missing an ID".to_string(),
+                },
+            ]
+        );
+        server.verify().await;
     }
 }
