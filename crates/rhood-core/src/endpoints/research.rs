@@ -1,7 +1,7 @@
 use crate::api::paths;
 use crate::client::RobinhoodClient;
 use crate::models::research::*;
-use crate::pagination::{PaginatedResponse, ResultsResponse};
+use crate::pagination::ResultsResponse;
 use crate::{Result, RhoodError};
 
 impl RobinhoodClient {
@@ -63,10 +63,8 @@ impl RobinhoodClient {
     pub async fn get_news(&self, symbol: &str) -> Result<Vec<NewsArticle>> {
         let uppercased = symbol.to_uppercase();
         let params = [("symbol", uppercased.as_str())];
-        let resp: PaginatedResponse<NewsArticle> = self
-            .get_with_params(&self.api_url(paths::NEWS), &params)
-            .await?;
-        Ok(resp.results)
+        self.get_paginated(&self.api_url(paths::NEWS), &params)
+            .await
     }
 
     /// Fetches stock split history for a ticker symbol.
@@ -100,6 +98,71 @@ impl RobinhoodClient {
     pub async fn get_tags(&self, tag: &str) -> Result<TagResult> {
         let url = format!("{}{tag}/", self.api_url(paths::TAGS));
         self.get(&url).await
+    }
+}
+
+#[cfg(test)]
+mod endpoint_tests {
+    use crate::client::RobinhoodClient;
+    use crate::config::RhoodConfig;
+    use secrecy::SecretString;
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    async fn client_for_server(base_url: &str) -> (tempfile::TempDir, RobinhoodClient) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = RhoodConfig::default();
+        config.auth.token_cache_path = dir
+            .path()
+            .join("nonexistent-token.json")
+            .to_str()
+            .unwrap()
+            .to_string();
+        config.api.base_url = base_url.to_string();
+        let client = RobinhoodClient::with_config(config).unwrap();
+        client
+            .inject_test_auth(
+                SecretString::from("access-token"),
+                "Bearer".to_string(),
+                SecretString::from("refresh-token"),
+            )
+            .await;
+        (dir, client)
+    }
+
+    #[tokio::test]
+    async fn get_news_follows_next_page_in_order() {
+        let server = MockServer::start().await;
+        let next_url = format!("{}/midlands/news/?cursor=page-2", server.uri());
+        Mock::given(method("GET"))
+            .and(path("/midlands/news/"))
+            .and(query_param("symbol", "AAPL"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [{"uuid": "news-1", "title": "First"}],
+                "next": next_url,
+                "previous": null
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/midlands/news/"))
+            .and(query_param("cursor", "page-2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [{"uuid": "news-2", "title": "Second"}],
+                "next": null,
+                "previous": null
+            })))
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server.uri()).await;
+
+        let articles = client.get_news("aapl").await.unwrap();
+
+        let ids: Vec<_> = articles
+            .iter()
+            .filter_map(|article| article.uuid.as_deref())
+            .collect();
+        assert_eq!(ids, ["news-1", "news-2"]);
     }
 }
 
