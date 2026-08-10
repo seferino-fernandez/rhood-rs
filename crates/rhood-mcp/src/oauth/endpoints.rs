@@ -11,7 +11,7 @@ use subtle::ConstantTimeEq;
 
 use crate::oauth::model::{
     ApprovalForm, AuthorizationServerMetadata, AuthorizeQuery, OAuthEndpointState,
-    ProtectedResourceMetadata, RegistrationRequest, TokenRequest,
+    ProtectedResourceMetadata, TokenRequest,
 };
 
 use super::pkce;
@@ -50,7 +50,6 @@ pub async fn authorization_server_metadata(
         issuer: state.base_url.clone(),
         authorization_endpoint: format!("{}/oauth/authorize", state.base_url),
         token_endpoint: format!("{}/oauth/token", state.base_url),
-        registration_endpoint: format!("{}/oauth/register", state.base_url),
         scopes_supported: scopes,
         response_types_supported: vec!["code".to_string()],
         grant_types_supported: vec![
@@ -113,10 +112,10 @@ pub async fn authorize(
         );
     }
 
-    if !state
+    if state
         .store
-        .validate_redirect_uri(&params.client_id, &params.redirect_uri)
-        .await
+        .registered_client(&params.client_id, &params.redirect_uri)
+        .is_none()
     {
         return (
             StatusCode::BAD_REQUEST,
@@ -172,10 +171,10 @@ pub async fn approve(
             .into_response();
     }
 
-    if !state
+    if state
         .store
-        .validate_redirect_uri(&form.client_id, &form.redirect_uri)
-        .await
+        .registered_client(&form.client_id, &form.redirect_uri)
+        .is_none()
     {
         return (
             StatusCode::BAD_REQUEST,
@@ -368,46 +367,6 @@ fn token_error(error: &str, description: &str) -> Response {
         Json(serde_json::json!({
             "error": error,
             "error_description": description
-        })),
-    )
-        .into_response()
-}
-
-/// `POST /oauth/register` - dynamic client registration endpoint.
-/// Returns a new `client_id` and `client_secret`.
-pub async fn register(
-    State(state): State<Arc<OAuthEndpointState>>,
-    Json(req): Json<RegistrationRequest>,
-) -> Response {
-    tracing::debug!(
-        client_name = ?req.client_name,
-        redirect_uris = ?req.redirect_uris,
-        "POST /oauth/register"
-    );
-    if req.redirect_uris.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": "invalid_request",
-                "error_description": "At least one redirect_uri is required"
-            })),
-        )
-            .into_response();
-    }
-
-    let client = state
-        .store
-        .register_client(req.client_name, req.redirect_uris.clone())
-        .await;
-    tracing::info!(client_id = %client.client_id, "Dynamic client registered");
-
-    (
-        StatusCode::CREATED,
-        Json(serde_json::json!({
-            "client_id": client.client_id,
-            "client_secret": client.client_secret,
-            "client_name": client.client_name,
-            "redirect_uris": req.redirect_uris
         })),
     )
         .into_response()

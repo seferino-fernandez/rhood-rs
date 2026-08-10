@@ -42,7 +42,7 @@ pub async fn serve(config: &ServerConfig) -> anyhow::Result<()> {
                 );
             }
         }
-        "oauth" => {}
+        "oauth" => config.mcp.validate_registered_clients()?,
         other => anyhow::bail!("Unknown auth_mode: {other}. Use \"token\", \"oauth\", or \"none\""),
     }
 
@@ -101,7 +101,10 @@ pub async fn serve(config: &ServerConfig) -> anyhow::Result<()> {
             let base_url = resolve_base_url(config, &addr);
             let store_config = OAuthStoreConfig::from_mcp_config(&config.mcp);
             let sweep_interval = Duration::from_secs(config.mcp.oauth_sweep_interval_secs);
-            let store = OAuthStore::new(store_config);
+            let store = OAuthStore::with_registered_clients(
+                store_config,
+                config.mcp.registered_clients.clone(),
+            );
 
             store
                 .clone()
@@ -155,10 +158,6 @@ pub async fn serve(config: &ServerConfig) -> anyhow::Result<()> {
                 .route(
                     "/oauth/token",
                     post(oauth::endpoints::token).options(oauth::endpoints::token),
-                )
-                .route(
-                    "/oauth/register",
-                    post(oauth::endpoints::register).options(oauth::endpoints::register),
                 )
                 .layer(cors_layer)
                 .with_state(endpoint_state);

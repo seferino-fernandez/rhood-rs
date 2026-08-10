@@ -4,8 +4,7 @@
 //! RFC 8414 (authorization server metadata) so that MCP clients which
 //! understand standard OAuth flows can connect without bespoke integration.
 //!
-//! - [`endpoints`] - `/authorize`, `/token`, `/register`, and the well-known
-//!   metadata endpoints.
+//! - [`endpoints`] - `/authorize`, `/token`, and the well-known metadata endpoints.
 //! - [`model`] - models used for oauth.
 //! - [`pkce`] - code-challenge generation and verification.
 //! - [`store`] - in-memory storage for authorization codes, access tokens,

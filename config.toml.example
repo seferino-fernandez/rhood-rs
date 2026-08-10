@@ -5,8 +5,8 @@
 #   any path via: rhood --config /path/to/config.toml
 #   any path via: RHOOD_CONFIG=/path/to/config.toml
 #
-# All values below show their defaults. Every field is optional and
-# omitted fields fall back to these defaults.
+# Values below show their defaults unless noted. OAuth mode requires at least
+# one [[mcp.registered_clients]] entry.
 #
 # Environment variables override config.toml values.
 # CLI flags override environment variables.
@@ -96,10 +96,20 @@ level = "info"
 
 # Auth mode: "token" (default), "oauth", or "none"
 # - token: static bearer token (requires token/token_file above)
-# - oauth: OAuth 2.1 with PKCE, dynamic client registration, consent screen
+# - oauth: OAuth 2.1 with PKCE, preregistered clients, consent screen
 # - none: no authentication (loopback-only, for local development)
 # Env: RHOOD_MCP_AUTH_MODE
 # auth_mode = "token"
+
+# OAuth registered client registry. This is TOML-only: there is no CLI flag or
+# environment-variable encoding. OAuth mode requires at least one entry. Choose
+# a stable client_id and configure every redirect URI the client may send; both
+# values must match an authorization request exactly.
+#
+# [[mcp.registered_clients]]
+# client_id = "local-desktop"
+# client_name = "Local Desktop Client"
+# redirect_uris = ["http://127.0.0.1:8123/oauth/callback"]
 
 # OAuth: optional PIN for consent screen (recommended for non-loopback)
 # Env: RHOOD_MCP_OAUTH_PIN

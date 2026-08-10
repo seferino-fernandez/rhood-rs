@@ -63,11 +63,11 @@ go to stderr via `tracing`, controlled by `RUST_LOG` and the `-v`/`-q` flags.
 
 ## Authentication Modes
 
-| Mode    | Flag                | Description                                         |
-| ------- | ------------------- | --------------------------------------------------- |
-| `token` | `--auth-mode token` | Static bearer token (default)                       |
-| `oauth` | `--auth-mode oauth` | OAuth 2.1 with PKCE and dynamic client registration |
-| `none`  | `--auth-mode none`  | No auth (loopback-only, local development)          |
+| Mode    | Flag                | Description                                              |
+| ------- | ------------------- | -------------------------------------------------------- |
+| `token` | `--auth-mode token` | Static bearer token (default)                            |
+| `oauth` | `--auth-mode oauth` | OAuth 2.1 with PKCE and operator-preregistered clients   |
+| `none`  | `--auth-mode none`  | No auth (loopback-only, local development)               |
 
 ## Quick Start
 
@@ -79,8 +79,23 @@ rhood-mcp --transport stdio
 
 ### HTTP with OAuth
 
+OAuth mode requires at least one client in `~/.config/rhood/config.toml`. The
+registry is configured only through TOML; there is no CLI or environment
+variable representation for it.
+
+```toml
+[mcp]
+auth_mode = "oauth"
+base_url = "http://127.0.0.1:8080"
+
+[[mcp.registered_clients]]
+client_id = "local-desktop"
+client_name = "Local Desktop Client"
+redirect_uris = ["http://127.0.0.1:8123/oauth/callback"]
+```
+
 ```bash
-rhood-mcp --transport http --auth-mode oauth --port 8080
+rhood-mcp --transport http --port 8080
 ```
 
 ### HTTP with static token
@@ -248,7 +263,7 @@ Options:
 
 ## Configuration
 
-All settings can be specified via config file, environment variables, or CLI flags. Precedence: CLI > env > config file.
+Scalar settings can be specified via config file, environment variables, or CLI flags. Precedence: CLI > env > config file. The structural `[[mcp.registered_clients]]` registry is TOML-only.
 
 Config file location: `~/.config/rhood/config.toml`
 
@@ -276,12 +291,17 @@ Pass `--read-write` or set `read_only = false` in config to enable write operati
 
 ## OAuth Flow
 
-When running with `--auth-mode oauth`:
+Before starting OAuth mode, the operator must preregister at least one client
+with a stable `client_id`, a human-facing `client_name`, and one or more exact
+`redirect_uris` values under `[[mcp.registered_clients]]`. Requests are accepted
+only when both the client ID and redirect URI exactly match one configured
+entry.
 
 1. Client discovers metadata via `/.well-known/oauth-authorization-server`
-2. Client registers dynamically via `POST /oauth/register`
-3. User is redirected to consent page at `/oauth/authorize`
-4. After approval, client exchanges authorization code for tokens at `/oauth/token`
-5. Tokens are sent as `Bearer` in the `Authorization` header to `/mcp`
+2. User is redirected to the consent page at `/oauth/authorize`
+3. After approval, the client exchanges the authorization code for tokens at `/oauth/token`
+4. Tokens are sent as `Bearer` in the `Authorization` header to `/mcp`
 
-All authorization codes use PKCE (S256). Tokens, codes, and CSRF nonces are swept periodically by a background task.
+All authorization codes use PKCE (S256). The server returns the client's OAuth
+`state` value unchanged. Tokens, codes, and CSRF nonces are swept periodically
+by a background task.

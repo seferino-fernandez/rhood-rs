@@ -15,6 +15,17 @@ fn test_base_url() -> String {
     "http://127.0.0.1:9999".to_string()
 }
 
+const TEST_CLIENT_ID: &str = "configured-test-client";
+const TEST_REDIRECT_URI: &str = "http://localhost/cb";
+
+fn registered_clients() -> Vec<model::RegisteredClient> {
+    vec![model::RegisteredClient {
+        client_id: TEST_CLIENT_ID.to_string(),
+        client_name: "Configured Test Client".to_string(),
+        redirect_uris: vec![TEST_REDIRECT_URI.to_string()],
+    }]
+}
+
 async fn protected_handler() -> &'static str {
     "OK"
 }
@@ -25,7 +36,10 @@ fn build_test_router(
     server_read_only: bool,
     oauth_pin: Option<String>,
 ) -> (Router, store::OAuthStore) {
-    let store_instance = store::OAuthStore::new(store::OAuthStoreConfig::default());
+    let store_instance = store::OAuthStore::with_registered_clients(
+        store::OAuthStoreConfig::default(),
+        registered_clients(),
+    );
     let base = test_base_url();
 
     let endpoint_state = std::sync::Arc::new(OAuthEndpointState {
@@ -60,7 +74,6 @@ fn build_test_router(
         .route("/oauth/authorize", get(endpoints::authorize))
         .route("/oauth/approve", axum::routing::post(endpoints::approve))
         .route("/oauth/token", axum::routing::post(endpoints::token))
-        .route("/oauth/register", axum::routing::post(endpoints::register))
         .with_state(endpoint_state);
 
     let protected_routes = Router::new().route("/test", get(protected_handler)).layer(
@@ -157,6 +170,7 @@ async fn metadata_endpoints_return_json() {
         json["code_challenge_methods_supported"],
         serde_json::json!(["S256"])
     );
+    assert!(json.get("registration_endpoint").is_none());
 }
 
 #[tokio::test]
@@ -214,7 +228,7 @@ async fn read_only_server_hides_write_scope() {
 }
 
 #[tokio::test]
-async fn dynamic_client_registration() {
+async fn dynamic_client_registration_is_not_routed() {
     let (app, _store) = build_test_router(false, None);
     let response = app
         .oneshot(
@@ -231,52 +245,61 @@ async fn dynamic_client_registration() {
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::CREATED);
-    let json = body_to_json(response.into_body()).await;
-    assert!(
-        json["client_id"]
-            .as_str()
-            .unwrap()
-            .starts_with("rhood_cid_")
-    );
-    assert!(json["client_secret"].as_str().is_some());
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn authorization_rejects_unknown_and_redirect_mismatched_clients() {
+    let (app, _store) = build_test_router(false, None);
+    let challenge = pkce::challenge_from_verifier("test-verifier");
+
+    for (client_id, redirect_uri) in [
+        ("unknown-client", TEST_REDIRECT_URI),
+        (TEST_CLIENT_ID, "http://localhost/wrong-callback"),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get(format!(
+                    "/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&code_challenge={}&code_challenge_method=S256",
+                    urlencoding::encode(client_id),
+                    urlencoding::encode(redirect_uri),
+                    challenge
+                ))
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let json = body_to_json(response.into_body()).await;
+        assert_eq!(json["error"], "invalid_request");
+        assert!(
+            json["error_description"]
+                .as_str()
+                .unwrap()
+                .contains("Unknown client_id or redirect_uri mismatch")
+        );
+    }
 }
 
 #[tokio::test]
 async fn full_oauth_flow() {
     let (app, test_store) = build_test_router(false, None);
+    let client_state = "client state /?&=+";
 
-    // 1. Register client
-    let response = app
-        .clone()
-        .oneshot(
-            Request::post("/oauth/register")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    serde_json::json!({
-                        "client_name": "Test",
-                        "redirect_uris": ["http://localhost/cb"]
-                    })
-                    .to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    let registration = body_to_json(response.into_body()).await;
-    let client_id = registration["client_id"].as_str().unwrap().to_string();
-
-    // 2. Generate PKCE verifier and challenge
+    // 1. Generate PKCE verifier and challenge
     let verifier = "test-verifier-string-that-is-long-enough-for-pkce";
     let challenge = pkce::challenge_from_verifier(verifier);
 
-    // 3. Submit approval (simulating consent form POST)
+    // 2. Submit approval (simulating consent form POST)
     let csrf_nonce = test_store.create_csrf_nonce().await;
     let form_body = serde_urlencoded::to_string([
-        ("client_id", client_id.as_str()),
-        ("redirect_uri", "http://localhost/cb"),
+        ("client_id", TEST_CLIENT_ID),
+        ("redirect_uri", TEST_REDIRECT_URI),
         ("scope", "read write"),
-        ("state", "test-state"),
+        ("state", client_state),
         ("code_challenge", &challenge),
         ("code_challenge_method", "S256"),
         ("approved", "true"),
@@ -308,13 +331,15 @@ async fn full_oauth_flow() {
         location.starts_with("http://localhost/cb?code=rhood_ac_"),
         "location: {location}"
     );
-    assert!(
-        location.contains("state=test-state"),
-        "location: {location}"
-    );
 
     // Extract code from redirect URL
     let redirect_url = url::Url::parse(location).unwrap();
+    let echoed_state = redirect_url
+        .query_pairs()
+        .find(|(key, _)| key == "state")
+        .unwrap()
+        .1;
+    assert_eq!(echoed_state, client_state);
     let auth_code = redirect_url
         .query_pairs()
         .find(|(key, _)| key == "code")
@@ -322,12 +347,12 @@ async fn full_oauth_flow() {
         .1
         .to_string();
 
-    // 4. Exchange code for token
+    // 3. Exchange code for token
     let token_body = serde_urlencoded::to_string([
         ("grant_type", "authorization_code"),
         ("code", auth_code.as_str()),
-        ("client_id", client_id.as_str()),
-        ("redirect_uri", "http://localhost/cb"),
+        ("client_id", TEST_CLIENT_ID),
+        ("redirect_uri", TEST_REDIRECT_URI),
         ("code_verifier", verifier),
     ])
     .unwrap();
@@ -351,7 +376,7 @@ async fn full_oauth_flow() {
     assert_eq!(token_json["token_type"], "Bearer");
     assert_eq!(token_json["scope"], "read write");
 
-    // 5. Access protected route with token
+    // 4. Access protected route with token
     let response = app
         .clone()
         .oneshot(
@@ -365,7 +390,7 @@ async fn full_oauth_flow() {
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(body_to_string(response.into_body()).await, "OK");
 
-    // 6. Invalid token gets 401
+    // 5. Invalid token gets 401
     let response = app
         .clone()
         .oneshot(
@@ -378,7 +403,7 @@ async fn full_oauth_flow() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 
-    // 7. Refresh token
+    // 6. Refresh token
     let refresh_body = serde_urlencoded::to_string([
         ("grant_type", "refresh_token"),
         ("refresh_token", refresh_token.as_str()),
@@ -400,7 +425,7 @@ async fn full_oauth_flow() {
     let new_access_token = new_token_json["access_token"].as_str().unwrap().to_string();
     assert_ne!(new_access_token, access_token, "new token should differ");
 
-    // 8. Old token is revoked
+    // 7. Old token is revoked
     let response = app
         .clone()
         .oneshot(
@@ -413,7 +438,7 @@ async fn full_oauth_flow() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 
-    // 9. New token works
+    // 8. New token works
     let response = app
         .oneshot(
             Request::get("/test")
@@ -430,33 +455,14 @@ async fn full_oauth_flow() {
 async fn pkce_failure_rejects_token_exchange() {
     let (app, test_store) = build_test_router(false, None);
 
-    // Register
-    let response = app
-        .clone()
-        .oneshot(
-            Request::post("/oauth/register")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    serde_json::json!({
-                        "redirect_uris": ["http://localhost/cb"]
-                    })
-                    .to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    let registration = body_to_json(response.into_body()).await;
-    let client_id = registration["client_id"].as_str().unwrap().to_string();
-
     let verifier = "correct-verifier";
     let challenge = pkce::challenge_from_verifier(verifier);
 
     // Approve
     let csrf_nonce = test_store.create_csrf_nonce().await;
     let form_body = serde_urlencoded::to_string([
-        ("client_id", client_id.as_str()),
-        ("redirect_uri", "http://localhost/cb"),
+        ("client_id", TEST_CLIENT_ID),
+        ("redirect_uri", TEST_REDIRECT_URI),
         ("scope", "read"),
         ("state", ""),
         ("code_challenge", &challenge),
@@ -495,8 +501,8 @@ async fn pkce_failure_rejects_token_exchange() {
     let token_body = serde_urlencoded::to_string([
         ("grant_type", "authorization_code"),
         ("code", auth_code.as_str()),
-        ("client_id", client_id.as_str()),
-        ("redirect_uri", "http://localhost/cb"),
+        ("client_id", TEST_CLIENT_ID),
+        ("redirect_uri", TEST_REDIRECT_URI),
         ("code_verifier", "wrong-verifier"),
     ])
     .unwrap();
@@ -520,33 +526,14 @@ async fn pkce_failure_rejects_token_exchange() {
 async fn consent_page_has_anti_clickjacking_headers() {
     let (app, _store) = build_test_router(false, None);
 
-    // Register a client first
-    let response = app
-        .clone()
-        .oneshot(
-            Request::post("/oauth/register")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    serde_json::json!({
-                        "redirect_uris": ["http://localhost/cb"]
-                    })
-                    .to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    let registration = body_to_json(response.into_body()).await;
-    let client_id = registration["client_id"].as_str().unwrap();
-
     let challenge = pkce::challenge_from_verifier("test-verifier");
 
     let response = app
         .oneshot(
             Request::get(format!(
                 "/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&code_challenge={}&code_challenge_method=S256",
-                client_id,
-                urlencoding::encode("http://localhost/cb"),
+                TEST_CLIENT_ID,
+                urlencoding::encode(TEST_REDIRECT_URI),
                 challenge
             ))
             .body(Body::empty())
@@ -578,32 +565,13 @@ async fn consent_page_has_anti_clickjacking_headers() {
 async fn pin_required_rejects_wrong_pin() {
     let (app, test_store) = build_test_router(false, Some("secret-pin".to_string()));
 
-    // Register
-    let response = app
-        .clone()
-        .oneshot(
-            Request::post("/oauth/register")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    serde_json::json!({
-                        "redirect_uris": ["http://localhost/cb"]
-                    })
-                    .to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    let registration = body_to_json(response.into_body()).await;
-    let client_id = registration["client_id"].as_str().unwrap().to_string();
-
     let challenge = pkce::challenge_from_verifier("verifier");
 
     // Approve with wrong pin
     let csrf_nonce = test_store.create_csrf_nonce().await;
     let form_body = serde_urlencoded::to_string([
-        ("client_id", client_id.as_str()),
-        ("redirect_uri", "http://localhost/cb"),
+        ("client_id", TEST_CLIENT_ID),
+        ("redirect_uri", TEST_REDIRECT_URI),
         ("scope", "read"),
         ("state", "s"),
         ("code_challenge", &challenge),

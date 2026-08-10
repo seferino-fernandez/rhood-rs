@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
-const CLIENT_ID_PREFIX: &str = "rhood_cid_";
-const CLIENT_SECRET_PREFIX: &str = "rhood_cs_";
+use crate::oauth::model::RegisteredClient;
+
 const CSRF_NONCE_PREFIX: &str = "rhood_csrf_";
 const AUTH_CODE_PREFIX: &str = "rhood_ac_";
 const ACCESS_TOKEN_PREFIX: &str = "rhood_at_";
@@ -48,25 +48,16 @@ impl OAuthStoreConfig {
 /// access tokens, refresh tokens, and CSRF nonces.
 #[derive(Clone)]
 pub struct OAuthStore {
+    clients: Arc<HashMap<String, RegisteredClient>>,
     inner: Arc<RwLock<StoreInner>>,
     config: OAuthStoreConfig,
 }
 
 struct StoreInner {
-    clients: HashMap<String, RegisteredClient>,
     auth_codes: HashMap<String, AuthCode>,
     access_tokens: HashMap<String, AccessToken>,
     refresh_tokens: HashMap<String, String>,
     csrf_nonces: HashMap<String, Instant>,
-}
-
-/// A dynamically registered OAuth client.
-#[derive(Clone, Debug)]
-pub struct RegisteredClient {
-    pub client_id: String,
-    pub client_secret: Option<String>,
-    pub client_name: Option<String>,
-    pub redirect_uris: Vec<String>,
 }
 
 /// A single-use authorization code issued after user consent.
@@ -92,10 +83,23 @@ pub struct AccessToken {
 
 impl OAuthStore {
     /// Create a new store with the given configuration.
+    #[cfg(test)]
     pub fn new(config: OAuthStoreConfig) -> Self {
+        Self::with_registered_clients(config, Vec::new())
+    }
+
+    /// Create a store seeded with the operator-configured OAuth clients.
+    pub fn with_registered_clients(
+        config: OAuthStoreConfig,
+        registered_clients: Vec<RegisteredClient>,
+    ) -> Self {
+        let clients = registered_clients
+            .into_iter()
+            .map(|client| (client.client_id.clone(), client))
+            .collect();
         Self {
+            clients: Arc::new(clients),
             inner: Arc::new(RwLock::new(StoreInner {
-                clients: HashMap::new(),
                 auth_codes: HashMap::new(),
                 access_tokens: HashMap::new(),
                 refresh_tokens: HashMap::new(),
@@ -105,35 +109,16 @@ impl OAuthStore {
         }
     }
 
-    /// Register a new dynamic client and return its credentials.
-    pub async fn register_client(
+    /// Return the trusted client only when its ID and redirect URI both match exactly.
+    pub fn registered_client(
         &self,
-        client_name: Option<String>,
-        redirect_uris: Vec<String>,
-    ) -> RegisteredClient {
-        let client_id = format!("{}{}", CLIENT_ID_PREFIX, Uuid::new_v4());
-        let client_secret = format!("{}{}", CLIENT_SECRET_PREFIX, Uuid::new_v4());
-        let client = RegisteredClient {
-            client_id: client_id.clone(),
-            client_secret: Some(client_secret),
-            client_name,
-            redirect_uris,
-        };
-        self.inner
-            .write()
-            .await
-            .clients
-            .insert(client_id, client.clone());
-        client
-    }
-
-    /// Check whether `redirect_uri` is registered for the given `client_id`.
-    pub async fn validate_redirect_uri(&self, client_id: &str, redirect_uri: &str) -> bool {
-        let inner = self.inner.read().await;
-        inner
-            .clients
+        client_id: &str,
+        redirect_uri: &str,
+    ) -> Option<RegisteredClient> {
+        self.clients
             .get(client_id)
-            .is_some_and(|client| client.redirect_uris.iter().any(|uri| uri == redirect_uri))
+            .filter(|client| client.redirect_uris.iter().any(|uri| uri == redirect_uri))
+            .cloned()
     }
 
     /// Create a single-use CSRF nonce for the consent form.
@@ -303,31 +288,31 @@ impl OAuthStore {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn register_and_get_client() {
-        let store = OAuthStore::new(OAuthStoreConfig::default());
-        let client = store
-            .register_client(Some("test".into()), vec!["http://localhost/cb".into()])
-            .await;
-        assert!(client.client_id.starts_with("rhood_cid_"));
-        assert!(client.client_secret.is_some());
-    }
+    #[test]
+    fn registered_client_lookup_requires_an_exact_id_and_redirect_uri_match() {
+        let configured_client = RegisteredClient {
+            client_id: "desktop-client".into(),
+            client_name: "Desktop Client".into(),
+            redirect_uris: vec!["http://localhost/cb".into()],
+        };
+        let store = OAuthStore::with_registered_clients(
+            OAuthStoreConfig::default(),
+            vec![configured_client.clone()],
+        );
 
-    #[tokio::test]
-    async fn validate_redirect_uri() {
-        let store = OAuthStore::new(OAuthStoreConfig::default());
-        let client = store
-            .register_client(None, vec!["http://localhost/cb".into()])
-            .await;
-        assert!(
-            store
-                .validate_redirect_uri(&client.client_id, "http://localhost/cb")
-                .await
+        assert_eq!(
+            store.registered_client("desktop-client", "http://localhost/cb"),
+            Some(configured_client)
         );
         assert!(
-            !store
-                .validate_redirect_uri(&client.client_id, "http://evil.com/cb")
-                .await
+            store
+                .registered_client("desktop-client", "http://localhost/other")
+                .is_none()
+        );
+        assert!(
+            store
+                .registered_client("unknown-client", "http://localhost/cb")
+                .is_none()
         );
     }
 

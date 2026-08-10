@@ -2,6 +2,14 @@ use serde::Deserialize;
 
 use crate::oauth::store::OAuthStore;
 
+/// An OAuth client trusted by the operator through `[[mcp.registered_clients]]`.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct RegisteredClient {
+    pub client_id: String,
+    pub client_name: String,
+    pub redirect_uris: Vec<String>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ApprovalForm {
     pub client_id: String,
@@ -24,7 +32,6 @@ pub struct AuthorizationServerMetadata {
     pub issuer: String,
     pub authorization_endpoint: String,
     pub token_endpoint: String,
-    pub registration_endpoint: String,
     pub scopes_supported: Vec<String>,
     pub response_types_supported: Vec<String>,
     pub grant_types_supported: Vec<String>,
@@ -58,12 +65,6 @@ pub struct ProtectedResourceMetadata {
     pub authorization_servers: Vec<String>,
     pub scopes_supported: Vec<String>,
     pub bearer_methods_supported: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct RegistrationRequest {
-    pub client_name: Option<String>,
-    pub redirect_uris: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]

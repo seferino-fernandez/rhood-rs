@@ -11,6 +11,8 @@ use rhood_core::env::{Env, SystemEnv, env_non_empty, env_non_empty_u64};
 use secrecy::SecretString;
 use serde::Deserialize;
 
+use crate::oauth::model::RegisteredClient;
+
 const ENV_MCP_HOST: &str = "RHOOD_MCP_HOST";
 const ENV_MCP_PORT: &str = "RHOOD_MCP_PORT";
 const ENV_MCP_TOKEN: &str = "RHOOD_MCP_TOKEN";
@@ -95,6 +97,8 @@ pub struct McpConfig {
     pub token_file: Option<String>,
     /// Authentication mode: `"token"` or `"oauth"`.
     pub auth_mode: String,
+    /// OAuth clients preregistered by the operator in config.toml.
+    pub registered_clients: Vec<RegisteredClient>,
     /// PIN code for OAuth authorization. Mutually exclusive with `oauth_pin_file`.
     pub oauth_pin: Option<SecretString>,
     /// Path to a file containing the OAuth PIN (alternative to inline `oauth_pin`).
@@ -133,6 +137,7 @@ impl Default for McpConfig {
             lazy_auth_timeout_secs: DEFAULT_LAZY_AUTH_TIMEOUT_SECS,
             token_file: None,
             auth_mode: DEFAULT_MCP_AUTH_MODE.to_string(),
+            registered_clients: Vec::new(),
             oauth_pin: None,
             oauth_pin_file: None,
             oauth_token_expiry_secs: DEFAULT_OAUTH_TOKEN_EXPIRY_SECS,
@@ -146,6 +151,51 @@ impl Default for McpConfig {
     }
 }
 
+impl McpConfig {
+    /// Validate the operator-configured OAuth client registry.
+    pub(crate) fn validate_registered_clients(&self) -> anyhow::Result<()> {
+        if self.registered_clients.is_empty() {
+            anyhow::bail!(
+                "auth_mode=\"oauth\" requires at least one [[mcp.registered_clients]] entry"
+            );
+        }
+
+        let mut client_ids = std::collections::HashSet::new();
+        for (client_index, client) in self.registered_clients.iter().enumerate() {
+            if client.client_id.trim().is_empty() {
+                anyhow::bail!("mcp.registered_clients[{client_index}].client_id must not be empty");
+            }
+            if !client_ids.insert(client.client_id.as_str()) {
+                anyhow::bail!(
+                    "duplicate mcp.registered_clients client_id {:?}",
+                    client.client_id
+                );
+            }
+            if client.client_name.trim().is_empty() {
+                anyhow::bail!(
+                    "mcp.registered_clients client {:?} has an empty client_name",
+                    client.client_id
+                );
+            }
+            if client.redirect_uris.is_empty() {
+                anyhow::bail!(
+                    "mcp.registered_clients client {:?} requires at least one redirect_uris entry",
+                    client.client_id
+                );
+            }
+            for (uri_index, redirect_uri) in client.redirect_uris.iter().enumerate() {
+                if redirect_uri.trim().is_empty() {
+                    anyhow::bail!(
+                        "mcp.registered_clients client {:?} has an empty redirect_uris[{uri_index}]",
+                        client.client_id
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 impl std::fmt::Debug for McpConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("McpConfig")
@@ -155,6 +205,7 @@ impl std::fmt::Debug for McpConfig {
             .field("token", &self.token.as_ref().map(|_| "[REDACTED]"))
             .field("lazy_auth_timeout_secs", &self.lazy_auth_timeout_secs)
             .field("auth_mode", &self.auth_mode)
+            .field("registered_clients", &self.registered_clients)
             .field("oauth_pin", &self.oauth_pin.as_ref().map(|_| "[REDACTED]"))
             .field("oauth_token_expiry_secs", &self.oauth_token_expiry_secs)
             .field("oauth_auth_code_ttl_secs", &self.oauth_auth_code_ttl_secs)
@@ -446,6 +497,141 @@ token = "my-secret-token"
             expose_secret_opt(&config.mcp.token),
             Some("my-secret-token")
         );
+    }
+
+    #[test]
+    fn registered_clients_load_from_toml() {
+        let toml_str = r#"
+[mcp]
+auth_mode = "oauth"
+
+[[mcp.registered_clients]]
+client_id = "desktop-client"
+client_name = "Desktop Client"
+redirect_uris = ["http://127.0.0.1:8123/callback", "https://app.example.com/oauth/callback"]
+"#;
+
+        let config: ServerConfig = toml::from_str(toml_str).unwrap();
+        let client = &config.mcp.registered_clients[0];
+        assert_eq!(client.client_id, "desktop-client");
+        assert_eq!(client.client_name, "Desktop Client");
+        assert_eq!(
+            client.redirect_uris,
+            [
+                "http://127.0.0.1:8123/callback",
+                "https://app.example.com/oauth/callback"
+            ]
+        );
+    }
+
+    #[test]
+    fn oauth_requires_a_registered_client() {
+        let config: ServerConfig = toml::from_str("[mcp]\nauth_mode = \"oauth\"\n").unwrap();
+
+        let error = config.mcp.validate_registered_clients().unwrap_err();
+
+        assert!(error.to_string().contains("registered_clients"));
+        assert!(error.to_string().contains("at least one"));
+    }
+
+    #[test]
+    fn oauth_rejects_an_empty_registered_client_id() {
+        let config: ServerConfig = toml::from_str(
+            r#"
+[[mcp.registered_clients]]
+client_id = ""
+client_name = "Desktop Client"
+redirect_uris = ["http://localhost/callback"]
+"#,
+        )
+        .unwrap();
+
+        let error = config.mcp.validate_registered_clients().unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("registered_clients[0].client_id"),
+            "{message}"
+        );
+        assert!(message.contains("empty"), "{message}");
+    }
+
+    #[test]
+    fn oauth_rejects_duplicate_registered_client_ids() {
+        let config: ServerConfig = toml::from_str(
+            r#"
+[[mcp.registered_clients]]
+client_id = "duplicate-client"
+client_name = "First Client"
+redirect_uris = ["http://localhost/first"]
+
+[[mcp.registered_clients]]
+client_id = "duplicate-client"
+client_name = "Second Client"
+redirect_uris = ["http://localhost/second"]
+"#,
+        )
+        .unwrap();
+
+        let error = config.mcp.validate_registered_clients().unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("duplicate"), "{message}");
+        assert!(message.contains("duplicate-client"), "{message}");
+    }
+
+    #[test]
+    fn oauth_rejects_an_empty_registered_client_name() {
+        let config: ServerConfig = toml::from_str(
+            r#"
+[[mcp.registered_clients]]
+client_id = "desktop-client"
+client_name = " "
+redirect_uris = ["http://localhost/callback"]
+"#,
+        )
+        .unwrap();
+
+        let error = config.mcp.validate_registered_clients().unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("desktop-client"), "{message}");
+        assert!(message.contains("client_name"), "{message}");
+    }
+
+    #[test]
+    fn oauth_rejects_a_registered_client_without_redirect_uris() {
+        let config: ServerConfig = toml::from_str(
+            r#"
+[[mcp.registered_clients]]
+client_id = "desktop-client"
+client_name = "Desktop Client"
+redirect_uris = []
+"#,
+        )
+        .unwrap();
+
+        let error = config.mcp.validate_registered_clients().unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("desktop-client"), "{message}");
+        assert!(message.contains("redirect_uris"), "{message}");
+        assert!(message.contains("at least one"), "{message}");
+    }
+
+    #[test]
+    fn oauth_rejects_an_empty_registered_redirect_uri() {
+        let config: ServerConfig = toml::from_str(
+            r#"
+[[mcp.registered_clients]]
+client_id = "desktop-client"
+client_name = "Desktop Client"
+redirect_uris = ["http://localhost/callback", ""]
+"#,
+        )
+        .unwrap();
+
+        let error = config.mcp.validate_registered_clients().unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("desktop-client"), "{message}");
+        assert!(message.contains("redirect_uris[1]"), "{message}");
+        assert!(message.contains("empty"), "{message}");
     }
 
     #[test]
