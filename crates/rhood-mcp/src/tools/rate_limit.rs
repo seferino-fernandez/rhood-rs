@@ -193,11 +193,23 @@ impl ClassBuckets {
             ToolClass::Write => &mut self.write,
         }
     }
+
+    /// A fully refilled entry is indistinguishable from a freshly created one,
+    /// so dropping it from the principal map is lossless.
+    fn is_full(&self, quotas: Quotas, now: Instant) -> bool {
+        self.read.available(quotas.read.per_principal, now) >= quotas.read.per_principal.capacity
+            && self.write.available(quotas.write.per_principal, now)
+                >= quotas.write.per_principal.capacity
+    }
 }
+
+/// How often idle principal entries are swept from the map.
+const PRINCIPAL_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 
 struct LimiterState {
     global: ClassBuckets,
     principals: HashMap<String, ClassBuckets>,
+    last_sweep: Instant,
 }
 
 /// Process-local hierarchical limiter shared by every transport handler.
@@ -222,6 +234,7 @@ impl ToolRateLimiter {
             state: Mutex::new(LimiterState {
                 global: ClassBuckets::full(quotas.read.global, quotas.write.global, now),
                 principals: HashMap::new(),
+                last_sweep: now,
             }),
         }
     }
@@ -233,30 +246,27 @@ impl ToolRateLimiter {
         class: ToolClass,
     ) -> Result<Option<RateLimitRejection>, RateLimiterUnavailable> {
         let now = self.clock.now();
+        // A poisoned lock stays poisoned, so a panic while the state is held
+        // fails every subsequent tool call closed until the process restarts.
+        // That is deliberate: limiter state of unknown integrity must not
+        // admit traffic on a server that can place orders.
         let mut state = self
             .state
             .lock()
             .map_err(|_poisoned| RateLimiterUnavailable)?;
+        let state = &mut *state;
         let quota = self.quotas.for_class(class);
 
-        state
-            .principals
-            .entry(principal.to_string())
-            .or_insert_with(|| {
-                ClassBuckets::full(
-                    self.quotas.read.per_principal,
-                    self.quotas.write.per_principal,
-                    now,
-                )
-            });
+        self.sweep_idle_principals(state, now);
 
         let global_available = state.global.for_class(class).available(quota.global, now);
-        let principal_available = state
-            .principals
-            .get(principal)
-            .ok_or(RateLimiterUnavailable)?
-            .for_class(class)
-            .available(quota.per_principal, now);
+        // A principal without an entry holds a full bucket; entries are only
+        // materialized once a call is admitted, so rejected traffic cannot
+        // grow the map.
+        let principal_available = state.principals.get(principal).map_or(
+            quota.per_principal.capacity,
+            |buckets| buckets.for_class(class).available(quota.per_principal, now),
+        );
         let global_limited = global_available < 1.0;
         let principal_limited = principal_available < 1.0;
 
@@ -265,12 +275,17 @@ impl ToolRateLimiter {
                 .global
                 .for_class_mut(class)
                 .consume(global_available, now);
-            state
-                .principals
-                .get_mut(principal)
-                .ok_or(RateLimiterUnavailable)?
-                .for_class_mut(class)
-                .consume(principal_available, now);
+            if let Some(buckets) = state.principals.get_mut(principal) {
+                buckets.for_class_mut(class).consume(principal_available, now);
+            } else {
+                let mut buckets = ClassBuckets::full(
+                    self.quotas.read.per_principal,
+                    self.quotas.write.per_principal,
+                    now,
+                );
+                buckets.for_class_mut(class).consume(principal_available, now);
+                state.principals.insert(principal.to_string(), buckets);
+            }
             return Ok(None);
         }
 
@@ -292,6 +307,22 @@ impl ToolRateLimiter {
             layer,
             retry_after_seconds,
         }))
+    }
+
+    /// Drops fully refilled principal entries so the map tracks only recently
+    /// active principals instead of growing for the life of the process.
+    fn sweep_idle_principals(&self, state: &mut LimiterState, now: Instant) {
+        let elapsed = now
+            .checked_duration_since(state.last_sweep)
+            .unwrap_or(Duration::ZERO);
+        if elapsed < PRINCIPAL_SWEEP_INTERVAL {
+            return;
+        }
+        state.last_sweep = now;
+        let quotas = self.quotas;
+        state
+            .principals
+            .retain(|_principal, buckets| !buckets.is_full(quotas, now));
     }
 }
 
@@ -397,6 +428,79 @@ mod tests {
 
         clock.advance(Duration::from_secs(1));
         assert_eq!(limiter.check("client-b", ToolClass::Read), Ok(None));
+    }
+
+    #[test]
+    fn principal_rejection_does_not_consume_global_allowance() {
+        let mut config = ToolRateLimitConfig::default();
+        config.read.per_principal_per_minute = 60;
+        config.read.per_principal_burst = 1;
+        config.read.global_per_minute = 60;
+        config.read.global_burst = 2;
+        let (limiter, _clock) = limiter_with_clock(&config);
+
+        assert_eq!(limiter.check("client-a", ToolClass::Read), Ok(None));
+        let rejection = limiter
+            .check("client-a", ToolClass::Read)
+            .expect("limiter remains available")
+            .expect("principal bucket is empty");
+        assert_eq!(rejection.layer, RateLimitLayer::Principal);
+
+        // One global token remains; a charge during the rejection would have
+        // spent it and this check would fail.
+        assert_eq!(limiter.check("client-b", ToolClass::Read), Ok(None));
+    }
+
+    #[test]
+    fn global_rejection_does_not_create_principal_state() {
+        let mut config = ToolRateLimitConfig::default();
+        config.read.global_per_minute = 60;
+        config.read.global_burst = 1;
+        let (limiter, _clock) = limiter_with_clock(&config);
+
+        assert_eq!(limiter.check("client-a", ToolClass::Read), Ok(None));
+        let rejection = limiter
+            .check("client-b", ToolClass::Read)
+            .expect("limiter remains available")
+            .expect("global bucket is empty");
+        assert_eq!(rejection.layer, RateLimitLayer::Global);
+
+        let state = limiter.state.lock().expect("limiter state lock");
+        assert!(state.principals.contains_key("client-a"));
+        assert!(!state.principals.contains_key("client-b"));
+    }
+
+    #[test]
+    fn refilled_principals_are_swept_after_the_interval() {
+        let mut config = ToolRateLimitConfig::default();
+        config.read.per_principal_per_minute = 60;
+        config.read.per_principal_burst = 2;
+        let (limiter, clock) = limiter_with_clock(&config);
+
+        assert_eq!(limiter.check("client-a", ToolClass::Read), Ok(None));
+        clock.advance(Duration::from_secs(61));
+        assert_eq!(limiter.check("client-b", ToolClass::Read), Ok(None));
+
+        let state = limiter.state.lock().expect("limiter state lock");
+        assert!(!state.principals.contains_key("client-a"));
+        assert!(state.principals.contains_key("client-b"));
+    }
+
+    #[test]
+    fn partially_refilled_principals_survive_the_sweep() {
+        let mut config = ToolRateLimitConfig::default();
+        config.read.per_principal_per_minute = 1;
+        config.read.per_principal_burst = 20;
+        let (limiter, clock) = limiter_with_clock(&config);
+
+        assert_eq!(limiter.check("client-a", ToolClass::Read), Ok(None));
+        assert_eq!(limiter.check("client-a", ToolClass::Read), Ok(None));
+        clock.advance(Duration::from_secs(61));
+        assert_eq!(limiter.check("client-b", ToolClass::Read), Ok(None));
+
+        let state = limiter.state.lock().expect("limiter state lock");
+        assert!(state.principals.contains_key("client-a"));
+        assert!(state.principals.contains_key("client-b"));
     }
 
     #[test]

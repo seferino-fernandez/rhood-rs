@@ -234,15 +234,16 @@ impl ServerHandler for RhoodTools {
                     retry_after_seconds = rejection.retry_after_seconds,
                     "tool invocation rate limited"
                 );
-                let mut result = enforce_response_budget(
-                    CallToolResult::structured_error(serde_json::json!({
-                        "error": "rate_limited",
-                        "class": rejection.class.as_str(),
-                        "layer": rejection.layer.as_str(),
-                        "retry_after_seconds": rejection.retry_after_seconds,
-                    })),
-                    self.max_response_bytes,
-                );
+                // Exempt from `enforce_response_budget`: the payload is
+                // fixed-size and server-generated, and a small configured
+                // budget must not replace the structured rejection (and its
+                // retry_after_seconds) with `response_too_large`.
+                let mut result = CallToolResult::structured_error(serde_json::json!({
+                    "error": "rate_limited",
+                    "class": rejection.class.as_str(),
+                    "layer": rejection.layer.as_str(),
+                    "retry_after_seconds": rejection.retry_after_seconds,
+                }));
                 insert_server_info(&mut result.meta, &server_info);
                 return Ok(result.into());
             }

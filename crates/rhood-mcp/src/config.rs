@@ -7,7 +7,7 @@
 use std::path::Path;
 
 use rhood_core::config::{ensure_secret_file_permissions, resolve_secret};
-use rhood_core::env::{Env, SystemEnv, env_non_empty, env_non_empty_u64};
+use rhood_core::env::{Env, SystemEnv, env_non_empty};
 use secrecy::SecretString;
 use serde::Deserialize;
 
@@ -79,8 +79,26 @@ fn default_allowed_hosts() -> Vec<String> {
         .collect()
 }
 
-fn env_non_empty_u32(env: &impl Env, key: &str) -> Option<u32> {
-    env_non_empty(env, key).and_then(|value| value.parse().ok())
+/// Parses a numeric environment override, failing loudly on a malformed value.
+///
+/// Unset and empty values mean "no override". A present-but-unparseable value
+/// is a configuration error, not a signal to fall back to defaults: silently
+/// ignoring it would run the server with limits the operator believes they
+/// changed.
+fn env_parsed<T>(env: &impl Env, key: &str) -> anyhow::Result<Option<T>>
+where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
+    let Some(value) = env_non_empty(env, key) else {
+        return Ok(None);
+    };
+    match value.parse() {
+        Ok(parsed) => Ok(Some(parsed)),
+        Err(error) => Err(anyhow::anyhow!(
+            "environment variable {key} has invalid value {value:?}: {error}"
+        )),
+    }
 }
 
 /// Rate and burst settings for read-only tool invocations.
@@ -416,7 +434,7 @@ impl ServerConfig {
         config
             .core
             .apply_env_overrides_and_normalize_with_env(env)?;
-        config.apply_mcp_env_overrides(env);
+        config.apply_mcp_env_overrides(env)?;
         config.resolve_mcp_secrets()?;
         config.mcp.validate_rate_limits()?;
         Ok(config)
@@ -443,12 +461,11 @@ impl ServerConfig {
         dirs::config_dir().map(|dir| dir.join("rhood").join("config.toml"))
     }
 
-    fn apply_mcp_env_overrides(&mut self, env: &impl Env) {
+    fn apply_mcp_env_overrides(&mut self, env: &impl Env) -> anyhow::Result<()> {
         if let Some(host) = env_non_empty(env, ENV_MCP_HOST) {
             self.mcp.host = host;
         }
-        if let Some(port) = env_non_empty(env, ENV_MCP_PORT).and_then(|val| val.parse::<u16>().ok())
-        {
+        if let Some(port) = env_parsed::<u16>(env, ENV_MCP_PORT)? {
             self.mcp.port = port;
         }
         if let Some(val) = env_non_empty(env, ENV_MCP_TOKEN) {
@@ -468,19 +485,19 @@ impl ServerConfig {
             self.mcp.oauth_pin = Some(SecretString::from(val));
             self.mcp.oauth_pin_file = None;
         }
-        if let Some(val) = env_non_empty_u64(env, ENV_MCP_OAUTH_TOKEN_EXPIRY_SECS) {
+        if let Some(val) = env_parsed::<u64>(env, ENV_MCP_OAUTH_TOKEN_EXPIRY_SECS)? {
             self.mcp.oauth_token_expiry_secs = val;
         }
         if let Some(val) = env_non_empty(env, ENV_MCP_OAUTH_PIN_FILE) {
             self.mcp.oauth_pin_file = Some(val);
         }
-        if let Some(val) = env_non_empty_u64(env, ENV_MCP_OAUTH_AUTH_CODE_TTL_SECS) {
+        if let Some(val) = env_parsed::<u64>(env, ENV_MCP_OAUTH_AUTH_CODE_TTL_SECS)? {
             self.mcp.oauth_auth_code_ttl_secs = val;
         }
-        if let Some(val) = env_non_empty_u64(env, ENV_MCP_OAUTH_CSRF_NONCE_TTL_SECS) {
+        if let Some(val) = env_parsed::<u64>(env, ENV_MCP_OAUTH_CSRF_NONCE_TTL_SECS)? {
             self.mcp.oauth_csrf_nonce_ttl_secs = val;
         }
-        if let Some(val) = env_non_empty_u64(env, ENV_MCP_OAUTH_SWEEP_INTERVAL_SECS) {
+        if let Some(val) = env_parsed::<u64>(env, ENV_MCP_OAUTH_SWEEP_INTERVAL_SECS)? {
             self.mcp.oauth_sweep_interval_secs = val;
         }
         if let Some(origins_csv) = env_non_empty(env, ENV_MCP_OAUTH_CORS_ORIGINS) {
@@ -490,9 +507,7 @@ impl ServerConfig {
                 .filter(|origin| !origin.is_empty())
                 .collect();
         }
-        if let Some(val) =
-            env_non_empty(env, ENV_MCP_MAX_RESPONSE_BYTES).and_then(|v| v.parse::<usize>().ok())
-        {
+        if let Some(val) = env_parsed::<usize>(env, ENV_MCP_MAX_RESPONSE_BYTES)? {
             self.mcp.max_response_bytes = val;
         }
         if let Some(hosts_csv) = env_non_empty(env, ENV_MCP_ALLOWED_HOSTS) {
@@ -506,33 +521,34 @@ impl ServerConfig {
             }
         }
         if let Some(value) =
-            env_non_empty_u32(env, ENV_MCP_RATE_LIMIT_READ_PER_PRINCIPAL_PER_MINUTE)
+            env_parsed::<u32>(env, ENV_MCP_RATE_LIMIT_READ_PER_PRINCIPAL_PER_MINUTE)?
         {
             self.mcp.rate_limit.read.per_principal_per_minute = value;
         }
-        if let Some(value) = env_non_empty_u32(env, ENV_MCP_RATE_LIMIT_READ_PER_PRINCIPAL_BURST) {
+        if let Some(value) = env_parsed::<u32>(env, ENV_MCP_RATE_LIMIT_READ_PER_PRINCIPAL_BURST)? {
             self.mcp.rate_limit.read.per_principal_burst = value;
         }
-        if let Some(value) = env_non_empty_u32(env, ENV_MCP_RATE_LIMIT_READ_GLOBAL_PER_MINUTE) {
+        if let Some(value) = env_parsed::<u32>(env, ENV_MCP_RATE_LIMIT_READ_GLOBAL_PER_MINUTE)? {
             self.mcp.rate_limit.read.global_per_minute = value;
         }
-        if let Some(value) = env_non_empty_u32(env, ENV_MCP_RATE_LIMIT_READ_GLOBAL_BURST) {
+        if let Some(value) = env_parsed::<u32>(env, ENV_MCP_RATE_LIMIT_READ_GLOBAL_BURST)? {
             self.mcp.rate_limit.read.global_burst = value;
         }
         if let Some(value) =
-            env_non_empty_u32(env, ENV_MCP_RATE_LIMIT_WRITE_PER_PRINCIPAL_PER_MINUTE)
+            env_parsed::<u32>(env, ENV_MCP_RATE_LIMIT_WRITE_PER_PRINCIPAL_PER_MINUTE)?
         {
             self.mcp.rate_limit.write.per_principal_per_minute = value;
         }
-        if let Some(value) = env_non_empty_u32(env, ENV_MCP_RATE_LIMIT_WRITE_PER_PRINCIPAL_BURST) {
+        if let Some(value) = env_parsed::<u32>(env, ENV_MCP_RATE_LIMIT_WRITE_PER_PRINCIPAL_BURST)? {
             self.mcp.rate_limit.write.per_principal_burst = value;
         }
-        if let Some(value) = env_non_empty_u32(env, ENV_MCP_RATE_LIMIT_WRITE_GLOBAL_PER_MINUTE) {
+        if let Some(value) = env_parsed::<u32>(env, ENV_MCP_RATE_LIMIT_WRITE_GLOBAL_PER_MINUTE)? {
             self.mcp.rate_limit.write.global_per_minute = value;
         }
-        if let Some(value) = env_non_empty_u32(env, ENV_MCP_RATE_LIMIT_WRITE_GLOBAL_BURST) {
+        if let Some(value) = env_parsed::<u32>(env, ENV_MCP_RATE_LIMIT_WRITE_GLOBAL_BURST)? {
             self.mcp.rate_limit.write.global_burst = value;
         }
+        Ok(())
     }
 
     fn resolve_mcp_secrets(&mut self) -> anyhow::Result<()> {
@@ -629,7 +645,9 @@ global_burst = 25
             .with(ENV_MCP_RATE_LIMIT_WRITE_GLOBAL_PER_MINUTE, "31")
             .with(ENV_MCP_RATE_LIMIT_WRITE_GLOBAL_BURST, "11");
         let mut config = ServerConfig::default();
-        config.apply_mcp_env_overrides(&env);
+        config
+            .apply_mcp_env_overrides(&env)
+            .expect("numeric overrides parse");
 
         assert_eq!(config.mcp.rate_limit.read.per_principal_per_minute, 61);
         assert_eq!(config.mcp.rate_limit.read.per_principal_burst, 21);
@@ -639,6 +657,21 @@ global_burst = 25
         assert_eq!(config.mcp.rate_limit.write.per_principal_burst, 3);
         assert_eq!(config.mcp.rate_limit.write.global_per_minute, 31);
         assert_eq!(config.mcp.rate_limit.write.global_burst, 11);
+    }
+
+    /// A malformed numeric override must abort startup, not silently run with
+    /// defaults the operator believes they changed.
+    #[test]
+    fn malformed_numeric_environment_override_fails_startup() {
+        let env = rhood_core::env::MapEnv::new()
+            .with(ENV_MCP_RATE_LIMIT_READ_PER_PRINCIPAL_PER_MINUTE, "unlimited");
+        let mut config = ServerConfig::default();
+        let error = config
+            .apply_mcp_env_overrides(&env)
+            .expect_err("malformed override must not fall back to defaults");
+        let message = error.to_string();
+        assert!(message.contains(ENV_MCP_RATE_LIMIT_READ_PER_PRINCIPAL_PER_MINUTE));
+        assert!(message.contains("unlimited"));
     }
 
     #[test]
@@ -680,7 +713,9 @@ global_burst = 25
             " mcp.example.com , example.com:8443 ",
         );
         let mut config = ServerConfig::default();
-        config.apply_mcp_env_overrides(&env);
+        config
+            .apply_mcp_env_overrides(&env)
+            .expect("host override applies");
         assert_eq!(
             config.mcp.allowed_hosts,
             vec!["mcp.example.com", "example.com:8443"],
@@ -695,7 +730,9 @@ global_burst = 25
     fn empty_allowed_hosts_env_does_not_clear_the_default() {
         let env = rhood_core::env::MapEnv::new().with(ENV_MCP_ALLOWED_HOSTS, " , , ");
         let mut config = ServerConfig::default();
-        config.apply_mcp_env_overrides(&env);
+        config
+            .apply_mcp_env_overrides(&env)
+            .expect("empty host override is ignored");
         assert_eq!(
             config.mcp.allowed_hosts,
             vec!["localhost", "127.0.0.1", "::1"],

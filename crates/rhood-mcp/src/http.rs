@@ -444,10 +444,14 @@ mod wire_tests {
 
     fn rate_limited_counting_service(
         dispatches: Arc<AtomicUsize>,
+        max_response_bytes: usize,
     ) -> StreamableHttpService<RhoodTools, LocalSessionManager> {
         let client =
             RobinhoodClient::with_config(RhoodConfig::default()).expect("default config builds");
-        let mut mcp_config = McpConfig::default();
+        let mut mcp_config = McpConfig {
+            max_response_bytes,
+            ..McpConfig::default()
+        };
         mcp_config.rate_limit.read.per_principal_per_minute = 1;
         mcp_config.rate_limit.read.per_principal_burst = 2;
         mcp_config.rate_limit.read.global_per_minute = 1_000;
@@ -836,7 +840,10 @@ mod wire_tests {
     #[tokio::test]
     async fn stateless_http_handlers_share_rate_limit_and_stop_dispatch() {
         let dispatches = Arc::new(AtomicUsize::new(0));
-        let service = rate_limited_counting_service(dispatches.clone());
+        let service = rate_limited_counting_service(
+            dispatches.clone(),
+            McpConfig::default().max_response_bytes,
+        );
         let _ = post(&service, initialize(V_MODERN), None, None).await;
 
         for expected_dispatches in 1..=2 {
@@ -868,6 +875,30 @@ mod wire_tests {
             2,
             "rate-rejected invocation must not reach the tool router"
         );
+    }
+
+    /// The structured rejection is exempt from the response budget: even a
+    /// deliberately tiny `max_response_bytes` must not replace it (and its
+    /// retry guidance) with `response_too_large`.
+    #[tokio::test]
+    async fn rate_limit_rejection_survives_a_tiny_response_budget() {
+        let dispatches = Arc::new(AtomicUsize::new(0));
+        let service = rate_limited_counting_service(dispatches.clone(), 1);
+        let _ = post(&service, initialize(V_MODERN), None, None).await;
+
+        for _burst_call in 0..2 {
+            let (status, _, payloads) =
+                post(&service, modern_tools_call(TEST_TOOL), None, Some(V_MODERN)).await;
+            assert!(status.is_success(), "tools/call failed: {payloads:?}");
+        }
+
+        let (status, _, payloads) =
+            post(&service, modern_tools_call(TEST_TOOL), None, Some(V_MODERN)).await;
+        assert!(status.is_success(), "rejection is a tool result");
+        let result = result_of(&payloads);
+        assert_eq!(result["isError"], true);
+        assert_eq!(result["structuredContent"]["error"], "rate_limited");
+        assert_eq!(result["structuredContent"]["retry_after_seconds"], 60);
     }
 
     #[tokio::test]
