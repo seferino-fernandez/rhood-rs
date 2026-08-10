@@ -4,8 +4,9 @@ MCP server exposing Robinhood brokerage operations as tools for LLM clients.
 
 Built on [rmcp](https://github.com/modelcontextprotocol/rust-sdk) 3.x and [rhood-core](../rhood-core/).
 
-Implements the MCP [2026-07-28](https://modelcontextprotocol.io/specification/2026-07-28)
-specification, and negotiates down to every earlier version `rmcp` supports.
+Implements only the MCP
+[2026-07-28](https://modelcontextprotocol.io/specification/2026-07-28) specification.
+Clients requesting an earlier protocol revision are rejected during initialization.
 
 ## Install
 
@@ -30,21 +31,18 @@ cargo binstall rhood-mcp
 
 ## Transports
 
-- `stdio` for Claude Desktop, Claude Code, and other local MCP clients
-- `http` (streamable HTTP) for remote deployments
+- `stdio` for local MCP clients that support MCP 2026-07-28
+- `http` (streamable HTTP) for remote deployments with MCP 2026-07-28 clients
 
 ### Sessions and the 2026-07-28 boundary
 
-SEP-2567 removed sessions from the 2026-07-28 protocol, so the transport runs in
-dual mode:
+The server accepts only MCP 2026-07-28. A client requesting any earlier revision
+receives an unsupported-protocol error during initialization.
 
-| Negotiated version     | Behavior                                                                                                                                                  |
-| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `2026-07-28`           | Stateless. No `Mcp-Session-Id`, no GET/DELETE, no resumption. Results carry `resultType`, and `tools/list` carries SEP-2549 `ttlMs` / `cacheScope` hints. |
-| `2025-11-25` and older | Session-based, with SSE priming and resumability. Legacy wire shape preserved, no `resultType`.                                                           |
-
-Controlled by `legacy_session_mode` in `http.rs`; it only affects pre-2026-07-28
-clients, since modern requests are always stateless.
+SEP-2567 removed sessions from this revision, so HTTP is stateless: there is no
+`Mcp-Session-Id`, GET/DELETE session route, or resumption. Results carry `resultType`,
+and `tools/list` carries SEP-2549 `ttlMs` / `cacheScope` hints. Each HTTP request must
+also carry the protocol metadata required by MCP 2026-07-28.
 
 ### Host validation
 
@@ -85,7 +83,9 @@ go to stderr via `tracing`, controlled by `RUST_LOG` and the `-v`/`-q` flags.
 
 ## Quick Start
 
-### stdio (Claude Desktop / Claude Code)
+### stdio (MCP 2026-07-28 clients)
+
+Run the server over stdio, then configure it in a client that supports MCP 2026-07-28:
 
 ```bash
 rhood-mcp --transport stdio
@@ -119,6 +119,8 @@ rhood-mcp --transport http --auth-mode token --token my-secret
 ```
 
 ## Adding to Your Claude Setup
+
+These examples require a Claude release that supports MCP 2026-07-28.
 
 ### Claude Code (CLI)
 
@@ -175,7 +177,9 @@ claude mcp get rhood
 
 ### Claude Desktop
 
-Add to your `claude_desktop_config.json`:
+Use this configuration only with a Claude Desktop release that supports MCP 2026-07-28;
+clients requesting an earlier revision are rejected during initialization. Add it to
+your `claude_desktop_config.json`:
 
 - macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
 - Windows: `%APPDATA%\Claude\claude_desktop_config.json`
@@ -199,7 +203,9 @@ Add to your `claude_desktop_config.json`:
 
 ### Shared project config (`.mcp.json`)
 
-Create a `.mcp.json` file at your project root. This is checked into version control so all team members share the same MCP configuration:
+Create a `.mcp.json` file at your project root. This is checked into version control so
+all team members share the same MCP configuration. Every client that consumes the file
+must support MCP 2026-07-28:
 
 ```json
 {
@@ -220,13 +226,14 @@ Environment variables use `${VAR}` expansion, so each team member sets their own
 
 ### Cursor / Windsurf / other MCP clients
 
-Any client that supports the MCP stdio transport can connect using:
+A client that supports both MCP 2026-07-28 and the stdio transport can connect using:
 
 ```bash
 rhood-mcp --transport stdio
 ```
 
-For HTTP-based clients, start the server and point your client at the endpoint (`http://localhost:8080/mcp`):
+For clients that support MCP 2026-07-28 over stateless streamable HTTP, start the server
+and point the client at the endpoint (`http://localhost:8080/mcp`):
 
 ```bash
 rhood-mcp --transport http --port 8080

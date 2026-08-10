@@ -69,21 +69,24 @@ rhood --output json stock quote AAPL
 
 ## MCP Server
 
-`rhood-mcp` exposes Robinhood operations as MCP tools for LLM clients. It implements
-MCP **2026-07-28** (`rmcp 3.x`), and older clients still negotiate down: a 2025-11-25
-client keeps its session and resumability, while a 2026-07-28 client is served
-statelessly per SEP-2567. See the [rhood-mcp README](crates/rhood-mcp/) for the full
-reference (auth modes, OAuth, CLI flags, env vars).
+`rhood-mcp` exposes Robinhood operations as MCP tools for LLM clients. It serves only
+MCP **2026-07-28** (`rmcp 3.x`): clients requesting an earlier revision are rejected
+during initialization, and HTTP requests are stateless per SEP-2567. See the
+[rhood-mcp README](crates/rhood-mcp/) for the full reference (auth modes, OAuth, CLI
+flags, env vars).
 
 ### Setup
 
-The fastest path is the stdio transport with Claude Code:
+The fastest path is the stdio transport with a Claude Code release that supports MCP
+2026-07-28:
 
 ```bash
 claude mcp add rhood --transport stdio -- rhood-mcp --transport stdio
 ```
 
-For other clients (Claude Desktop, Cursor, shared `.mcp.json`), HTTP transport, OAuth setup, environment variables, and the full CLI reference, see [crates/rhood-mcp/](crates/rhood-mcp/).
+For Claude Desktop, Cursor, shared `.mcp.json`, and other configurations, first verify
+the client supports MCP 2026-07-28. Then see [crates/rhood-mcp/](crates/rhood-mcp/) for
+transport, OAuth, environment-variable, and full CLI setup.
 
 ### Available Tools
 
@@ -95,7 +98,7 @@ A few representative tools:
 | ------------------- | -------------------------------------- |
 | `get_stock_quotes`  | Current quotes for stock tickers       |
 | `get_portfolio`     | Portfolio summary (equity, cash, etc.) |
-| `place_stock_order` | Request human confirmation for a stock order |
+| `place_stock_order` | Request confirmation; the same tool submits after acceptance |
 | `cancel_order`      | Cancel an open stock order             |
 
 For the live tool list, call MCP `tools/list` against the running server. Order placement uses MCP elicitation: a `place_*` call returns an order summary asking the human to confirm; after acceptance, the client retries the same call with the confirmation response, which submits the order. Read-only mode (default) hides write tools.
