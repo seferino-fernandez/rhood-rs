@@ -385,6 +385,61 @@ mod router_tests {
             serde_json::json!(["number", "null"])
         );
     }
+
+    #[test]
+    fn option_quotes_advertises_two_exclusive_read_only_modes() {
+        use rmcp::ServerHandler;
+
+        let tools = tools_with(false);
+        let tool = tools
+            .get_tool("get_option_quotes")
+            .expect("get_option_quotes must be advertised");
+
+        assert!(
+            tool.annotations
+                .as_ref()
+                .is_some_and(|annotations| annotations.read_only_hint == Some(true)),
+            "get_option_quotes must retain its read-only annotation"
+        );
+        let schema = Value::Object((*tool.input_schema).clone());
+        assert_eq!(schema["type"], serde_json::json!("object"));
+        assert_eq!(schema["additionalProperties"], serde_json::json!(false));
+        assert_eq!(
+            schema["properties"]["contracts"]["minItems"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            schema["properties"]["instrument_urls"]["minItems"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            schema["properties"]["instrument_urls"]["items"]["pattern"],
+            serde_json::json!("^https://api\\.robinhood\\.com/options/instruments/[^/?#]+/?$")
+        );
+
+        let branches = schema["oneOf"]
+            .as_array()
+            .expect("quote modes must be represented by oneOf");
+        assert_eq!(branches.len(), 2);
+        let required_sets: Vec<_> = branches
+            .iter()
+            .map(|branch| branch["required"].clone())
+            .collect();
+        assert!(
+            required_sets.contains(&serde_json::json!(["symbol", "contracts"])),
+            "attribute mode must require symbol plus contracts: {required_sets:?}"
+        );
+        assert!(
+            required_sets.contains(&serde_json::json!(["instrument_urls"])),
+            "URL mode must require instrument_urls: {required_sets:?}"
+        );
+        assert!(
+            branches
+                .iter()
+                .all(|branch| branch["additionalProperties"] == serde_json::json!(false)),
+            "each mode must reject fields from the other mode"
+        );
+    }
 }
 
 #[cfg(test)]

@@ -160,6 +160,29 @@ impl RobinhoodClient {
             instrument_urls.push(url);
         }
 
+        self.get_option_market_data_by_instrument_urls(&instrument_urls)
+            .await
+    }
+
+    /// Fetches live market data for option instrument URLs.
+    ///
+    /// Sends the supplied URLs directly to `/marketdata/options/` without
+    /// performing option-instrument discovery. Results are identified by their
+    /// existing [`OptionMarketData::instrument`] field; their order is not
+    /// guaranteed to match the input order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the HTTP request fails or the response cannot be
+    /// deserialized.
+    pub async fn get_option_market_data_by_instrument_urls(
+        &self,
+        instrument_urls: &[String],
+    ) -> Result<Vec<OptionMarketData>> {
+        if instrument_urls.is_empty() {
+            return Ok(Vec::new());
+        }
+
         let joined_instruments = instrument_urls.join(",");
         let params = [("instruments", joined_instruments.as_str())];
         let resp: ResultsResponse<OptionMarketData> = self
@@ -350,6 +373,48 @@ mod tests {
 
         assert_eq!(options.len(), 1);
         assert_eq!(options[0].id.as_deref(), Some("call-310"));
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn option_market_data_by_instrument_urls_queries_market_data_without_discovery() {
+        let server = MockServer::start().await;
+        let instrument_urls = vec![
+            "https://api.robinhood.com/options/instruments/held-call/".to_string(),
+            "https://api.robinhood.com/options/instruments/held-put/".to_string(),
+        ];
+        Mock::given(method("GET"))
+            .and(path("/marketdata/options/"))
+            .and(query_param("instruments", instrument_urls.join(",")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [{
+                    "instrument": instrument_urls[0],
+                    "instrument_id": "held-call",
+                    "bid_price": "1.20",
+                    "ask_price": "1.30"
+                }],
+                "next": null,
+                "previous": null
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server.uri()).await;
+
+        let quotes = client
+            .get_option_market_data_by_instrument_urls(&instrument_urls)
+            .await
+            .unwrap();
+
+        assert_eq!(quotes.len(), 1);
+        assert_eq!(
+            quotes[0].instrument.as_deref(),
+            Some(instrument_urls[0].as_str())
+        );
+        assert_eq!(quotes[0].instrument_id.as_deref(), Some("held-call"));
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1, "URL mode must make exactly one request");
+        assert_eq!(requests[0].url.path(), "/marketdata/options/");
         server.verify().await;
     }
 

@@ -251,6 +251,13 @@ Tools are grouped by domain. The complete authoritative list is what `tools/list
 
 For the live list, call MCP `tools/list` against the running server.
 
+`get_option_quotes` supports two mutually exclusive inputs:
+
+- Use `{"symbol":"AAPL","contracts":[{"strike_price":310.0,"expiration_date":"2026-06-18","option_type":"call"}]}` to discover and quote contracts by attributes. This mode returns the existing enriched records containing symbol, strike, expiration, and option type.
+- Use `{"instrument_urls":["https://api.robinhood.com/options/instruments/<id>/"]}` to value held contracts from the `option` URLs returned by `get_option_positions`. This mode queries market data directly, returns Robinhood's market-data records identified by their `instrument` field, and does not promise input-order preservation.
+
+Each list must be non-empty. Do not combine the modes.
+
 ### Read-only vs. write
 
 Order placement and cancellation are write operations. The server starts in read-only mode by default and write tools are hidden from `tools/list` and rejected on call. Pass `--read-write` or set `read_only = false` in config to enable them.

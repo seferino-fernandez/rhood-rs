@@ -79,7 +79,7 @@ impl RhoodTools {
 
     #[tool(
         name = "get_option_quotes",
-        description = "Get live quotes for specific option contracts including bid/ask, Greeks, volume, and open interest",
+        description = "Get live option quotes by either symbol plus contract attributes or option-instrument URLs from get_option_positions; the modes are mutually exclusive",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn get_option_quotes(
@@ -89,52 +89,56 @@ impl RhoodTools {
     ) -> Result<String, String> {
         use rhood_core::models::option::OptionContractSpec;
 
-        if params.contracts.is_empty() {
-            return Err("At least one contract is required".into());
-        }
-
         let client = self.ensure_client(&peer).await?;
-        let strike_strings: Vec<String> = params
-            .contracts
-            .iter()
-            .map(|contract| format!("{:.4}", contract.strike_price))
-            .collect();
-        let type_strings: Vec<String> = params
-            .contracts
-            .iter()
-            .map(|contract| contract.option_type.to_string())
-            .collect();
+        match params {
+            OptionQuoteParams::Contracts { symbol, contracts } => {
+                let strike_strings: Vec<String> = contracts
+                    .iter()
+                    .map(|contract| format!("{:.4}", contract.strike_price))
+                    .collect();
+                let type_strings: Vec<String> = contracts
+                    .iter()
+                    .map(|contract| contract.option_type.to_string())
+                    .collect();
 
-        let specs: Vec<OptionContractSpec<'_>> = params
-            .contracts
-            .iter()
-            .zip(strike_strings.iter())
-            .zip(type_strings.iter())
-            .map(|((contract, strike_str), type_str)| OptionContractSpec {
-                strike_price: strike_str,
-                expiration_date: &contract.expiration_date,
-                option_type: type_str,
-            })
-            .collect();
+                let specs: Vec<OptionContractSpec<'_>> = contracts
+                    .iter()
+                    .zip(strike_strings.iter())
+                    .zip(type_strings.iter())
+                    .map(|((contract, strike_str), type_str)| OptionContractSpec {
+                        strike_price: strike_str,
+                        expiration_date: &contract.expiration_date,
+                        option_type: type_str,
+                    })
+                    .collect();
 
-        let data = client
-            .get_option_market_data(&params.symbol, &specs)
-            .await
-            .map_err(|rhood_error| format_tool_error(&rhood_error))?;
-        // Upstream preserves request order, so zip the input contracts back
-        // onto each result to restore strike/expiration/type identity.
-        let views: Vec<OptionQuoteView> = data
-            .into_iter()
-            .zip(params.contracts.iter())
-            .map(|(data, contract)| OptionQuoteView {
-                symbol: params.symbol.clone(),
-                strike_price: contract.strike_price,
-                expiration_date: contract.expiration_date.clone(),
-                option_type: contract.option_type.to_string(),
-                data,
-            })
-            .collect();
-        serde_json::to_string_pretty(&views).map_err(|error| error.to_string())
+                let data = client
+                    .get_option_market_data(&symbol, &specs)
+                    .await
+                    .map_err(|rhood_error| format_tool_error(&rhood_error))?;
+                // Upstream preserves request order, so zip the input contracts back
+                // onto each result to restore strike/expiration/type identity.
+                let views: Vec<OptionQuoteView> = data
+                    .into_iter()
+                    .zip(contracts.iter())
+                    .map(|(data, contract)| OptionQuoteView {
+                        symbol: symbol.clone(),
+                        strike_price: contract.strike_price,
+                        expiration_date: contract.expiration_date.clone(),
+                        option_type: contract.option_type.to_string(),
+                        data,
+                    })
+                    .collect();
+                serde_json::to_string_pretty(&views).map_err(|error| error.to_string())
+            }
+            OptionQuoteParams::InstrumentUrls { instrument_urls } => {
+                let data = client
+                    .get_option_market_data_by_instrument_urls(&instrument_urls)
+                    .await
+                    .map_err(|rhood_error| format_tool_error(&rhood_error))?;
+                serde_json::to_string_pretty(&data).map_err(|error| error.to_string())
+            }
+        }
     }
 
     #[tool(
