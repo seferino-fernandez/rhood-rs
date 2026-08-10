@@ -74,6 +74,21 @@ pub async fn authorize(
         scope = ?params.scope,
         "GET /oauth/authorize"
     );
+    if state
+        .store
+        .registered_client(&params.client_id, &params.redirect_uri)
+        .is_none()
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "invalid_request",
+                "error_description": "Unknown client_id or redirect_uri mismatch"
+            })),
+        )
+            .into_response();
+    }
+
     if params.response_type != "code" {
         return error_redirect_or_json(
             &params.redirect_uri,
@@ -110,21 +125,6 @@ pub async fn authorize(
             "invalid_request",
             "code_challenge is required",
         );
-    }
-
-    if state
-        .store
-        .registered_client(&params.client_id, &params.redirect_uri)
-        .is_none()
-    {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": "invalid_request",
-                "error_description": "Unknown client_id or redirect_uri mismatch"
-            })),
-        )
-            .into_response();
     }
 
     let csrf_nonce = state.store.create_csrf_nonce().await;

@@ -93,6 +93,44 @@ async fn body_to_json(body: Body) -> serde_json::Value {
     serde_json::from_str(&text).unwrap()
 }
 
+async fn assert_authorization_error_is_local_for_untrusted_targets(
+    validation_fields: &[(&str, &str)],
+) {
+    let (app, _store) = build_test_router(false, None);
+
+    for (client_id, redirect_uri) in [
+        ("unknown-client", TEST_REDIRECT_URI),
+        (TEST_CLIENT_ID, "http://localhost/wrong-callback"),
+    ] {
+        let mut query_fields = vec![
+            ("client_id", client_id),
+            ("redirect_uri", redirect_uri),
+            ("state", "attacker-state"),
+        ];
+        query_fields.extend_from_slice(validation_fields);
+        let query = serde_urlencoded::to_string(query_fields).unwrap();
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/oauth/authorize?{query}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(response.headers().get(header::LOCATION).is_none());
+        let json = body_to_json(response.into_body()).await;
+        assert_eq!(json["error"], "invalid_request");
+        assert_eq!(
+            json["error_description"],
+            "Unknown client_id or redirect_uri mismatch"
+        );
+    }
+}
+
 #[tokio::test]
 async fn protected_route_requires_auth() {
     let (app, _store) = build_test_router(false, None);
@@ -281,6 +319,111 @@ async fn authorization_rejects_unknown_and_redirect_mismatched_clients() {
                 .unwrap()
                 .contains("Unknown client_id or redirect_uri mismatch")
         );
+    }
+}
+
+#[tokio::test]
+async fn authorization_invalid_response_type_does_not_redirect_untrusted_target() {
+    assert_authorization_error_is_local_for_untrusted_targets(&[
+        ("response_type", "token"),
+        ("code_challenge", "challenge"),
+        ("code_challenge_method", "S256"),
+    ])
+    .await;
+}
+
+#[tokio::test]
+async fn authorization_unsupported_code_challenge_method_does_not_redirect_untrusted_target() {
+    assert_authorization_error_is_local_for_untrusted_targets(&[
+        ("response_type", "code"),
+        ("code_challenge", "challenge"),
+        ("code_challenge_method", "plain"),
+    ])
+    .await;
+}
+
+#[tokio::test]
+async fn authorization_missing_code_challenge_method_does_not_redirect_untrusted_target() {
+    assert_authorization_error_is_local_for_untrusted_targets(&[
+        ("response_type", "code"),
+        ("code_challenge", "challenge"),
+    ])
+    .await;
+}
+
+#[tokio::test]
+async fn authorization_missing_code_challenge_does_not_redirect_untrusted_target() {
+    assert_authorization_error_is_local_for_untrusted_targets(&[
+        ("response_type", "code"),
+        ("code_challenge_method", "S256"),
+    ])
+    .await;
+}
+
+#[tokio::test]
+async fn authorization_protocol_errors_redirect_trusted_target_and_preserve_state() {
+    let (app, _store) = build_test_router(false, None);
+    let client_state = "client state /?&=+";
+
+    for (validation_fields, expected_error) in [
+        (
+            vec![
+                ("response_type", "token"),
+                ("code_challenge", "challenge"),
+                ("code_challenge_method", "S256"),
+            ],
+            "unsupported_response_type",
+        ),
+        (
+            vec![
+                ("response_type", "code"),
+                ("code_challenge", "challenge"),
+                ("code_challenge_method", "plain"),
+            ],
+            "invalid_request",
+        ),
+        (
+            vec![("response_type", "code"), ("code_challenge", "challenge")],
+            "invalid_request",
+        ),
+        (
+            vec![("response_type", "code"), ("code_challenge_method", "S256")],
+            "invalid_request",
+        ),
+    ] {
+        let mut query_fields = vec![
+            ("client_id", TEST_CLIENT_ID),
+            ("redirect_uri", TEST_REDIRECT_URI),
+            ("state", client_state),
+        ];
+        query_fields.extend_from_slice(&validation_fields);
+        let query = serde_urlencoded::to_string(query_fields).unwrap();
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/oauth/authorize?{query}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let location = response
+            .headers()
+            .get(header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        let parsed = url::Url::parse(location).unwrap();
+        let mut redirect_target = parsed.clone();
+        redirect_target.set_query(None);
+        assert_eq!(redirect_target.as_str(), TEST_REDIRECT_URI);
+
+        let query: std::collections::HashMap<_, _> = parsed.query_pairs().collect();
+        assert_eq!(&query["error"], expected_error);
+        assert_eq!(&query["state"], client_state);
     }
 }
 
