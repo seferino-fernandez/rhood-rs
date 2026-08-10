@@ -7,9 +7,9 @@ use thiserror::Error;
 
 /// Formats an API error for display.
 ///
-/// If the body is JSON containing a top-level `"message"` or `"detail"` field,
-/// extracts it for a cleaner user-facing message. Otherwise falls back to
-/// the raw body.
+/// If the body is JSON containing an allowlisted diagnostic field, extracts it
+/// for a cleaner user-facing message. Otherwise falls back to the sanitized
+/// diagnostic message.
 fn display_api_error(status: u16, body: &str) -> String {
     if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(body) {
         // Try common error shapes: {"message": "..."}, {"detail": "..."}, {"error": {"message": "..."}}
@@ -93,7 +93,7 @@ pub enum RhoodError {
     Api {
         /// HTTP status code from the API response.
         status: u16,
-        /// Human-readable error message or response body.
+        /// Sanitized API diagnostic or locally constructed error context.
         message: String,
     },
 

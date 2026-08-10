@@ -242,7 +242,7 @@ impl RobinhoodClient {
         tracing::debug!(
             status = status.as_u16(),
             url = %url,
-            body = %body,
+            body_len = body.len(),
             "API response"
         );
         if status.is_success() {
@@ -250,7 +250,7 @@ impl RobinhoodClient {
         } else {
             Err(RhoodError::Api {
                 status: status.as_u16(),
-                message: body,
+                message: redacted_response_body_message(&body),
             })
         }
     }
@@ -274,7 +274,7 @@ impl RobinhoodClient {
         tracing::debug!(
             status = status.as_u16(),
             url = %url,
-            body = %body,
+            body_len = body.len(),
             "API response"
         );
         if status.is_success() {
@@ -282,7 +282,7 @@ impl RobinhoodClient {
         } else {
             Err(RhoodError::Api {
                 status: status.as_u16(),
-                message: body,
+                message: redacted_response_body_message(&body),
             })
         }
     }
@@ -329,19 +329,68 @@ async fn handle_response<T: DeserializeOwned>(res: reqwest::Response) -> Result<
     tracing::debug!(
         status = status.as_u16(),
         url = %url,
-        body = %body,
+        body_len = body.len(),
         "API response"
     );
     if !status.is_success() {
         return Err(RhoodError::Api {
             status: status.as_u16(),
-            message: body,
+            message: redacted_response_body_message(&body),
         });
     }
     serde_json::from_str::<T>(&body).map_err(|e| RhoodError::Api {
         status: status.as_u16(),
         message: format!("Failed to parse response from {url}: {e}"),
     })
+}
+
+pub(super) fn redacted_response_body_message(body: &str) -> String {
+    let Ok(serde_json::Value::Object(fields)) = serde_json::from_str(body) else {
+        return format!("Response body omitted ({} bytes)", body.len());
+    };
+
+    let mut diagnostic = serde_json::Map::new();
+    if let Some(instruments) = fields
+        .get("missing_instruments")
+        .and_then(serde_json::Value::as_array)
+    {
+        diagnostic.insert(
+            "missing_instruments".to_string(),
+            serde_json::Value::Array(
+                instruments
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(|instrument| serde_json::Value::String(instrument.to_string()))
+                    .collect(),
+            ),
+        );
+    }
+    for key in ["detail", "message"] {
+        if let Some(value) = fields
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(|value| serde_json::Value::String(value.to_string()))
+        {
+            diagnostic.insert(key.to_string(), value);
+        }
+    }
+    if let Some(message) = fields
+        .get("error")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|error| error.get("message"))
+        .and_then(serde_json::Value::as_str)
+    {
+        diagnostic.insert(
+            "error".to_string(),
+            serde_json::json!({ "message": message }),
+        );
+    }
+
+    if diagnostic.is_empty() {
+        format!("Response body omitted ({} bytes)", body.len())
+    } else {
+        serde_json::Value::Object(diagnostic).to_string()
+    }
 }
 
 #[cfg(test)]
@@ -656,9 +705,13 @@ mod tests {
     #[tokio::test]
     async fn handle_response_maps_api_and_parse_errors() {
         let server = MockServer::start().await;
+        let token = "access-token-should-not-appear";
         Mock::given(method("GET"))
             .and(path("/api-error"))
-            .respond_with(ResponseTemplate::new(503).set_body_string("unavailable"))
+            .respond_with(
+                ResponseTemplate::new(503)
+                    .set_body_string(format!(r#"{{"access_token":"{token}"}}"#)),
+            )
             .mount(&server)
             .await;
         Mock::given(method("GET"))
@@ -682,7 +735,7 @@ mod tests {
             RhoodError::Api {
                 status: 503,
                 message
-            } if message == "unavailable"
+            } if message.starts_with("Response body omitted (") && !message.contains(token)
         ));
         assert!(matches!(
             parse_err,
@@ -691,5 +744,49 @@ mod tests {
                 message
             } if message.contains("Failed to parse response")
         ));
+    }
+
+    #[tokio::test]
+    async fn transport_error_preserves_missing_instruments_for_display() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/missing-instrument"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "missing_instruments": ["NOTAREALSYM"]
+            })))
+            .mount(&server)
+            .await;
+        let (_dir, client) = authenticated_client(&server.uri()).await;
+
+        let err = client
+            .get::<serde_json::Value>(&format!("{}/missing-instrument", server.uri()))
+            .await
+            .unwrap_err();
+
+        assert!(format!("{err}").contains("NOTAREALSYM"));
+    }
+
+    #[tokio::test]
+    async fn transport_error_preserves_allowlisted_diagnostic_without_token() {
+        let server = MockServer::start().await;
+        let token = "access-token-should-not-appear";
+        Mock::given(method("GET"))
+            .and(path("/insufficient-buying-power"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "detail": "insufficient buying power",
+                "access_token": token
+            })))
+            .mount(&server)
+            .await;
+        let (_dir, client) = authenticated_client(&server.uri()).await;
+
+        let err = client
+            .get::<serde_json::Value>(&format!("{}/insufficient-buying-power", server.uri()))
+            .await
+            .unwrap_err();
+        let display = format!("{err}");
+
+        assert!(display.contains("insufficient buying power"));
+        assert!(!display.contains(token));
     }
 }

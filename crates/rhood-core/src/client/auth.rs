@@ -196,7 +196,11 @@ impl RobinhoodClient {
         let res = self.http.post(&token_url).form(&payload).send().await?;
         let status = res.status();
         let body = res.text().await.unwrap_or_default();
-        tracing::debug!(status = status.as_u16(), "Token refresh response");
+        tracing::debug!(
+            status = status.as_u16(),
+            body_len = body.len(),
+            "Token refresh response"
+        );
 
         if !status.is_success() {
             return Ok(false);
@@ -277,7 +281,11 @@ impl RobinhoodClient {
         let res = self.http.post(&token_url).form(&payload).send().await?;
         let status = res.status();
         let body = res.text().await.unwrap_or_default();
-        tracing::debug!(status = status.as_u16(), "Login response");
+        tracing::debug!(
+            status = status.as_u16(),
+            body_len = body.len(),
+            "Login response"
+        );
 
         let data: OAuthResponse = serde_json::from_str(&body).map_err(|err| {
             tracing::error!(status = status.as_u16(), "Failed to parse login response");
@@ -302,7 +310,10 @@ impl RobinhoodClient {
             if !status.is_success() {
                 return Err(RhoodError::Api {
                     status: status.as_u16(),
-                    message: format!("Login failed with no actionable response (body: {body})"),
+                    message: format!(
+                        "Login failed with no actionable response: {}",
+                        super::transport::redacted_response_body_message(&body)
+                    ),
                 });
             }
         }
@@ -318,13 +329,15 @@ impl RobinhoodClient {
             let res = self.http.post(&token_url).form(&payload).send().await?;
             let retry_status = res.status();
             let retry_body = res.text().await.unwrap_or_default();
-            tracing::debug!(status = retry_status.as_u16(), body = %retry_body, "Login retry response");
+            tracing::debug!(
+                status = retry_status.as_u16(),
+                body_len = retry_body.len(),
+                "Login retry response"
+            );
             let data: OAuthResponse =
                 serde_json::from_str(&retry_body).map_err(|err| RhoodError::Api {
                     status: retry_status.as_u16(),
-                    message: format!(
-                        "Failed to parse login retry response: {err} (body: {retry_body})"
-                    ),
+                    message: format!("Failed to parse login retry response: {err}"),
                 })?;
             return self
                 .handle_login_response(&data, mfa_secret.is_none())
