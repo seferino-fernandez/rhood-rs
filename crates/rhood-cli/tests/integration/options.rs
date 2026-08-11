@@ -18,6 +18,16 @@ fn option_positions_returns_array() {
 
 #[test]
 #[ignore = "requires live Robinhood credentials"]
+fn option_aggregate_positions_returns_array() {
+    let output = cli()
+        .args(["option", "aggregate-positions"])
+        .assert()
+        .success();
+    assert!(parse_json(&output).is_array());
+}
+
+#[test]
+#[ignore = "requires live Robinhood credentials"]
 fn option_orders_returns_array() {
     let output = cli().args(["option", "orders"]).assert().success();
     assert!(parse_json(&output).is_array());
