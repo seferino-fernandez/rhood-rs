@@ -3,7 +3,7 @@
 //! Contains structs for option chains, option instruments, and option
 //! positions (calls and puts).
 
-use std::fmt;
+use std::{collections::BTreeMap, fmt};
 
 use serde::{Deserialize, Serialize};
 
@@ -107,6 +107,27 @@ pub struct OptionPosition {
     pub created_at: Option<String>,
     /// Timestamp when the position was last updated.
     pub updated_at: Option<String>,
+}
+
+/// Represents a strategy-level aggregate option position.
+///
+/// The named fields are source-backed, but no sanitized populated wire fixture
+/// is available. Fields therefore remain optional and legs remain untyped.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AggregateOptionPosition {
+    /// Ticker symbol of the underlying stock.
+    pub symbol: Option<String>,
+    /// Strategy represented by the aggregate position.
+    pub strategy: Option<String>,
+    /// Number of aggregate strategy units held.
+    pub quantity: Option<String>,
+    /// Average price paid to open the aggregate strategy.
+    pub average_open_price: Option<String>,
+    /// Raw option legs that compose the aggregate strategy.
+    pub legs: Option<Vec<serde_json::Value>>,
+    /// Additional top-level fields returned by the API.
+    #[serde(default, flatten)]
+    pub additional_fields: BTreeMap<String, serde_json::Value>,
 }
 
 /// Input specification for looking up a specific option contract.

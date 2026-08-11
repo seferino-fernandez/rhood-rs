@@ -50,6 +50,8 @@ pub mod paths {
     pub const OPTION_INSTRUMENTS: &str = "/options/instruments/";
     /// Options positions endpoint.
     pub const OPTION_POSITIONS: &str = "/options/positions/";
+    /// Aggregate options positions endpoint.
+    pub const OPTION_AGGREGATE_POSITIONS: &str = "/options/aggregate_positions/";
     /// Options chain endpoint.
     pub const OPTION_CHAINS: &str = "/options/chains/";
     /// Options market data (quotes, Greeks, volume) endpoint.
@@ -155,6 +157,7 @@ mod tests {
             paths::INSTRUMENTS,
             paths::OPTION_INSTRUMENTS,
             paths::OPTION_POSITIONS,
+            paths::OPTION_AGGREGATE_POSITIONS,
             paths::OPTION_CHAINS,
             paths::OPTION_MARKET_DATA,
             paths::STOCK_ORDERS,
