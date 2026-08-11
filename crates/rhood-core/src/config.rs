@@ -24,6 +24,9 @@ const DEFAULT_DV_TIMEOUT_SECS: u64 = 120;
 const DEFAULT_LOG_LEVEL: &str = "info";
 const DEFAULT_HTTP_REQUEST_TIMEOUT_SECS: u64 = 30;
 const DEFAULT_HTTP_CONNECT_TIMEOUT_SECS: u64 = 10;
+const DEFAULT_HTTP_READ_REQUEST_INTERVAL_MS: u64 = 250;
+const DEFAULT_HTTP_READ_MAX_ATTEMPTS: u32 = 3;
+const DEFAULT_HTTP_READ_RETRY_BACKOFF_MS: u64 = 250;
 const DEFAULT_CACHE_ENABLED: bool = true;
 const DEFAULT_CACHE_INSTRUMENT_TTL_SECS: u64 = 86_400; // 24h
 const DEFAULT_CACHE_INSTRUMENT_MAX_ENTRIES: u64 = 10_000;
@@ -55,6 +58,9 @@ const ENV_MFA_FILE: &str = "RHOOD_MFA_FILE";
 const ENV_DEVICE_TOKEN_FILE: &str = "RHOOD_DEVICE_TOKEN_FILE";
 const ENV_HTTP_REQUEST_TIMEOUT_SECS: &str = "RHOOD_HTTP_REQUEST_TIMEOUT_SECS";
 const ENV_HTTP_CONNECT_TIMEOUT_SECS: &str = "RHOOD_HTTP_CONNECT_TIMEOUT_SECS";
+const ENV_HTTP_READ_REQUEST_INTERVAL_MS: &str = "RHOOD_HTTP_READ_REQUEST_INTERVAL_MS";
+const ENV_HTTP_READ_MAX_ATTEMPTS: &str = "RHOOD_HTTP_READ_MAX_ATTEMPTS";
+const ENV_HTTP_READ_RETRY_BACKOFF_MS: &str = "RHOOD_HTTP_READ_RETRY_BACKOFF_MS";
 const ENV_CACHE_ENABLED: &str = "RHOOD_CACHE_ENABLED";
 const ENV_CACHE_INSTRUMENT_TTL_SECS: &str = "RHOOD_CACHE_INSTRUMENT_TTL_SECS";
 const ENV_CACHE_INSTRUMENT_MAX_ENTRIES: &str = "RHOOD_CACHE_INSTRUMENT_MAX_ENTRIES";
@@ -151,7 +157,7 @@ pub struct DeviceVerificationConfig {
     pub timeout_secs: u64,
 }
 
-/// Bounded timeouts for every outbound HTTP call.
+/// Bounded timeouts and authenticated-read resilience settings.
 ///
 /// `request_timeout_secs` is the total-call ceiling (headers + body). A slow
 /// or hung upstream is aborted with a timeout error which prevents a single
@@ -165,6 +171,12 @@ pub struct HttpConfig {
     pub request_timeout_secs: u64,
     /// TCP connect timeout in seconds.
     pub connect_timeout_secs: u64,
+    /// Minimum interval between authenticated GET request starts, in milliseconds.
+    pub read_request_interval_ms: u64,
+    /// Maximum number of attempts for retryable authenticated GET requests.
+    pub read_max_attempts: u32,
+    /// Initial exponential backoff for retryable authenticated GET requests, in milliseconds.
+    pub read_retry_backoff_ms: u64,
 }
 
 impl Default for HttpConfig {
@@ -172,7 +184,31 @@ impl Default for HttpConfig {
         Self {
             request_timeout_secs: DEFAULT_HTTP_REQUEST_TIMEOUT_SECS,
             connect_timeout_secs: DEFAULT_HTTP_CONNECT_TIMEOUT_SECS,
+            read_request_interval_ms: DEFAULT_HTTP_READ_REQUEST_INTERVAL_MS,
+            read_max_attempts: DEFAULT_HTTP_READ_MAX_ATTEMPTS,
+            read_retry_backoff_ms: DEFAULT_HTTP_READ_RETRY_BACKOFF_MS,
         }
+    }
+}
+
+impl HttpConfig {
+    pub(crate) fn validate(&self) -> Result<()> {
+        for (field, value) in [
+            ("read_request_interval_ms", self.read_request_interval_ms),
+            ("read_retry_backoff_ms", self.read_retry_backoff_ms),
+        ] {
+            if value == 0 {
+                return Err(RhoodError::InvalidParameter(format!(
+                    "http.{field} must be greater than zero"
+                )));
+            }
+        }
+        if self.read_max_attempts == 0 {
+            return Err(RhoodError::InvalidParameter(
+                "http.read_max_attempts must be greater than zero".to_string(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -445,6 +481,7 @@ impl RhoodConfig {
         config.apply_env_overrides(env)?;
         config.resolve_secret_files()?;
         config.normalize();
+        config.http.validate()?;
         Ok(config)
     }
 
@@ -475,6 +512,7 @@ impl RhoodConfig {
         config.apply_env_overrides(env)?;
         config.resolve_secret_files()?;
         config.normalize();
+        config.http.validate()?;
         Ok(config)
     }
 
@@ -529,6 +567,7 @@ impl RhoodConfig {
         self.apply_env_overrides(env)?;
         self.resolve_secret_files()?;
         self.normalize();
+        self.http.validate()?;
         Ok(())
     }
 
@@ -577,6 +616,15 @@ impl RhoodConfig {
         }
         if let Some(v) = env_parsed::<u64>(env, ENV_HTTP_CONNECT_TIMEOUT_SECS)? {
             self.http.connect_timeout_secs = v;
+        }
+        if let Some(v) = env_parsed::<u64>(env, ENV_HTTP_READ_REQUEST_INTERVAL_MS)? {
+            self.http.read_request_interval_ms = v;
+        }
+        if let Some(v) = env_parsed::<u32>(env, ENV_HTTP_READ_MAX_ATTEMPTS)? {
+            self.http.read_max_attempts = v;
+        }
+        if let Some(v) = env_parsed::<u64>(env, ENV_HTTP_READ_RETRY_BACKOFF_MS)? {
+            self.http.read_retry_backoff_ms = v;
         }
         if let Some(v) = env_non_empty(env, ENV_CACHE_ENABLED) {
             self.cache.enabled = v.eq_ignore_ascii_case("true") || v == "1";
@@ -1215,6 +1263,79 @@ device_token = "device-123"
         let cfg = HttpConfig::default();
         assert_eq!(cfg.request_timeout_secs, DEFAULT_HTTP_REQUEST_TIMEOUT_SECS);
         assert_eq!(cfg.connect_timeout_secs, DEFAULT_HTTP_CONNECT_TIMEOUT_SECS);
+        assert_eq!(cfg.read_request_interval_ms, 250);
+        assert_eq!(cfg.read_max_attempts, 3);
+        assert_eq!(cfg.read_retry_backoff_ms, 250);
+    }
+
+    #[test]
+    fn read_resilience_config_loads_from_toml() {
+        let config = RhoodConfig::from_toml_with_env(
+            r#"
+[http]
+read_request_interval_ms = 400
+read_max_attempts = 5
+read_retry_backoff_ms = 750
+"#,
+            &MapEnv::new(),
+        )
+        .unwrap();
+
+        assert_eq!(config.http.read_request_interval_ms, 400);
+        assert_eq!(config.http.read_max_attempts, 5);
+        assert_eq!(config.http.read_retry_backoff_ms, 750);
+    }
+
+    #[test]
+    fn read_resilience_environment_overrides_are_strict() {
+        let env = MapEnv::new()
+            .with("RHOOD_HTTP_READ_REQUEST_INTERVAL_MS", "300")
+            .with("RHOOD_HTTP_READ_MAX_ATTEMPTS", "4")
+            .with("RHOOD_HTTP_READ_RETRY_BACKOFF_MS", "600");
+
+        let config = RhoodConfig::from_toml_with_env("", &env).unwrap();
+
+        assert_eq!(config.http.read_request_interval_ms, 300);
+        assert_eq!(config.http.read_max_attempts, 4);
+        assert_eq!(config.http.read_retry_backoff_ms, 600);
+    }
+
+    #[test]
+    fn zero_read_resilience_values_are_rejected() {
+        for field in [
+            "read_request_interval_ms",
+            "read_max_attempts",
+            "read_retry_backoff_ms",
+        ] {
+            let toml = format!("[http]\n{field} = 0\n");
+            let error = RhoodConfig::from_toml_with_env(&toml, &MapEnv::new())
+                .err()
+                .unwrap();
+
+            assert!(
+                error.to_string().contains(field),
+                "unexpected error for {field}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_read_resilience_environment_values_are_rejected() {
+        for name in [
+            "RHOOD_HTTP_READ_REQUEST_INTERVAL_MS",
+            "RHOOD_HTTP_READ_MAX_ATTEMPTS",
+            "RHOOD_HTTP_READ_RETRY_BACKOFF_MS",
+        ] {
+            let error =
+                RhoodConfig::from_toml_with_env("", &MapEnv::new().with(name, "not-a-number"))
+                    .err()
+                    .unwrap();
+
+            assert!(
+                error.to_string().contains(name),
+                "unexpected error for {name}: {error}"
+            );
+        }
     }
 
     #[test]

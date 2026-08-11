@@ -9,6 +9,7 @@ Powers the [`rhood-cli`](https://github.com/seferino-fernandez/rhood-rs/tree/mai
 ## Features
 
 - Authenticated HTTP client (`RobinhoodClient`) with disk-backed token cache and OAuth refresh.
+- Shared authenticated-read pacing, cooldown, and bounded retries across client clones.
 - Endpoint coverage for stocks, options, futures, indices, orders, account, watchlists, recurring investments, dividends, transfers, and research.
 - Typed error model (`RhoodError`) covering challenges, rate limits, read-only mode, and API errors.
 - Configuration via TOML files, environment variables, or programmatic construction.
@@ -24,6 +25,15 @@ construction. See [config.toml.example](../../config.toml.example) for all field
 On Unix, configuration and secret files containing credentials must grant access only
 to their owner. Cached OAuth tokens are written with owner-only permissions and replaced
 atomically so a failed refresh does not destroy the previous session.
+
+Authenticated GET request starts are spaced by 250 milliseconds by default. Connection
+errors, timeouts, and HTTP 429 responses receive up to three total attempts with
+exponential backoff. Valid `Retry-After` delays up to 60 seconds establish a cooldown
+shared by every clone of the client; larger values are returned without an early retry.
+Server errors, API/JSON errors, and all POST, PATCH, DELETE, and stock-order submissions
+execute once. Configure these defaults under `[http]` or with
+`RHOOD_HTTP_READ_REQUEST_INTERVAL_MS`, `RHOOD_HTTP_READ_MAX_ATTEMPTS`, and
+`RHOOD_HTTP_READ_RETRY_BACKOFF_MS`; all values must be positive.
 
 ## Example
 

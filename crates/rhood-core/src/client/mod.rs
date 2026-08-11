@@ -18,6 +18,8 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
+use self::read_policy::{Clock, ReadTransportPolicy, TokioClock};
+
 /// Maximum consecutive server errors before aborting a polling loop.
 const MAX_SERVER_ERROR_RETRIES: u32 = 5;
 
@@ -92,6 +94,7 @@ pub struct RobinhoodClient {
     token_cache: TokenCache,
     device_token: Arc<RwLock<String>>,
     config: Arc<RhoodConfig>,
+    read_policy: Arc<ReadTransportPolicy>,
     read_only: bool,
     pub(crate) resolvers: ResolverCache,
 }
@@ -117,6 +120,11 @@ impl RobinhoodClient {
     ///
     /// Returns an error if the HTTP client fails to build.
     pub fn with_config(config: RhoodConfig) -> Result<Self> {
+        Self::with_config_and_clock(config, Arc::new(TokioClock))
+    }
+
+    fn with_config_and_clock(config: RhoodConfig, clock: Arc<dyn Clock>) -> Result<Self> {
+        config.http.validate()?;
         let device_token = config
             .auth
             .device_token
@@ -129,6 +137,7 @@ impl RobinhoodClient {
         let write_http = build_stock_order_http_client(&config.http)?;
         let read_only = config.read_only;
         let resolvers = ResolverCache::from_config(&config.cache);
+        let read_policy = Arc::new(ReadTransportPolicy::new(&config.http, clock));
         Ok(Self {
             http,
             write_http,
@@ -137,6 +146,7 @@ impl RobinhoodClient {
             read_only,
             device_token: Arc::new(RwLock::new(device_token)),
             config: Arc::new(config),
+            read_policy,
             resolvers,
         })
     }
@@ -265,6 +275,7 @@ fn build_http_client_with_redirect_policy(
 
 mod auth;
 mod device_verification;
+mod read_policy;
 mod transport;
 
 #[cfg(test)]
