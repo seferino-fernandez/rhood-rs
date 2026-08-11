@@ -4,6 +4,7 @@
 //! discovery. Read-only: no order-placement endpoints are implemented.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Wrapper for the futures contract API response.
 ///
@@ -106,6 +107,17 @@ pub struct FuturesOrder {
     pub updated_at: Option<String>,
 }
 
+/// Represents a futures position from the Robinhood API.
+///
+/// The wire shape is not yet documented from a sanitized populated capture,
+/// so every field is preserved without assigning speculative names or types.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FuturesPosition {
+    /// Raw fields returned for the position.
+    #[serde(default, flatten)]
+    pub additional_fields: BTreeMap<String, serde_json::Value>,
+}
+
 /// Represents a Robinhood account from the Ceres API.
 ///
 /// Used internally for futures account discovery.
@@ -120,7 +132,7 @@ pub struct FuturesAccount {
 
 #[cfg(test)]
 mod tests {
-    use super::{FuturesContract, FuturesQuote};
+    use super::{FuturesContract, FuturesPosition, FuturesQuote};
 
     #[test]
     fn contract_maps_camelcase_display_symbol() {
@@ -134,5 +146,20 @@ mod tests {
         let json = r#"{"symbol":"/ESM26:XCME","bid_price":"1.0","ask_price":"2.0"}"#;
         let q: FuturesQuote = serde_json::from_str(json).unwrap();
         assert_eq!(q.symbol.as_deref(), Some("/ESM26:XCME"));
+    }
+
+    #[test]
+    fn position_round_trips_unknown_fields_without_loss() {
+        let expected = serde_json::json!({
+            "quantity": "2",
+            "mark": 5182.25,
+            "contract": {"symbol": "/ESM26", "multiplier": 50},
+            "legs": [{"side": "long"}, {"side": "short"}]
+        });
+
+        let position: FuturesPosition = serde_json::from_value(expected.clone()).unwrap();
+        let actual = serde_json::to_value(position).unwrap();
+
+        assert_eq!(actual, expected);
     }
 }

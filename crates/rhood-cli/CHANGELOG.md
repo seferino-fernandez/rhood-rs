@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Add global `--account` selection and `account list` discovery for individual and IRA accounts.
+- Add `rhood futures positions` with compact raw-object table and CSV rows and raw-array JSON output.
 
 ### Changed
 
