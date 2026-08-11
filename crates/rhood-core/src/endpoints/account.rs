@@ -195,6 +195,11 @@ impl RobinhoodClient {
     /// Backfills `symbol` on each position by resolving its instrument URL to a
     /// ticker via a single batched `/instruments/?ids=` request. Best-effort:
     /// positions whose URL can't be parsed or resolved are left with `symbol = None`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the batched instrument request fails or its response
+    /// cannot be deserialized.
     pub async fn enrich_position_symbols(&self, positions: &mut [Position]) -> Result<()> {
         let uuids: Vec<String> = positions
             .iter()
