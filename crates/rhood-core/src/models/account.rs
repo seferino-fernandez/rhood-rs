@@ -516,6 +516,10 @@ pub struct Position {
     pub symbol: Option<String>,
     /// Average cost basis per share.
     pub average_buy_price: Option<String>,
+    /// Average cost per share reported by the clearing broker.
+    pub clearing_average_cost: Option<String>,
+    /// Total cost basis reported by the clearing broker.
+    pub clearing_cost_basis: Option<String>,
     /// Total number of shares held.
     pub quantity: Option<String>,
     /// Number of shares reserved for pending buy orders.
@@ -526,4 +530,94 @@ pub struct Position {
     pub created_at: Option<String>,
     /// Timestamp when the position was last updated.
     pub updated_at: Option<String>,
+}
+
+impl Position {
+    /// Returns the clearing average cost when it is a usable positive finite number.
+    ///
+    /// The returned value retains the original wire formatting. When the clearing
+    /// value is absent or unusable, this returns the raw average buy price instead.
+    pub fn effective_average_cost(&self) -> Option<&str> {
+        self.clearing_average_cost
+            .as_deref()
+            .filter(|value| {
+                value
+                    .trim()
+                    .parse::<f64>()
+                    .is_ok_and(|cost| cost.is_finite() && cost > 0.0)
+            })
+            .or(self.average_buy_price.as_deref())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Position;
+
+    #[test]
+    fn position_round_trips_settled_clearing_cost_fields() {
+        let wire = r#"{
+            "symbol": "TSLA",
+            "quantity": "0.01162900",
+            "average_buy_price": "0.0000",
+            "clearing_average_cost": "472.10",
+            "clearing_cost_basis": "5.49"
+        }"#;
+
+        let position: Position = serde_json::from_str(wire).unwrap();
+        assert_eq!(position.quantity.as_deref(), Some("0.01162900"));
+        assert_eq!(position.average_buy_price.as_deref(), Some("0.0000"));
+        assert_eq!(position.clearing_average_cost.as_deref(), Some("472.10"));
+        assert_eq!(position.clearing_cost_basis.as_deref(), Some("5.49"));
+
+        let serialized = serde_json::to_value(&position).unwrap();
+        assert_eq!(serialized["average_buy_price"], "0.0000");
+        assert_eq!(serialized["clearing_average_cost"], "472.10");
+        assert_eq!(serialized["clearing_cost_basis"], "5.49");
+    }
+
+    #[test]
+    fn position_effective_average_cost_prefers_raw_usable_clearing_value() {
+        let position: Position = serde_json::from_str(
+            r#"{"average_buy_price":"0.0000","clearing_average_cost":" 472.10 "}"#,
+        )
+        .unwrap();
+
+        let effective = position.effective_average_cost().unwrap();
+        assert_eq!(effective, " 472.10 ");
+        assert_eq!(
+            effective.as_ptr(),
+            position.clearing_average_cost.as_deref().unwrap().as_ptr()
+        );
+    }
+
+    #[test]
+    fn position_effective_average_cost_falls_back_for_unusable_clearing_values() {
+        for clearing_average_cost in [
+            None,
+            Some(""),
+            Some("   "),
+            Some("0"),
+            Some("-1"),
+            Some("NaN"),
+            Some("inf"),
+            Some("not a number"),
+        ] {
+            let position = Position {
+                account: None,
+                instrument: None,
+                symbol: None,
+                average_buy_price: Some("raw fallback".to_string()),
+                clearing_average_cost: clearing_average_cost.map(str::to_string),
+                clearing_cost_basis: None,
+                quantity: None,
+                shares_held_for_buys: None,
+                shares_held_for_sells: None,
+                created_at: None,
+                updated_at: None,
+            };
+
+            assert_eq!(position.effective_average_cost(), Some("raw fallback"));
+        }
+    }
 }

@@ -83,16 +83,7 @@ pub async fn run(
             let account = super::resolve_account_number(&client, requested_account).await?;
             let positions = client.get_positions(&account).await?;
             let headers = &["Symbol", "Quantity", "Avg Buy Price"];
-            let rows: Vec<Vec<String>> = positions
-                .iter()
-                .map(|position| {
-                    vec![
-                        position_symbol_cell(position),
-                        position.quantity.clone().unwrap_or_default(),
-                        position.average_buy_price.clone().unwrap_or_default(),
-                    ]
-                })
-                .collect();
+            let rows = position_rows(&positions);
             output(format, headers, &rows, &positions);
         }
         AccountCommand::Portfolio => {
@@ -138,16 +129,7 @@ pub async fn run(
             let account = super::resolve_account_number(&client, requested_account).await?;
             let positions = client.get_all_positions(&account).await?;
             let headers = &["Symbol", "Quantity", "Avg Buy Price"];
-            let rows: Vec<Vec<String>> = positions
-                .iter()
-                .map(|position| {
-                    vec![
-                        position_symbol_cell(position),
-                        position.quantity.clone().unwrap_or_default(),
-                        position.average_buy_price.clone().unwrap_or_default(),
-                    ]
-                })
-                .collect();
+            let rows = position_rows(&positions);
             output(format, headers, &rows, &positions);
         }
         AccountCommand::Dividends { since, total } => {
@@ -270,6 +252,22 @@ pub fn position_symbol_cell(position: &rhood_core::models::account::Position) ->
         .clone()
         .or_else(|| position.instrument.clone())
         .unwrap_or_default()
+}
+
+fn position_rows(positions: &[rhood_core::models::account::Position]) -> Vec<Vec<String>> {
+    positions
+        .iter()
+        .map(|position| {
+            vec![
+                position_symbol_cell(position),
+                position.quantity.clone().unwrap_or_default(),
+                position
+                    .effective_average_cost()
+                    .map(str::to_owned)
+                    .unwrap_or_default(),
+            ]
+        })
+        .collect()
 }
 
 /// Build a single-row table for the [`AccountSummary`] buying-power view.
@@ -476,6 +474,8 @@ mod tests {
             instrument: instrument.map(str::to_string),
             symbol: symbol.map(str::to_string),
             average_buy_price: None,
+            clearing_average_cost: None,
+            clearing_cost_basis: None,
             quantity: None,
             shares_held_for_buys: None,
             shares_held_for_sells: None,
@@ -504,5 +504,23 @@ mod tests {
     fn position_symbol_cell_returns_empty_when_both_none() {
         let pos = make_position(None, None);
         assert_eq!(position_symbol_cell(&pos), "");
+    }
+
+    #[test]
+    fn position_rows_display_effective_average_cost() {
+        let mut position = make_position(Some("TSLA"), None);
+        position.quantity = Some("0.01162900".to_string());
+        position.average_buy_price = Some("0.0000".to_string());
+        position.clearing_average_cost = Some("472.10".to_string());
+        position.clearing_cost_basis = Some("5.49".to_string());
+
+        assert_eq!(
+            position_rows(&[position]),
+            vec![vec![
+                "TSLA".to_string(),
+                "0.01162900".to_string(),
+                "472.10".to_string(),
+            ]]
+        );
     }
 }
