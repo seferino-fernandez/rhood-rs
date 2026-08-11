@@ -95,6 +95,24 @@ impl RobinhoodClient {
         .await
     }
 
+    /// Fetches all strategy-level aggregate option positions for an account.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the account number is invalid, the HTTP request
+    /// fails, or the response cannot be deserialized.
+    pub async fn get_aggregate_option_positions(
+        &self,
+        account_number: &str,
+    ) -> Result<Vec<AggregateOptionPosition>> {
+        validate_account_number(account_number)?;
+        self.get_paginated(
+            &self.api_url(paths::OPTION_AGGREGATE_POSITIONS),
+            &[("account_numbers", account_number)],
+        )
+        .await
+    }
+
     /// Fetches only open option positions (quantity greater than zero).
     ///
     /// # Errors
@@ -327,7 +345,9 @@ impl RobinhoodClient {
 mod tests {
     use super::*;
     use crate::config::RhoodConfig;
-    use crate::models::option::{OptionContractSpec, OptionMarketData, OptionPosition};
+    use crate::models::option::{
+        AggregateOptionPosition, OptionContractSpec, OptionMarketData, OptionPosition,
+    };
     use crate::models::order::OptionOrder;
     use crate::models::stock::{IndexInstrument, IndexQuoteWrapper};
     use secrecy::SecretString;
@@ -406,6 +426,83 @@ mod tests {
                 .is_empty()
         );
         server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn aggregate_option_positions_use_account_filter_and_follow_next_page_in_order() {
+        let server = MockServer::start().await;
+        let next_url = format!(
+            "{}/options/aggregate_positions/?cursor=page-2",
+            server.uri()
+        );
+        Mock::given(method("GET"))
+            .and(path("/options/aggregate_positions/"))
+            .and(query_param("account_numbers", "ABC123"))
+            .and(query_param_is_missing("nonzero"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [{"symbol": "AAPL", "strategy": "long_call"}],
+                "next": next_url,
+                "previous": null
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/options/aggregate_positions/"))
+            .and(query_param("cursor", "page-2"))
+            .and(query_param_is_missing("account_numbers"))
+            .and(query_param_is_missing("nonzero"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [{"symbol": "MSFT", "strategy": "iron_condor"}],
+                "next": null,
+                "previous": next_url
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server.uri()).await;
+
+        let positions = client
+            .get_aggregate_option_positions("ABC123")
+            .await
+            .unwrap();
+
+        assert_eq!(positions.len(), 2);
+        assert_eq!(positions[0].symbol.as_deref(), Some("AAPL"));
+        assert_eq!(positions[1].symbol.as_deref(), Some("MSFT"));
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[0]
+                .url
+                .query_pairs()
+                .map(|(name, value)| (name.into_owned(), value.into_owned()))
+                .collect::<Vec<_>>(),
+            [("account_numbers".to_string(), "ABC123".to_string())]
+        );
+        assert_eq!(
+            requests[1]
+                .url
+                .query_pairs()
+                .map(|(name, value)| (name.into_owned(), value.into_owned()))
+                .collect::<Vec<_>>(),
+            [("cursor".to_string(), "page-2".to_string())]
+        );
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn aggregate_option_positions_reject_invalid_account_before_http() {
+        let server = MockServer::start().await;
+        let (_dir, client) = client_for_server(&server.uri()).await;
+
+        let error = client
+            .get_aggregate_option_positions("invalid-account")
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, RhoodError::InvalidParameter(_)));
+        assert!(server.received_requests().await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -767,6 +864,53 @@ mod tests {
         assert_eq!(round_tripped.chain_symbol.as_deref(), Some("NKE"));
         assert_eq!(round_tripped.quantity.as_deref(), Some("5.0000"));
         assert_eq!(round_tripped.position_type.as_deref(), Some("long"));
+    }
+
+    #[test]
+    fn aggregate_option_position_source_backed_shape_is_optional_and_lossless() {
+        // This exercises source-backed field names, not a captured live response.
+        let json = serde_json::json!({
+            "symbol": "AAPL",
+            "strategy": "iron_condor",
+            "quantity": "2.0000",
+            "legs": [
+                {"option": "leg-1", "ratio_quantity": "1.0000"},
+                ["nested", {"raw": true}]
+            ],
+            "server_extension": {
+                "revision": 7,
+                "flags": ["new", null]
+            }
+        });
+
+        let position: AggregateOptionPosition = serde_json::from_value(json.clone()).unwrap();
+
+        assert_eq!(position.symbol.as_deref(), Some("AAPL"));
+        assert_eq!(position.strategy.as_deref(), Some("iron_condor"));
+        assert_eq!(position.quantity.as_deref(), Some("2.0000"));
+        assert!(position.average_open_price.is_none());
+        assert_eq!(position.legs.as_ref().unwrap()[1][1]["raw"], true);
+        assert_eq!(
+            position.additional_fields["server_extension"],
+            json["server_extension"]
+        );
+
+        let round_tripped = serde_json::to_value(position).unwrap();
+        assert_eq!(round_tripped["server_extension"], json["server_extension"]);
+        assert_eq!(round_tripped["legs"], json["legs"]);
+    }
+
+    #[test]
+    fn aggregate_option_position_source_backed_known_fields_are_optional() {
+        // The contract is intentionally tolerant until a sanitized fixture exists.
+        let position: AggregateOptionPosition = serde_json::from_str("{}").unwrap();
+
+        assert!(position.symbol.is_none());
+        assert!(position.strategy.is_none());
+        assert!(position.quantity.is_none());
+        assert!(position.average_open_price.is_none());
+        assert!(position.legs.is_none());
+        assert!(position.additional_fields.is_empty());
     }
 
     #[test]
