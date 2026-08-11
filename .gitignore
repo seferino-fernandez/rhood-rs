@@ -20,3 +20,6 @@ config.toml
 
 # Local planning documents
 /docs/adr/
+
+# Temporary research inputs
+/docs/references/
