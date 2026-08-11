@@ -497,6 +497,7 @@ mod router_tests {
             "get_positions",
             "get_all_positions",
             "get_portfolio",
+            "get_portfolio_performance",
             "get_account_profile",
             "get_account_summary",
             "get_option_positions",
@@ -546,6 +547,36 @@ mod router_tests {
         assert_eq!(
             get_accounts.input_schema.get("properties"),
             Some(&serde_json::json!({}))
+        );
+    }
+
+    #[test]
+    fn portfolio_performance_advertises_account_only_raw_returns_contract() {
+        let tools = tools_with(false);
+        let tool = tools
+            .tool_router
+            .list_all()
+            .into_iter()
+            .find(|tool| tool.name == "get_portfolio_performance")
+            .expect("get_portfolio_performance must be advertised");
+        let schema = Value::Object((*tool.input_schema).clone());
+        let description = tool.description.as_deref().unwrap_or_default();
+
+        assert!(
+            tool.annotations
+                .as_ref()
+                .is_some_and(|annotations| annotations.read_only_hint == Some(true))
+        );
+        assert!(description.contains("returns"));
+        assert!(description.contains("not historical equity candles"));
+        assert_eq!(
+            schema["properties"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+            ["account_number"]
         );
     }
 

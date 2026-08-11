@@ -56,6 +56,9 @@ rhood stock history AAPL --span year --interval day
 # Portfolio
 rhood account portfolio
 
+# Portfolio returns chart model
+rhood account performance
+
 # If more than one brokerage account exists, discover and select one
 rhood account list
 rhood --account ABC123 account portfolio
@@ -103,6 +106,7 @@ A few representative tools:
 | `get_stock_quotes`  | Current quotes for stock tickers                             |
 | `get_accounts`      | Discover canonical brokerage account selectors               |
 | `get_portfolio`     | Portfolio summary (equity, cash, etc.)                       |
+| `get_portfolio_performance` | Raw portfolio returns chart and rendering metadata   |
 | `place_stock_order` | Prepare exact wire fields, confirm, then submit once          |
 | `cancel_order`      | Cancel an open stock order                                   |
 

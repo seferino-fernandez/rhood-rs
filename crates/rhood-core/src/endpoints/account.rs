@@ -136,6 +136,30 @@ impl RobinhoodClient {
         self.get(&url).await
     }
 
+    /// Fetches Robinhood's portfolio performance chart rendering model.
+    ///
+    /// The Bonfire response contains plotted returns and presentation metadata,
+    /// not historical equity candles. Robinhood's current replacement endpoint
+    /// accepts the account in the path and no legacy interval, span, or bounds
+    /// query parameters.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RhoodError::InvalidParameter`] if the account number is not a
+    /// canonical selector. Also returns an error on HTTP or deserialization
+    /// failures.
+    pub async fn get_portfolio_performance(
+        &self,
+        account_number: &str,
+    ) -> Result<PortfolioPerformance> {
+        validate_account_number(account_number)?;
+        let url = format!(
+            "{}{account_number}",
+            self.bonfire_url(paths::PORTFOLIO_PERFORMANCE)
+        );
+        self.get(&url).await
+    }
+
     /// Fetches all stock positions with a non-zero quantity.
     ///
     /// Excludes positions that have been fully closed (quantity of zero).
@@ -227,7 +251,9 @@ impl RobinhoodClient {
 
 #[cfg(test)]
 mod tests {
-    use crate::models::account::{AccountProfile, AccountSummary, PortfolioProfile, Position};
+    use crate::models::account::{
+        AccountProfile, AccountSummary, PortfolioPerformance, PortfolioProfile, Position,
+    };
 
     #[test]
     fn account_profile_deserializes() {
@@ -446,6 +472,52 @@ mod tests {
     }
 
     #[test]
+    fn portfolio_performance_preserves_raw_chart_components_and_unknown_fields() {
+        // Sanitized from the source-backed chart contract. Values are returns
+        // and rendering metadata, not portfolio equity candles.
+        let json = serde_json::json!({
+            "account_number": "ABC123",
+            "lines": [{
+                "identifier": "returns",
+                "segments": [{"points": [{"x": 1, "y": "0.0125", "label": "+1.25%"}]}]
+            }],
+            "x_axis": {"labels": ["9:30 AM", "4:00 PM"]},
+            "y_axis": {"format": "percent"},
+            "legend_data": {"primary": "Portfolio"},
+            "fills": [{"identifier": "positive"}],
+            "overlays": [{"identifier": "market_hours"}],
+            "future_chart_component": {"retained": true}
+        });
+
+        let performance: PortfolioPerformance = serde_json::from_value(json.clone()).unwrap();
+
+        assert_eq!(performance.account_number.as_deref(), Some("ABC123"));
+        assert_eq!(
+            performance.lines.as_ref().unwrap()[0]["identifier"],
+            "returns"
+        );
+        assert_eq!(
+            performance.additional_fields["future_chart_component"],
+            json["future_chart_component"]
+        );
+        assert_eq!(serde_json::to_value(performance).unwrap(), json);
+    }
+
+    #[test]
+    fn portfolio_performance_known_components_are_optional() {
+        let performance: PortfolioPerformance = serde_json::from_str("{}").unwrap();
+
+        assert!(performance.account_number.is_none());
+        assert!(performance.lines.is_none());
+        assert!(performance.x_axis.is_none());
+        assert!(performance.y_axis.is_none());
+        assert!(performance.legend_data.is_none());
+        assert!(performance.fills.is_none());
+        assert!(performance.overlays.is_none());
+        assert!(performance.additional_fields.is_empty());
+    }
+
+    #[test]
     fn account_profile_deserializes_with_margin_balances() {
         let json = r#"{
             "account_number": "767920911",
@@ -633,6 +705,7 @@ mod endpoint_tests {
             "/accounts/ABC123/",
             "/portfolios/ABC123/",
             "/accounts/ABC123/unified/",
+            "/portfolio/performance/ABC123",
         ] {
             Mock::given(method("GET"))
                 .and(path(endpoint))
@@ -656,6 +729,7 @@ mod endpoint_tests {
 
         client.get_account_profile("ABC123").await.unwrap();
         client.get_portfolio("ABC123").await.unwrap();
+        client.get_portfolio_performance("ABC123").await.unwrap();
         client.get_account_summary("ABC123").await.unwrap();
         assert!(client.get_positions("ABC123").await.unwrap().is_empty());
         server.verify().await;
@@ -667,5 +741,19 @@ mod endpoint_tests {
             let error = super::validate_account_number(invalid).unwrap_err();
             assert!(matches!(error, RhoodError::InvalidParameter(_)));
         }
+    }
+
+    #[tokio::test]
+    async fn portfolio_performance_rejects_invalid_account_before_http() {
+        let server = MockServer::start().await;
+        let (_dir, client) = client_for_server(&server).await;
+
+        let error = client
+            .get_portfolio_performance("ABC123?span=year")
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, RhoodError::InvalidParameter(_)));
+        assert!(server.received_requests().await.unwrap().is_empty());
     }
 }

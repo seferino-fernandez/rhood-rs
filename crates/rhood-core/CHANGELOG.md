@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Add Bonfire unified account discovery and explicit canonical account selection across account-sensitive endpoints.
 - Add account-filtered aggregate option strategy positions with full pagination.
+- Add the account-specific Bonfire portfolio performance chart view model.
 - Add `prepare_stock_order` and `submit_prepared_stock_order` for exact pre-confirmation stock payloads.
 - Add `RobinhoodClient::get_futures_positions` with authenticated full-URL pagination and tolerant raw position objects.
 

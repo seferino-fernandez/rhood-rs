@@ -32,6 +32,8 @@ pub mod paths {
     pub const POSITIONS: &str = "/positions/";
     /// Portfolio summary endpoint.
     pub const PORTFOLIOS: &str = "/portfolios/";
+    /// Bonfire portfolio performance chart view model endpoint.
+    pub const PORTFOLIO_PERFORMANCE: &str = "/portfolio/performance/";
 
     // Stocks
 
@@ -151,6 +153,7 @@ mod tests {
             paths::UNIFIED_ACCOUNTS,
             paths::POSITIONS,
             paths::PORTFOLIOS,
+            paths::PORTFOLIO_PERFORMANCE,
             paths::QUOTES,
             paths::FUNDAMENTALS,
             paths::HISTORICALS,

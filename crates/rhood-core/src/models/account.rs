@@ -408,6 +408,33 @@ pub struct PortfolioProfile {
     pub non_usd_currency_equity: Option<String>,
 }
 
+/// Robinhood's portfolio performance chart rendering model.
+///
+/// This is not an equity candle series. Its plotted values represent returns,
+/// and its axes, labels, fills, and overlays are presentation data whose shape
+/// may evolve. Known components remain optional and untyped while unknown
+/// top-level fields are preserved for forward compatibility.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PortfolioPerformance {
+    /// Canonical account number associated with the chart.
+    pub account_number: Option<String>,
+    /// Raw plotted line definitions and their segments.
+    pub lines: Option<Vec<serde_json::Value>>,
+    /// Raw horizontal-axis rendering metadata.
+    pub x_axis: Option<serde_json::Value>,
+    /// Raw vertical-axis rendering metadata.
+    pub y_axis: Option<serde_json::Value>,
+    /// Raw chart legend rendering metadata.
+    pub legend_data: Option<serde_json::Value>,
+    /// Raw chart fill rendering metadata.
+    pub fills: Option<serde_json::Value>,
+    /// Raw chart overlay rendering metadata.
+    pub overlays: Option<serde_json::Value>,
+    /// Additional top-level fields returned by Robinhood.
+    #[serde(default, flatten)]
+    pub additional_fields: BTreeMap<String, serde_json::Value>,
+}
+
 /// Unified account summary from the Robinhood bonfire API.
 ///
 /// Provides an at-a-glance view of buying power, equity, market value,
