@@ -16,6 +16,13 @@ fn portfolio_returns_object() {
 
 #[test]
 #[ignore = "requires live Robinhood credentials"]
+fn portfolio_performance_returns_object() {
+    let output = cli().args(["account", "performance"]).assert().success();
+    assert!(parse_json(&output).is_object());
+}
+
+#[test]
+#[ignore = "requires live Robinhood credentials"]
 fn profile_returns_object() {
     let output = cli().args(["account", "profile"]).assert().success();
     assert!(parse_json(&output).is_object());

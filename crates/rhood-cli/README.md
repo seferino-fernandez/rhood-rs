@@ -256,7 +256,7 @@ Market Identifier Codes (MICs): `XNYS` (NYSE), `XNAS` (NASDAQ), `ARCX` (NYSE Arc
 
 ### Account
 
-Positions, portfolio, profile, and income history.
+Positions, portfolio summaries, raw portfolio performance charts, profiles, and income history.
 
 | Subcommand      | Description                                          |
 | --------------- | ---------------------------------------------------- |
@@ -264,6 +264,7 @@ Positions, portfolio, profile, and income history.
 | `positions`     | Open stock positions (non-zero quantity)             |
 | `all-positions` | All stock positions including closed (zero quantity) |
 | `portfolio`     | Portfolio summary (equity, market value)             |
+| `performance`   | Raw returns chart model and rendering metadata        |
 | `profile`       | Account number, buying power, and cash               |
 | `buying-power`  | Unified account summary                              |
 | `dividends`     | Dividend payment history                             |
@@ -278,6 +279,7 @@ rhood account list
 rhood account positions
 rhood account all-positions
 rhood account portfolio
+rhood account performance
 rhood account profile
 rhood account buying-power
 
@@ -305,6 +307,8 @@ rhood account user-profile
 ```
 
 When multiple accounts are listed, select one with the global flag, for example `rhood --account ABC123 account positions`.
+
+`account performance` returns the current Bonfire chart view model. Its plotted values are returns rather than historical equity candles. Robinhood's replacement endpoint does not accept the retired route's interval, span, or bounds flags. Table and CSV output compact the raw chart components; JSON preserves the complete response.
 
 ### Futures
 

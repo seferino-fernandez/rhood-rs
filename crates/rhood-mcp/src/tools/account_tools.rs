@@ -195,6 +195,26 @@ impl RhoodTools {
     }
 
     #[tool(
+        name = "get_portfolio_performance",
+        description = "Get the raw portfolio performance chart model for one account. Values are returns and rendering metadata, not historical equity candles; the current Bonfire endpoint has no interval, span, or bounds inputs.",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    async fn get_portfolio_performance(
+        &self,
+        peer: Peer<RoleServer>,
+        Parameters(params): Parameters<AccountSelectorParams>,
+    ) -> Result<String, String> {
+        let client = self.ensure_client(&peer).await?;
+        let account =
+            Self::resolve_account_number(&client, params.account_number.as_deref()).await?;
+        let performance = client
+            .get_portfolio_performance(&account)
+            .await
+            .map_err(|rhood_error| format_tool_error(&rhood_error))?;
+        serde_json::to_string_pretty(&performance).map_err(|error| error.to_string())
+    }
+
+    #[tool(
         name = "get_account_profile",
         description = "Get account profile (account number, type, buying power, cash)",
         annotations(read_only_hint = true, open_world_hint = false)

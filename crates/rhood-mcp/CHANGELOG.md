@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add `get_accounts` and optional canonical account selectors to account-sensitive tools.
 - Add the read-only, no-parameter `get_futures_positions` tool with full raw-object preservation.
 - Add the read-only, account-filtered `get_aggregate_option_positions` tool with bounded paging.
+- Add read-only `get_portfolio_performance` for the raw Bonfire returns chart model.
 
 ### Changed
 

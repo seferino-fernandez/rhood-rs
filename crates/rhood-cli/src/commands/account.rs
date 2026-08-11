@@ -1,6 +1,6 @@
 use crate::output::{OutputFormat, output};
 use clap::Subcommand;
-use rhood_core::models::account::AccountSummary;
+use rhood_core::models::account::{AccountSummary, PortfolioPerformance};
 use rhood_core::models::document::DocumentType;
 use rhood_core::models::user::DayTradeCheck;
 use rhood_core::{RhoodConfig, RobinhoodClient};
@@ -13,6 +13,8 @@ pub enum AccountCommand {
     Positions,
     /// View portfolio summary (equity, market value)
     Portfolio,
+    /// View the raw portfolio performance chart model (returns, axes, and labels)
+    Performance,
     /// View account profile (account number, buying power, cash)
     Profile,
     /// View unified account summary (buying power, equity, cash)
@@ -97,6 +99,21 @@ pub async fn run(
                 portfolio.withdrawable_amount.clone().unwrap_or_default(),
             ]];
             output(format, headers, &rows, &portfolio);
+        }
+        AccountCommand::Performance => {
+            let account = super::resolve_account_number(&client, requested_account).await?;
+            let performance = client.get_portfolio_performance(&account).await?;
+            let headers = &[
+                "Account #",
+                "Lines",
+                "X Axis",
+                "Y Axis",
+                "Legend",
+                "Fills",
+                "Overlays",
+            ];
+            let rows = portfolio_performance_rows(&performance);
+            output(format, headers, &rows, &performance);
         }
         AccountCommand::Profile => {
             let account = super::resolve_account_number(&client, requested_account).await?;
@@ -270,6 +287,26 @@ fn position_rows(positions: &[rhood_core::models::account::Position]) -> Vec<Vec
         .collect()
 }
 
+fn compact_json<T: serde::Serialize>(value: &Option<T>) -> String {
+    value
+        .as_ref()
+        .and_then(|value| serde_json::to_string(value).ok())
+        .unwrap_or_default()
+}
+
+/// Builds a compact rendering row without interpreting chart returns as equity.
+pub fn portfolio_performance_rows(performance: &PortfolioPerformance) -> Vec<Vec<String>> {
+    vec![vec![
+        performance.account_number.clone().unwrap_or_default(),
+        compact_json(&performance.lines),
+        compact_json(&performance.x_axis),
+        compact_json(&performance.y_axis),
+        compact_json(&performance.legend_data),
+        compact_json(&performance.fills),
+        compact_json(&performance.overlays),
+    ]]
+}
+
 /// Build a single-row table for the [`AccountSummary`] buying-power view.
 pub fn buying_power_rows(summary: &AccountSummary) -> Vec<Vec<String>> {
     let money = |field: &Option<rhood_core::models::dividend::MoneyAmount>| -> String {
@@ -319,7 +356,8 @@ pub fn day_trades_rows(check: &DayTradeCheck) -> Vec<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rhood_core::models::account::{AccountSummary, Position};
+    use clap::Parser;
+    use rhood_core::models::account::{AccountSummary, PortfolioPerformance, Position};
     use rhood_core::models::dividend::MoneyAmount;
     use rhood_core::models::document::Document;
     use rhood_core::models::user::DayTradeCheck;
@@ -330,6 +368,68 @@ mod tests {
             currency_code: Some("USD".to_string()),
             currency_id: None,
         })
+    }
+
+    #[derive(Parser)]
+    struct TestCli {
+        #[command(subcommand)]
+        command: AccountCommand,
+    }
+
+    #[test]
+    fn performance_subcommand_accepts_no_chart_controls() {
+        assert!(matches!(
+            TestCli::try_parse_from(["test", "performance"])
+                .unwrap()
+                .command,
+            AccountCommand::Performance
+        ));
+        assert!(TestCli::try_parse_from(["test", "performance", "--span", "year"]).is_err());
+    }
+
+    #[test]
+    fn portfolio_performance_rows_compact_raw_components_and_missing_values() {
+        let performance = PortfolioPerformance {
+            account_number: Some("ABC123".to_string()),
+            lines: Some(vec![serde_json::json!({
+                "identifier": "returns",
+                "segments": []
+            })]),
+            x_axis: Some(serde_json::json!({"labels": ["Open", "Close"]})),
+            y_axis: Some(serde_json::json!({"format": "percent"})),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            portfolio_performance_rows(&performance),
+            vec![vec![
+                "ABC123".to_string(),
+                r#"[{"identifier":"returns","segments":[]}]"#.to_string(),
+                r#"{"labels":["Open","Close"]}"#.to_string(),
+                r#"{"format":"percent"}"#.to_string(),
+                String::new(),
+                String::new(),
+                String::new(),
+            ]]
+        );
+    }
+
+    #[test]
+    fn portfolio_performance_json_preserves_unknown_rendering_data() {
+        let raw = serde_json::json!({
+            "account_number": "ABC123",
+            "lines": [],
+            "new_rendering_component": {"raw": [1, true, null]}
+        });
+        let performance: PortfolioPerformance = serde_json::from_value(raw.clone()).unwrap();
+        let serialized = serde_json::to_value(performance).unwrap();
+
+        assert_eq!(serialized["account_number"], raw["account_number"]);
+        assert_eq!(serialized["lines"], raw["lines"]);
+        assert_eq!(
+            serialized["new_rendering_component"],
+            raw["new_rendering_component"]
+        );
     }
 
     #[test]
