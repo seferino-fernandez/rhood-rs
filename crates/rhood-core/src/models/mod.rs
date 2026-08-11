@@ -37,7 +37,8 @@ pub use document::*;
 pub use futures::{FuturesContract, FuturesOrder, FuturesPosition, FuturesQuote};
 pub use market::*;
 pub use option::{
-    OptionChain, OptionContractSpec, OptionInstrument, OptionMarketData, OptionPosition, OptionType,
+    AggregateOptionPosition, OptionChain, OptionContractSpec, OptionInstrument, OptionMarketData,
+    OptionPosition, OptionType,
 };
 pub use order::{
     OptionOrder, OptionOrderRequest, OptionPositionEffect, OrderAmount, OrderType, Side,
