@@ -145,6 +145,24 @@ impl RobinhoodClient {
         Ok(cached.clone())
     }
 
+    /// Fetches all futures positions for the discovered futures account.
+    ///
+    /// The positions endpoint returns full `next` URLs. Each page is fetched
+    /// with the futures contract header through the authenticated read policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RhoodError::InvalidParameter`] if no futures account exists.
+    /// Also returns an error on HTTP or deserialization failures.
+    pub async fn get_futures_positions(&self) -> Result<Vec<FuturesPosition>> {
+        let account_id = self.cached_futures_account_id().await?;
+        let url = format!(
+            "{}{account_id}/positions/",
+            self.api_url(paths::FUTURES_ACCOUNTS)
+        );
+        self.get_futures_paginated(&url).await
+    }
+
     /// Fetches all futures orders with optional date filtering.
     ///
     /// Discovers the futures account ID automatically. Uses cursor-based
@@ -170,9 +188,102 @@ impl RobinhoodClient {
 
 #[cfg(test)]
 mod tests {
+    use crate::client::RobinhoodClient;
+    use crate::config::RhoodConfig;
     use crate::models::futures::{
         FuturesContract, FuturesContractWrapper, FuturesOrder, FuturesQuoteDataWrapper,
     };
+    use secrecy::SecretString;
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    async fn client_for_server(server: &MockServer) -> (tempfile::TempDir, RobinhoodClient) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = RhoodConfig::default();
+        config.auth.token_cache_path = dir
+            .path()
+            .join("nonexistent-token.json")
+            .to_string_lossy()
+            .into_owned();
+        config.api.base_url = server.uri();
+        let client = RobinhoodClient::with_config(config).unwrap();
+        client
+            .inject_test_auth(
+                SecretString::from("access-token"),
+                "Bearer".to_string(),
+                SecretString::from("refresh-token"),
+            )
+            .await;
+        (dir, client)
+    }
+
+    #[tokio::test]
+    async fn futures_positions_discovers_account_and_uses_exact_positions_path() {
+        let server = MockServer::start().await;
+        for endpoint in [
+            "/ceres/v1/accounts/",
+            "/ceres/v1/accounts/futures-account/positions/",
+        ] {
+            let body = if endpoint.ends_with("positions/") {
+                serde_json::json!({
+                    "results": [{"quantity": "2", "contract": {"symbol": "/ESM26"}}],
+                    "next": null,
+                    "previous": null
+                })
+            } else {
+                serde_json::json!({
+                    "results": [{"id": "futures-account", "accountType": "FUTURES"}]
+                })
+            };
+            Mock::given(method("GET"))
+                .and(path(endpoint))
+                .and(header("Authorization", "Bearer access-token"))
+                .and(header("Rh-Contract-Protected", "true"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(body))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+        let (_dir, client) = client_for_server(&server).await;
+
+        let positions = client.get_futures_positions().await.unwrap();
+
+        assert_eq!(positions.len(), 1);
+        assert_eq!(
+            positions[0].additional_fields.get("contract"),
+            Some(&serde_json::json!({"symbol": "/ESM26"}))
+        );
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn futures_positions_returns_empty_vector_for_empty_results() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/ceres/v1/accounts/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [{"id": "futures-account", "accountType": "FUTURES"}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/ceres/v1/accounts/futures-account/positions/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [],
+                "next": null,
+                "previous": null
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server).await;
+
+        let positions = client.get_futures_positions().await.unwrap();
+
+        assert!(positions.is_empty());
+        server.verify().await;
+    }
 
     #[test]
     fn futures_contract_deserializes() {

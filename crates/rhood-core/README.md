@@ -10,7 +10,7 @@ Powers the [`rhood-cli`](https://github.com/seferino-fernandez/rhood-rs/tree/mai
 
 - Authenticated HTTP client (`RobinhoodClient`) with disk-backed token cache and OAuth refresh.
 - Shared authenticated-read pacing, cooldown, and bounded retries across client clones.
-- Endpoint coverage for stocks, options, futures, indices, orders, account, watchlists, recurring investments, dividends, transfers, and research.
+- Endpoint coverage for stocks, options, futures contracts, quotes, orders, and positions, indices, account data, watchlists, recurring investments, dividends, transfers, and research.
 - Typed error model (`RhoodError`) covering challenges, rate limits, read-only mode, and API errors.
 - Configuration via TOML files, environment variables, or programmatic construction.
 - Unified brokerage account discovery with fail-closed explicit selection for multi-account and IRA users.

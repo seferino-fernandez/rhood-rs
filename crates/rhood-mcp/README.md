@@ -246,7 +246,7 @@ Tools are grouped by domain. The complete authoritative list is what `tools/list
 
 - **Stocks** - quotes, history, fundamentals, plus stock-order history (open and full).
 - **Options** - chain metadata, equity contract search, contract quotes (bid/ask, Greeks, volume), positions, and order history.
-- **Futures** - contract lookup, real-time quotes, order history, and futures-account discovery.
+- **Futures** - contract lookup, real-time quotes, raw positions through `get_futures_positions`, order history, and futures-account discovery.
 - **Indices** - index quotes (SPX, NDX, VIX, RUT, XSP), index option chains, and contract search.
 - **Account** - unified account discovery, positions (current and including closed), portfolio summary, account profile and unified summary, account documents (statements, tax forms).
 - **Income** - dividend history (and total), interest/sweep payments, and unified transfers (ACH, wire, debit card).
