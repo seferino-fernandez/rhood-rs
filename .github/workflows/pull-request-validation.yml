@@ -75,7 +75,9 @@ jobs:
               uses: dtolnay/rust-toolchain@stable
 
             - name: Install cargo audit tools
-              uses: taiki-e/install-action@just,cargo-auditable,cargo-audit
+              uses: taiki-e/install-action@v2
+              with:
+                  tool: just,cargo-auditable,cargo-audit
 
             - uses: Swatinem/rust-cache@v2
 
