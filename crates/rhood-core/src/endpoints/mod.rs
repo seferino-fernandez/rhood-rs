@@ -20,6 +20,7 @@ pub mod options;
 pub mod orders;
 /// Recurring investment schedule management.
 pub mod recurring;
+mod request_batch;
 /// Research and discovery: earnings, ratings, news, splits, tags.
 pub mod research;
 /// Stock quotes, fundamentals, historicals, and instrument lookup.
