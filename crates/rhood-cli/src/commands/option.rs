@@ -1,7 +1,7 @@
 use crate::output::{OutputFormat, output};
 use crate::utils::validation::STRIKE_PRICE_DECIMALS;
 use clap::Subcommand;
-use rhood_core::models::option::{OptionContractSpec, OptionType};
+use rhood_core::models::option::{AggregateOptionPosition, OptionContractSpec, OptionType};
 use rhood_core::models::order::OptionOrder;
 use rhood_core::{RhoodConfig, RobinhoodClient};
 
@@ -9,6 +9,8 @@ use rhood_core::{RhoodConfig, RobinhoodClient};
 pub enum OptionCommand {
     /// List your open option positions
     Positions,
+    /// List your aggregate option strategy positions
+    AggregatePositions,
     /// List option orders (all or open only)
     Orders {
         /// Show only open orders (otherwise lists all)
@@ -76,6 +78,20 @@ fn leg_columns(order: &OptionOrder) -> (String, String, String) {
     (strike, expiry, opt_type)
 }
 
+fn aggregate_option_position_rows(positions: &[AggregateOptionPosition]) -> Vec<Vec<String>> {
+    positions
+        .iter()
+        .map(|position| {
+            vec![
+                position.symbol.clone().unwrap_or_default(),
+                position.strategy.clone().unwrap_or_default(),
+                position.quantity.clone().unwrap_or_default(),
+                position.average_open_price.clone().unwrap_or_default(),
+            ]
+        })
+        .collect()
+}
+
 pub async fn run(
     cmd: &OptionCommand,
     format: OutputFormat,
@@ -100,6 +116,13 @@ pub async fn run(
                     ]
                 })
                 .collect();
+            output(format, headers, &rows, &positions);
+        }
+        OptionCommand::AggregatePositions => {
+            let account = super::resolve_account_number(&client, requested_account).await?;
+            let positions = client.get_aggregate_option_positions(&account).await?;
+            let headers = &["Symbol", "Strategy", "Quantity", "Avg Open Price"];
+            let rows = aggregate_option_position_rows(&positions);
             output(format, headers, &rows, &positions);
         }
         OptionCommand::Orders { open, since } => {
@@ -293,7 +316,22 @@ pub async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::{Parser, Subcommand};
     use rhood_core::models::order::OptionOrder;
+
+    #[derive(Parser)]
+    struct TestCli {
+        #[command(subcommand)]
+        command: TestCommand,
+    }
+
+    #[derive(Subcommand)]
+    enum TestCommand {
+        Option {
+            #[command(subcommand)]
+            command: OptionCommand,
+        },
+    }
 
     fn make_leg(strike: &str, expiry: &str, opt_type: &str) -> serde_json::Value {
         serde_json::json!({
@@ -389,5 +427,62 @@ mod tests {
         assert_eq!(strike, "200.0000");
         assert_eq!(expiry, "2026-07-18");
         assert_eq!(opt_type, "");
+    }
+
+    #[test]
+    fn aggregate_positions_subcommand_accepts_no_parameters() {
+        let cli = TestCli::try_parse_from(["rhood", "option", "aggregate-positions"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            TestCommand::Option {
+                command: OptionCommand::AggregatePositions
+            }
+        ));
+        assert!(
+            TestCli::try_parse_from(["rhood", "option", "aggregate-positions", "unexpected"])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn aggregate_option_position_rows_project_approved_columns_and_missing_values() {
+        let positions = vec![
+            serde_json::from_value(serde_json::json!({
+                "symbol": "AAPL",
+                "strategy": "iron_condor",
+                "quantity": "2",
+                "average_open_price": "1.25"
+            }))
+            .unwrap(),
+            serde_json::from_value(serde_json::json!({})).unwrap(),
+        ];
+
+        assert_eq!(
+            aggregate_option_position_rows(&positions),
+            vec![
+                vec![
+                    "AAPL".to_string(),
+                    "iron_condor".to_string(),
+                    "2".to_string(),
+                    "1.25".to_string(),
+                ],
+                vec![String::new(), String::new(), String::new(), String::new()],
+            ]
+        );
+    }
+
+    #[test]
+    fn aggregate_option_positions_serialize_raw_legs_and_unknown_fields() {
+        let raw = serde_json::json!([{
+            "symbol": "AAPL",
+            "strategy": "iron_condor",
+            "quantity": "2",
+            "average_open_price": "1.25",
+            "legs": [{"option_type": "call", "metadata": {"source": "wire"}}],
+            "unknown_top_level": {"status": "preserved"}
+        }]);
+        let positions: Vec<AggregateOptionPosition> = serde_json::from_value(raw.clone()).unwrap();
+
+        assert_eq!(serde_json::to_value(&positions).unwrap(), raw);
     }
 }
