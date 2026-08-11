@@ -134,11 +134,14 @@ rhood stock tags 100-most-popular
 
 ### Option
 
-Option contract quotes, positions, and order history.
+Option contract quotes, open positions, aggregate strategy positions, and order history. Both
+position commands use the global `--account <NUMBER>` selector; without it, account discovery
+only proceeds when exactly one usable individual or IRA account is available.
 
 | Subcommand     | Description                                     |
 | -------------- | ----------------------------------------------- |
 | `positions`    | Open option positions                           |
+| `aggregate-positions` | Aggregate option strategy positions           |
 | `orders`       | Option order history (all or open only)         |
 | `cancel-order` | Cancel an open option order by ID               |
 | `quote`        | Live bid/ask, Greeks, volume, and open interest |
@@ -146,6 +149,9 @@ Option contract quotes, positions, and order history.
 ```bash
 # Open option positions
 rhood option positions
+
+# Aggregate option strategy positions for a selected account
+rhood --account ABC123 option aggregate-positions
 
 # All option orders
 rhood option orders
