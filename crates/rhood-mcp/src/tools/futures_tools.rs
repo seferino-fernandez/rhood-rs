@@ -4,6 +4,12 @@ use super::handler::RhoodTools;
 use super::params::*;
 use super::types::format_tool_error;
 
+fn serialize_futures_positions(
+    positions: &[rhood_core::models::futures::FuturesPosition],
+) -> Result<String, String> {
+    serde_json::to_string_pretty(positions).map_err(|error| error.to_string())
+}
+
 #[tool_router(router = futures_router, vis = "pub(super)")]
 impl RhoodTools {
     #[tool(
@@ -68,6 +74,20 @@ impl RhoodTools {
     }
 
     #[tool(
+        name = "get_futures_positions",
+        description = "Get all futures positions for the futures account",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    async fn get_futures_positions(&self, peer: Peer<RoleServer>) -> Result<String, String> {
+        let client = self.ensure_client(&peer).await?;
+        let positions = client
+            .get_futures_positions()
+            .await
+            .map_err(|rhood_error| format_tool_error(&rhood_error))?;
+        serialize_futures_positions(&positions)
+    }
+
+    #[tool(
         name = "get_futures_account",
         description = "Discover the Robinhood futures account ID",
         annotations(read_only_hint = true, open_world_hint = false)
@@ -82,5 +102,60 @@ impl RhoodTools {
             "futures_account_id": account_id,
         });
         serde_json::to_string_pretty(&result).map_err(|error| error.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RhoodTools, serialize_futures_positions};
+
+    #[test]
+    fn futures_positions_tool_is_registered_without_parameters_and_read_only() {
+        let tool = RhoodTools::futures_router()
+            .list_all()
+            .into_iter()
+            .find(|tool| tool.name == "get_futures_positions")
+            .expect("get_futures_positions must be advertised");
+
+        assert_eq!(
+            tool.input_schema.get("properties"),
+            Some(&serde_json::json!({}))
+        );
+        assert!(
+            tool.annotations
+                .as_ref()
+                .is_some_and(|annotations| annotations.read_only_hint == Some(true))
+        );
+    }
+
+    #[test]
+    fn futures_positions_serialization_is_pretty_and_preserves_raw_objects() {
+        let positions = vec![
+            serde_json::from_value(serde_json::json!({
+                "mark": 5182.25,
+                "metadata": {"source": "wire"},
+                "legs": [{"side": "long"}]
+            }))
+            .unwrap(),
+        ];
+
+        let json = serialize_futures_positions(&positions).unwrap();
+
+        assert_eq!(
+            json,
+            r#"[
+  {
+    "legs": [
+      {
+        "side": "long"
+      }
+    ],
+    "mark": 5182.25,
+    "metadata": {
+      "source": "wire"
+    }
+  }
+]"#
+        );
     }
 }

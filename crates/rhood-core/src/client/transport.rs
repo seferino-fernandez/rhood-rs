@@ -115,6 +115,40 @@ impl RobinhoodClient {
     }
 
     /// Sends authenticated GET requests with the futures contract header,
+    /// following full `next` URLs to collect all results.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RhoodError::NotAuthenticated`] if the client is not logged in,
+    /// or a transport/API error on failure.
+    pub(crate) async fn get_futures_paginated<T: DeserializeOwned>(
+        &self,
+        url: &str,
+    ) -> Result<Vec<T>> {
+        let res = self
+            .send_authenticated_get(
+                self.http
+                    .get(url)
+                    .header(FUTURES_CONTRACT_HEADER, FUTURES_CONTRACT_HEADER_VALUE),
+            )
+            .await?;
+        let mut page: PaginatedResponse<T> = handle_read_response(res)?;
+        let mut all_results = page.results;
+        while let Some(next_url) = page.next {
+            let res = self
+                .send_authenticated_get(
+                    self.http
+                        .get(&next_url)
+                        .header(FUTURES_CONTRACT_HEADER, FUTURES_CONTRACT_HEADER_VALUE),
+                )
+                .await?;
+            page = handle_read_response(res)?;
+            all_results.extend(page.results);
+        }
+        Ok(all_results)
+    }
+
+    /// Sends authenticated GET requests with the futures contract header,
     /// following cursor-based pagination to collect all results.
     ///
     /// Unlike [`get_paginated`](Self::get_paginated), this re-requests the same
@@ -754,6 +788,57 @@ mod tests {
         let requests = server.received_requests().await.unwrap();
         assert!(requests[0].url.query().unwrap().contains("symbol=ES"));
         assert!(requests[1].url.query().unwrap().contains("cursor=cursor-2"));
+    }
+
+    #[tokio::test]
+    async fn futures_ordinary_next_pagination_preserves_headers_order_and_next_url() {
+        let server = MockServer::start().await;
+        let next_url = format!("{}/positions/page-2?opaque=kept", server.uri());
+        Mock::given(method("GET"))
+            .and(path("/positions/page-1"))
+            .and(header("Authorization", "Bearer access-token"))
+            .and(header(
+                FUTURES_CONTRACT_HEADER,
+                FUTURES_CONTRACT_HEADER_VALUE,
+            ))
+            .and(query_param("initial", "kept"))
+            .and(query_param_is_missing("cursor"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [10, 20],
+                "next": next_url,
+                "previous": null
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/positions/page-2"))
+            .and(header("Authorization", "Bearer access-token"))
+            .and(header(
+                FUTURES_CONTRACT_HEADER,
+                FUTURES_CONTRACT_HEADER_VALUE,
+            ))
+            .and(query_param("opaque", "kept"))
+            .and(query_param_is_missing("cursor"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [30],
+                "next": null,
+                "previous": null
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (_dir, client, clock) = authenticated_client_with_clock(&server.uri()).await;
+        let url = format!("{}/positions/page-1?initial=kept", server.uri());
+        let task = tokio::spawn(async move { client.get_futures_paginated::<i32>(&url).await });
+
+        wait_for_request_count(&server, 1).await;
+        clock.advance(std::time::Duration::from_millis(250));
+        wait_for_request_count(&server, 2).await;
+        let values = task.await.unwrap().unwrap();
+
+        assert_eq!(values, vec![10, 20, 30]);
+        server.verify().await;
     }
 
     #[tokio::test]

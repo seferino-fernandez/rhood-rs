@@ -302,13 +302,14 @@ When multiple accounts are listed, select one with the global flag, for example 
 
 ### Futures
 
-Futures contract lookup, real-time quotes, and order history.
+Futures contract lookup, real-time quotes, positions, and order history.
 
 | Subcommand | Description                                |
 | ---------- | ------------------------------------------ |
 | `contract` | Look up a futures contract by symbol       |
 | `quote`    | Real-time quotes for one or more contracts |
 | `orders`   | Futures order history                      |
+| `positions` | Futures positions                         |
 | `account`  | Show the futures account ID                |
 
 ```bash
@@ -324,9 +325,14 @@ rhood futures orders
 # Orders updated since a date
 rhood futures orders --since 2025-01-01
 
+# Futures positions
+rhood futures positions
+
 # Futures account ID
 rhood futures account
 ```
+
+Futures position table and CSV output use one `Position` column containing compact JSON for each raw position. JSON output is the raw position array.
 
 ### Index
 

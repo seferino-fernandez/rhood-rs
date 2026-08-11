@@ -41,6 +41,13 @@ fn futures_orders_returns_array() {
 
 #[test]
 #[ignore = "requires live Robinhood credentials"]
+fn futures_positions_returns_array() {
+    let output = cli().args(["futures", "positions"]).assert().success();
+    assert!(parse_json(&output).is_array());
+}
+
+#[test]
+#[ignore = "requires live Robinhood credentials"]
 fn futures_account_returns_identifier() {
     let output = cli().args(["futures", "account"]).assert().success();
     let body = parse_json(&output);

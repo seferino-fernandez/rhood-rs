@@ -34,7 +34,7 @@ pub mod watchlist;
 pub use account::*;
 pub use dividend::{Dividend, InterestPayment, MoneyAmount};
 pub use document::*;
-pub use futures::{FuturesContract, FuturesOrder, FuturesQuote};
+pub use futures::{FuturesContract, FuturesOrder, FuturesPosition, FuturesQuote};
 pub use market::*;
 pub use option::{
     OptionChain, OptionContractSpec, OptionInstrument, OptionMarketData, OptionPosition, OptionType,
