@@ -245,7 +245,7 @@ rhood-mcp --transport http --port 8080
 Tools are grouped by domain. The complete authoritative list is what `tools/list` returns at runtime and what follows is an overview of the surface.
 
 - **Stocks** - quotes, history, fundamentals, plus stock-order history (open and full).
-- **Options** - chain metadata, equity contract search, contract quotes (bid/ask, Greeks, volume), positions, and order history.
+- **Options** - chain metadata, equity contract search, contract quotes (bid/ask, Greeks, volume), contract positions, aggregate strategy positions, and order history.
 - **Futures** - contract lookup, real-time quotes, raw positions through `get_futures_positions`, order history, and futures-account discovery.
 - **Indices** - index quotes (SPX, NDX, VIX, RUT, XSP), index option chains, and contract search.
 - **Account** - unified account discovery, positions (current and including closed), portfolio summary, account profile and unified summary, account documents (statements, tax forms).
@@ -261,7 +261,7 @@ For the live list, page through MCP `tools/list` against the running server. Pas
 non-null `nextCursor` back as `cursor` unchanged. Read-only and read-write surfaces use
 different cursor scopes, so restart without a cursor after changing server mode.
 
-`get_option_positions`, `get_transfers`, and `get_documents` return bounded pages with `items` and `next_cursor`. They accept an optional `limit` (default 50, maximum 100); pass a non-null `next_cursor` back as `cursor` unchanged to continue, keeping the same document-type filter between `get_documents` calls. Cursors are positional rather than snapshots, so restart without a cursor if the collection changes while paging.
+`get_option_positions`, `get_aggregate_option_positions`, `get_transfers`, and `get_documents` return bounded pages with `items` and `next_cursor`. They accept an optional `limit` (default 50, maximum 100); pass a non-null `next_cursor` back as `cursor` unchanged to continue, keeping the same resolved account for option-position tools and the same document-type filter between `get_documents` calls. Cursors are positional rather than snapshots, so restart without a cursor if the collection changes while paging.
 
 `get_option_quotes` supports two mutually exclusive inputs:
 
@@ -274,7 +274,7 @@ Each list must be non-empty. Do not combine the modes.
 
 Order placement and cancellation are write operations. The server starts in read-only mode by default and write tools are hidden from `tools/list` and rejected on call. Pass `--read-write` or set `read_only = false` in config to enable them.
 
-Call `get_accounts` before account-sensitive operations when more than one account exists. Those tools accept an optional `account_number`, auto-select only when discovery yields exactly one account, and otherwise fail before staging or submission. The selected account is fixed inside the sealed confirmation state. Income, transfer, and document tools remain aggregate because no reliable account filter is established for those routes.
+Call `get_accounts` before account-sensitive operations when more than one account exists. Those tools, including `get_option_positions` and `get_aggregate_option_positions`, accept an optional `account_number`, auto-select only when discovery yields exactly one account, and otherwise fail before staging or submission. The selected account is fixed inside the sealed confirmation state. Income, transfer, and document tools remain aggregate because no reliable account filter is established for those routes.
 
 Order placement uses MCP elicitation. A stock order is fully prepared before the elicitation, including its selected account, resolved share quantity, quote collar, client reference, and form version. The accepted retry submits that exact sealed preparation once. Preparations expire after 60 seconds and must be prepared and confirmed again. Dollar buys require at least $1 and good-for-day duration; they use the ask quote and round the estimated quantity upward to six decimals. A submission timeout returns `submission_uncertain` with reconciliation guidance and is never retried automatically. Option order preparation remains separate and preserves the selected account in sealed state.
 
