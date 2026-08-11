@@ -19,6 +19,10 @@ struct OptionQuoteView {
     data: rhood_core::models::option::OptionMarketData,
 }
 
+fn aggregate_option_positions_cursor_scope(account_number: &str) -> String {
+    format!("aggregate-option-positions:{account_number}")
+}
+
 #[tool_router(router = option_router, vis = "pub(super)")]
 impl RhoodTools {
     #[tool(
@@ -41,6 +45,31 @@ impl RhoodTools {
         )?;
         let positions = client
             .get_open_option_positions(&account)
+            .await
+            .map_err(|rhood_error| format_tool_error(&rhood_error))?;
+        pager.serialize(positions)
+    }
+
+    #[tool(
+        name = "get_aggregate_option_positions",
+        description = "Get one cursor-paginated page of aggregate option strategies for an account",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    async fn get_aggregate_option_positions(
+        &self,
+        peer: Peer<RoleServer>,
+        Parameters(params): Parameters<AccountCollectionPageParams>,
+    ) -> Result<String, String> {
+        let client = self.ensure_client(&peer).await?;
+        let account =
+            Self::resolve_account_number(&client, params.account_number.as_deref()).await?;
+        let pager = CollectionPager::new(
+            aggregate_option_positions_cursor_scope(&account),
+            params.cursor.as_deref(),
+            params.limit,
+        )?;
+        let positions = client
+            .get_aggregate_option_positions(&account)
             .await
             .map_err(|rhood_error| format_tool_error(&rhood_error))?;
         pager.serialize(positions)
@@ -196,7 +225,8 @@ impl RhoodTools {
 
 #[cfg(test)]
 mod tests {
-    use super::OptionQuoteView;
+    use super::{OptionQuoteView, aggregate_option_positions_cursor_scope};
+    use crate::tools::pagination::CollectionPager;
     use rhood_core::models::option::OptionMarketData;
 
     #[test]
@@ -217,5 +247,24 @@ mod tests {
         assert_eq!(value["expiration_date"], "2026-06-18");
         assert_eq!(value["option_type"], "call");
         assert_eq!(value["bid_price"], "1.20");
+    }
+
+    #[test]
+    fn aggregate_option_position_cursors_are_bound_to_the_selected_account() {
+        let first_account = aggregate_option_positions_cursor_scope("ABC123");
+        let second_account = aggregate_option_positions_cursor_scope("DEF456");
+        assert_eq!(first_account, "aggregate-option-positions:ABC123");
+        assert_ne!(first_account, second_account);
+
+        let cursor = CollectionPager::new(&first_account, None, Some(1))
+            .unwrap()
+            .serialize(vec![1, 2])
+            .unwrap();
+        let next_cursor =
+            serde_json::from_str::<serde_json::Value>(&cursor).unwrap()["next_cursor"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+        assert!(CollectionPager::new(&second_account, Some(&next_cursor), Some(1)).is_err());
     }
 }

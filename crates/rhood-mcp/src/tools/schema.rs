@@ -252,6 +252,12 @@ mod router_tests {
                 "read-write mode must resolve `{write_tool}`"
             );
         }
+        assert!(
+            read_only
+                .get_tool("get_aggregate_option_positions")
+                .is_some(),
+            "read-only mode must resolve read-only aggregate option positions"
+        );
     }
 
     /// `get_tool` and `list_tools` must return the same document because they share
@@ -387,9 +393,48 @@ mod router_tests {
     }
 
     #[test]
+    fn aggregate_option_positions_advertises_account_bound_pagination_and_read_only() {
+        use rmcp::ServerHandler;
+
+        let tool = tools_with(true)
+            .get_tool("get_aggregate_option_positions")
+            .expect("read-only mode must advertise aggregate option positions");
+        assert!(
+            tool.annotations
+                .as_ref()
+                .is_some_and(|annotations| annotations.read_only_hint == Some(true))
+        );
+
+        let schema = Value::Object((*tool.input_schema).clone());
+        assert_eq!(schema["required"], serde_json::json!([]));
+        assert!(
+            schema["properties"]["account_number"]["description"]
+                .as_str()
+                .is_some_and(|description| description.contains("get_accounts"))
+        );
+        assert_eq!(
+            schema["properties"]["cursor"]["maxLength"],
+            serde_json::json!(128)
+        );
+        assert_eq!(
+            schema["properties"]["limit"]["minimum"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            schema["properties"]["limit"]["maximum"],
+            serde_json::json!(100)
+        );
+    }
+
+    #[test]
     fn bl16_collections_advertise_bounded_cursor_pagination() {
         let tools = tools_with(false);
-        for name in ["get_option_positions", "get_transfers", "get_documents"] {
+        for name in [
+            "get_option_positions",
+            "get_aggregate_option_positions",
+            "get_transfers",
+            "get_documents",
+        ] {
             let tool = tools
                 .tool_router
                 .list_all()
@@ -400,6 +445,12 @@ mod router_tests {
                 .description
                 .as_deref()
                 .unwrap_or_else(|| panic!("{name} must describe pagination"));
+            assert!(
+                tool.annotations
+                    .as_ref()
+                    .is_some_and(|annotations| annotations.read_only_hint == Some(true)),
+                "{name} must be advertised as read-only"
+            );
             assert!(
                 description.contains("cursor-paginated page"),
                 "{name} must tell callers it returns one page: {description}"
@@ -449,6 +500,7 @@ mod router_tests {
             "get_account_profile",
             "get_account_summary",
             "get_option_positions",
+            "get_aggregate_option_positions",
             "get_open_option_orders",
             "get_open_orders",
             "get_recurring_investments",
