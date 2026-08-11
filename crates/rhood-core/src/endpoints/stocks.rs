@@ -3,6 +3,9 @@ use std::sync::Arc;
 
 use crate::api::paths;
 use crate::client::RobinhoodClient;
+use crate::endpoints::request_batch::{
+    ChunkLimit, PlannedInput, chunk_failed, plan_request_chunks,
+};
 use crate::models::stock::*;
 use crate::pagination::ResultsResponse;
 use crate::{Result, RhoodError};
@@ -20,30 +23,92 @@ struct InstrumentBatchResponse {
     results: Vec<Option<Instrument>>,
 }
 
+const MARKET_DATA_URL_LIMIT: usize = 4_096;
+const FUNDAMENTALS_ITEM_LIMIT: usize = 100;
+
+fn response_symbol(
+    endpoint: &'static str,
+    symbol: Option<&str>,
+    chunk: &[PlannedInput],
+) -> Result<String> {
+    let symbol = symbol
+        .map(str::trim)
+        .filter(|symbol| !symbol.is_empty())
+        .map(str::to_uppercase)
+        .ok_or_else(|| RhoodError::InvalidMarketDataResponse {
+            endpoint: endpoint.to_string(),
+            message: "response item omitted its requested symbol".into(),
+        })?;
+    if chunk.iter().any(|input| input.value == symbol) {
+        Ok(symbol)
+    } else {
+        Err(RhoodError::InvalidMarketDataResponse {
+            endpoint: endpoint.to_string(),
+            message: "response item named a symbol outside its request chunk".into(),
+        })
+    }
+}
+
+fn join_chunk(chunk: &[PlannedInput]) -> String {
+    chunk
+        .iter()
+        .map(|input| input.value.as_str())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 impl RobinhoodClient {
     /// Fetches real-time stock quotes for one or more ticker symbols.
     ///
-    /// Symbols are uppercased before the request. Results are filtered to
-    /// include only quotes that contain a valid symbol field.
+    /// Symbols are uppercased and stable-deduplicated on the wire. Returned
+    /// quotes follow caller order and repeat for duplicate inputs; requested
+    /// symbols missing from the response are omitted. Requests are split before
+    /// their fully encoded URL exceeds 4,096 bytes.
     ///
     /// # Errors
     ///
-    /// Returns an error if the HTTP request fails or the response cannot be
-    /// deserialized.
+    /// Returns [`RhoodError::InvalidParameter`] before HTTP if one symbol cannot
+    /// fit the URL limit. If a request chunk fails, returns
+    /// [`RhoodError::RequestChunkFailed`] with its one-based position and no
+    /// partial results.
     pub async fn get_quotes(&self, symbols: &[&str]) -> Result<Vec<StockQuote>> {
-        let joined_symbols = symbols
+        let requested = symbols
             .iter()
             .map(|symbol| symbol.to_uppercase())
-            .collect::<Vec<_>>()
-            .join(",");
-        let params = [("symbols", joined_symbols.as_str())];
-        let resp: ResultsResponse<StockQuote> = self
-            .get_with_params(&self.api_url(paths::QUOTES), &params)
-            .await?;
-        Ok(resp
-            .results
-            .into_iter()
-            .filter(|quote| quote.symbol.is_some())
+            .collect::<Vec<_>>();
+        let url = self.api_url(paths::QUOTES);
+        let chunks = plan_request_chunks(
+            "quotes",
+            &requested,
+            ChunkLimit::EncodedUrlBytes {
+                maximum: MARKET_DATA_URL_LIMIT,
+                url: &url,
+                parameter: "symbols",
+                fixed_parameters: &[],
+            },
+        )?;
+        let total_chunks = chunks.len();
+        let mut by_symbol = HashMap::with_capacity(requested.len());
+
+        for (index, chunk) in chunks.iter().enumerate() {
+            let joined = join_chunk(chunk);
+            let params = [("symbols", joined.as_str())];
+            let resp: ResultsResponse<StockQuote> = self
+                .get_with_params(&url, &params)
+                .await
+                .map_err(|source| {
+                    chunk_failed("quotes", index.saturating_add(1), total_chunks, source)
+                })?;
+            for quote in resp.results {
+                if let Some(symbol) = quote.symbol.as_ref() {
+                    by_symbol.entry(symbol.to_uppercase()).or_insert(quote);
+                }
+            }
+        }
+
+        Ok(requested
+            .iter()
+            .filter_map(|symbol| by_symbol.get(symbol).cloned())
             .collect())
     }
 
@@ -73,39 +138,86 @@ impl RobinhoodClient {
     /// Fetches fundamental data (market cap, P/E ratio, dividend yield, etc.)
     /// for one or more ticker symbols.
     ///
+    /// Symbols are uppercased and stable-deduplicated into sequential requests
+    /// of at most 100 symbols. Results are reconstructed in caller order and
+    /// repeated for duplicate inputs when the API returns the corresponding
+    /// fundamental record.
+    ///
     /// # Errors
     ///
-    /// Returns an error if the HTTP request fails or the response cannot be
-    /// deserialized.
+    /// If a request chunk fails, returns [`RhoodError::RequestChunkFailed`]
+    /// with its one-based position and no partial results.
     pub async fn get_fundamentals(&self, symbols: &[&str]) -> Result<Vec<Fundamentals>> {
-        let joined_symbols = symbols
+        let requested = symbols
             .iter()
             .map(|symbol| symbol.to_uppercase())
-            .collect::<Vec<_>>()
-            .join(",");
-        let params = [("symbols", joined_symbols.as_str())];
-        let resp: ResultsResponse<Fundamentals> = self
-            .get_with_params(&self.api_url(paths::FUNDAMENTALS), &params)
-            .await?;
-        Ok(resp.results)
+            .collect::<Vec<_>>();
+        let chunks = plan_request_chunks(
+            "fundamentals",
+            &requested,
+            ChunkLimit::ItemCount(FUNDAMENTALS_ITEM_LIMIT),
+        )?;
+        let total_chunks = chunks.len();
+        let url = self.api_url(paths::FUNDAMENTALS);
+        let mut by_symbol = HashMap::with_capacity(requested.len());
+
+        for (index, chunk) in chunks.iter().enumerate() {
+            let joined = join_chunk(chunk);
+            let params = [("symbols", joined.as_str())];
+            let resp: ResultsResponse<Fundamentals> = self
+                .get_with_params(&url, &params)
+                .await
+                .map_err(|source| {
+                    chunk_failed(
+                        "fundamentals",
+                        index.saturating_add(1),
+                        total_chunks,
+                        source,
+                    )
+                })?;
+            for fundamental in resp.results {
+                let symbol = response_symbol("fundamentals", fundamental.symbol.as_deref(), chunk)
+                    .map_err(|source| {
+                        chunk_failed(
+                            "fundamentals",
+                            index.saturating_add(1),
+                            total_chunks,
+                            source,
+                        )
+                    })?;
+                by_symbol.entry(symbol).or_insert(fundamental);
+            }
+        }
+
+        Ok(requested
+            .iter()
+            .filter_map(|symbol| by_symbol.get(symbol).cloned())
+            .collect())
     }
 
     /// Fetches historical price data (OHLCV candles) for one or more symbols.
     ///
     /// The `opts` parameter controls the candle interval, time span, and
     /// session bounds. Extended and trading bounds are only valid with a
-    /// day span; other combinations return an error.
+    /// day span; other combinations return an error. Symbols are uppercased and
+    /// stable-deduplicated on the wire, and requests are split before the fully
+    /// encoded URL (including interval, span, and bounds) exceeds 4,096 bytes.
+    /// Candle groups retain caller symbol order and repeat for duplicate inputs.
     ///
     /// # Errors
     ///
     /// Returns [`RhoodError::InvalidParameter`] if extended or trading bounds
-    /// are used with a non-day span. Also returns an error on HTTP or
-    /// deserialization failures.
+    /// are used with a non-day span, or if one symbol cannot fit the URL limit.
+    /// A failed request chunk returns [`RhoodError::RequestChunkFailed`] with
+    /// its one-based position and no partial results.
     pub async fn get_stock_historicals(
         &self,
         symbols: &[&str],
         opts: &HistoricalOpts,
     ) -> Result<Vec<Candle>> {
+        if symbols.is_empty() {
+            return Ok(Vec::new());
+        }
         if matches!(
             opts.bounds,
             HistoricalBounds::Extended | HistoricalBounds::Trading
@@ -116,31 +228,72 @@ impl RobinhoodClient {
             ));
         }
 
-        let joined_symbols = symbols
+        let requested = symbols
             .iter()
             .map(|symbol| symbol.to_uppercase())
-            .collect::<Vec<_>>()
-            .join(",");
-        let params = [
-            ("symbols", joined_symbols.as_str()),
+            .collect::<Vec<_>>();
+        let url = self.api_url(paths::HISTORICALS);
+        let fixed_parameters = [
             ("interval", opts.interval.as_str()),
             ("span", opts.span.as_str()),
             ("bounds", opts.bounds.as_str()),
         ];
+        let chunks = plan_request_chunks(
+            "stock historicals",
+            &requested,
+            ChunkLimit::EncodedUrlBytes {
+                maximum: MARKET_DATA_URL_LIMIT,
+                url: &url,
+                parameter: "symbols",
+                fixed_parameters: &fixed_parameters,
+            },
+        )?;
+        let total_chunks = chunks.len();
+        let mut by_symbol: HashMap<String, Vec<Candle>> = HashMap::with_capacity(requested.len());
 
-        let resp: ResultsResponse<HistoricalsResult> = self
-            .get_with_params(&self.api_url(paths::HISTORICALS), &params)
-            .await?;
+        for (index, chunk) in chunks.iter().enumerate() {
+            let joined = join_chunk(chunk);
+            let params = [
+                ("symbols", joined.as_str()),
+                ("interval", opts.interval.as_str()),
+                ("span", opts.span.as_str()),
+                ("bounds", opts.bounds.as_str()),
+            ];
+            let resp: ResultsResponse<HistoricalsResult> = self
+                .get_with_params(&url, &params)
+                .await
+                .map_err(|source| {
+                    chunk_failed(
+                        "stock historicals",
+                        index.saturating_add(1),
+                        total_chunks,
+                        source,
+                    )
+                })?;
 
-        let mut candles = Vec::new();
-        for result in resp.results {
-            let symbol = result.symbol.unwrap_or_default();
-            for mut candle in result.historicals {
-                candle.symbol = Some(symbol.clone());
-                candles.push(candle);
+            for result in resp.results {
+                let symbol = response_symbol("stock historicals", result.symbol.as_deref(), chunk)
+                    .map_err(|source| {
+                        chunk_failed(
+                            "stock historicals",
+                            index.saturating_add(1),
+                            total_chunks,
+                            source,
+                        )
+                    })?;
+                let candles = by_symbol.entry(symbol.clone()).or_default();
+                candles.extend(result.historicals.into_iter().map(|mut candle| {
+                    candle.symbol = Some(symbol.clone());
+                    candle
+                }));
             }
         }
-        Ok(candles)
+
+        Ok(requested
+            .iter()
+            .filter_map(|symbol| by_symbol.get(symbol))
+            .flat_map(|candles| candles.iter().cloned())
+            .collect())
     }
 
     /// Looks up a Robinhood instrument by its ticker symbol.
@@ -331,7 +484,367 @@ impl RobinhoodClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::RhoodConfig;
     use crate::models::stock::{Fundamentals, Instrument, StockQuote};
+    use secrecy::SecretString;
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    async fn client_for_server(base_url: &str) -> (tempfile::TempDir, RobinhoodClient) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = RhoodConfig::default();
+        config.auth.token_cache_path = dir
+            .path()
+            .join("nonexistent-token.json")
+            .to_str()
+            .unwrap()
+            .to_string();
+        config.api.base_url = base_url.to_string();
+        let client = RobinhoodClient::with_config(config).unwrap();
+        client
+            .inject_test_auth(
+                SecretString::from("access-token"),
+                "Bearer".to_string(),
+                SecretString::from("refresh-token"),
+            )
+            .await;
+        (dir, client)
+    }
+
+    fn historical_opts() -> HistoricalOpts {
+        HistoricalOpts {
+            interval: HistoricalInterval::FiveMinute,
+            span: HistoricalSpan::Day,
+            bounds: HistoricalBounds::Regular,
+        }
+    }
+
+    #[tokio::test]
+    async fn quotes_preserve_caller_order_duplicates_and_omit_missing_symbols() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/quotes/"))
+            .and(query_param("symbols", "MSFT,AAPL,MISSING"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [
+                    {"symbol": "AAPL", "last_trade_price": "1"},
+                    {"symbol": "MSFT", "last_trade_price": "2"},
+                    {"symbol": null, "last_trade_price": "3"}
+                ]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server.uri()).await;
+
+        let quotes = client
+            .get_quotes(&["msft", "AAPL", "msft", "missing"])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            quotes
+                .iter()
+                .filter_map(|quote| quote.symbol.as_deref())
+                .collect::<Vec<_>>(),
+            ["MSFT", "AAPL", "MSFT"]
+        );
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn quotes_split_before_the_fully_encoded_url_exceeds_the_limit() {
+        let server = MockServer::start().await;
+        let first = format!("A{}", "A".repeat(2_399));
+        let second = format!("B{}", "B".repeat(2_399));
+        for symbol in [&first, &second] {
+            Mock::given(method("GET"))
+                .and(path("/quotes/"))
+                .and(query_param("symbols", symbol.as_str()))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "results": [{"symbol": symbol}]
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+        let (_dir, client) = client_for_server(&server.uri()).await;
+
+        let quotes = client
+            .get_quotes(&[first.as_str(), second.as_str()])
+            .await
+            .unwrap();
+
+        assert_eq!(quotes.len(), 2);
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.url.as_str().len() <= 4_096)
+        );
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn fundamentals_send_one_hundred_plus_one_and_restore_order() {
+        let server = MockServer::start().await;
+        let unique = (0..101)
+            .map(|index| format!("S{index:03}"))
+            .collect::<Vec<_>>();
+        let first_joined = unique[..100].join(",");
+        let second_joined = unique[100..].join(",");
+        let first_results = unique[..100]
+            .iter()
+            .rev()
+            .map(|symbol| serde_json::json!({"symbol": symbol}))
+            .collect::<Vec<_>>();
+        Mock::given(method("GET"))
+            .and(path("/fundamentals/"))
+            .and(query_param("symbols", first_joined))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"results": first_results})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/fundamentals/"))
+            .and(query_param("symbols", second_joined))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [{"symbol": unique[100]}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server.uri()).await;
+        let mut caller = unique.iter().map(String::as_str).collect::<Vec<_>>();
+        caller.push(unique[0].as_str());
+
+        let fundamentals = client.get_fundamentals(&caller).await.unwrap();
+
+        let actual = fundamentals
+            .iter()
+            .filter_map(|fundamental| fundamental.symbol.as_deref())
+            .collect::<Vec<_>>();
+        let expected = caller.to_vec();
+        assert_eq!(actual, expected);
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[0]
+                .url
+                .query_pairs()
+                .find(|(name, _)| name == "symbols")
+                .unwrap()
+                .1
+                .split(',')
+                .count(),
+            100
+        );
+        assert_eq!(
+            requests[1]
+                .url
+                .query_pairs()
+                .find(|(name, _)| name == "symbols")
+                .unwrap()
+                .1
+                .split(',')
+                .count(),
+            1
+        );
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn historicals_count_fixed_parameters_and_restore_duplicate_groups() {
+        let server = MockServer::start().await;
+        let first = format!("A{}", "A".repeat(2_399));
+        let second = format!("B{}", "B".repeat(2_399));
+        for (symbol, close) in [(&first, "1"), (&second, "2")] {
+            Mock::given(method("GET"))
+                .and(path("/quotes/historicals/"))
+                .and(query_param("symbols", symbol.as_str()))
+                .and(query_param("interval", "5minute"))
+                .and(query_param("span", "day"))
+                .and(query_param("bounds", "regular"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "results": [{
+                        "symbol": symbol,
+                        "historicals": [{"close_price": close}]
+                    }]
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+        let (_dir, client) = client_for_server(&server.uri()).await;
+
+        let candles = client
+            .get_stock_historicals(
+                &[second.as_str(), first.as_str(), second.as_str()],
+                &historical_opts(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            candles
+                .iter()
+                .filter_map(|candle| candle.close_price.as_deref())
+                .collect::<Vec<_>>(),
+            ["2", "1", "2"]
+        );
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.url.as_str().len() <= 4_096)
+        );
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn empty_market_data_inputs_make_no_http_requests() {
+        let server = MockServer::start().await;
+        let (_dir, client) = client_for_server(&server.uri()).await;
+        let invalid_empty_opts = HistoricalOpts {
+            interval: HistoricalInterval::FiveMinute,
+            span: HistoricalSpan::Week,
+            bounds: HistoricalBounds::Extended,
+        };
+
+        assert!(client.get_quotes(&[]).await.unwrap().is_empty());
+        assert!(client.get_fundamentals(&[]).await.unwrap().is_empty());
+        assert!(
+            client
+                .get_stock_historicals(&[], &historical_opts())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            client
+                .get_stock_historicals(&[], &invalid_empty_opts)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn fundamentals_without_a_requested_symbol_fail_the_whole_call() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/fundamentals/"))
+            .and(query_param("symbols", "AAPL"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [{}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server.uri()).await;
+
+        let error = client.get_fundamentals(&["AAPL"]).await.unwrap_err();
+
+        assert!(matches!(
+            error,
+            RhoodError::RequestChunkFailed { source, .. }
+                if matches!(*source, RhoodError::InvalidMarketDataResponse { .. })
+        ));
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn historicals_without_a_requested_symbol_fail_the_whole_call() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/quotes/historicals/"))
+            .and(query_param("symbols", "AAPL"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [{"historicals": [{"close_price": "1"}]}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server.uri()).await;
+
+        let error = client
+            .get_stock_historicals(&["AAPL"], &historical_opts())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            RhoodError::RequestChunkFailed { source, .. }
+                if matches!(*source, RhoodError::InvalidMarketDataResponse { .. })
+        ));
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn oversized_quote_input_fails_before_http_without_echoing_the_value() {
+        let server = MockServer::start().await;
+        let (_dir, client) = client_for_server(&server.uri()).await;
+        let oversized = "S".repeat(5_000);
+
+        let error = client.get_quotes(&[oversized.as_str()]).await.unwrap_err();
+
+        assert!(matches!(error, RhoodError::InvalidParameter(_)));
+        assert!(error.to_string().contains("quotes"));
+        assert!(error.to_string().contains("ordinal 1"));
+        assert!(!error.to_string().contains(&oversized));
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_later_failed_chunk_stops_the_call_and_returns_chunk_context() {
+        let server = MockServer::start().await;
+        let symbols = (0..201)
+            .map(|index| format!("S{index:03}"))
+            .collect::<Vec<_>>();
+        Mock::given(method("GET"))
+            .and(path("/fundamentals/"))
+            .and(query_param("symbols", symbols[..100].join(",")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": []
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/fundamentals/"))
+            .and(query_param("symbols", symbols[100..200].join(",")))
+            .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "9"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server.uri()).await;
+        let caller = symbols.iter().map(String::as_str).collect::<Vec<_>>();
+
+        let error = client.get_fundamentals(&caller).await.unwrap_err();
+
+        match error {
+            RhoodError::RequestChunkFailed {
+                endpoint,
+                chunk_index,
+                total_chunks,
+                source,
+            } => {
+                assert_eq!(endpoint, "fundamentals");
+                assert_eq!(chunk_index, 2);
+                assert_eq!(total_chunks, 3);
+                assert!(matches!(*source, RhoodError::RateLimited { .. }));
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
+        server.verify().await;
+    }
 
     #[test]
     fn historical_bounds_validation_extended_with_week_span() {

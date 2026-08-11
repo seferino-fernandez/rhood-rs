@@ -1,12 +1,17 @@
+use std::collections::HashMap;
+
 use crate::api::paths;
 use crate::client::RobinhoodClient;
 use crate::endpoints::account::validate_account_number;
+use crate::endpoints::request_batch::{ChunkLimit, chunk_failed, plan_request_chunks};
 use crate::models::option::*;
 use crate::pagination::ResultsResponse;
 use crate::{Result, RhoodError};
 
 /// Index symbols supported for index options trading.
 pub const INDEX_SYMBOLS: &[&str] = &["SPX", "NDX", "VIX", "RUT", "XSP"];
+
+const OPTION_MARKET_DATA_ITEM_LIMIT: usize = 17;
 
 /// Maps an index symbol to the chain symbol used for weekly option contract lookups.
 ///
@@ -116,14 +121,18 @@ impl RobinhoodClient {
     ///
     /// Resolves each [`OptionContractSpec`] to its instrument URL via
     /// [`find_options`](Self::find_options), then fetches bid/ask, Greeks,
-    /// volume, open interest, and probability data in a single batched request
-    /// to `/marketdata/options/`.
+    /// volume, open interest, and probability data from
+    /// `/marketdata/options/`. Resolved URLs are stable-deduplicated into
+    /// sequential requests of at most 17 URLs, then results are reconstructed
+    /// in contract order with duplicate cardinality preserved.
     ///
     /// # Errors
     ///
     /// Returns [`RhoodError::InvalidParameter`] if any contract spec does not
-    /// match an active option instrument. Also returns an error on HTTP or
-    /// deserialization failures.
+    /// match an active option instrument or if any resolved contract lacks a
+    /// market-data record. A failed market-data chunk returns
+    /// [`RhoodError::RequestChunkFailed`] with its one-based position and no
+    /// partial results.
     pub async fn get_option_market_data(
         &self,
         symbol: &str,
@@ -168,35 +177,79 @@ impl RobinhoodClient {
             instrument_urls.push(url);
         }
 
-        self.get_option_market_data_by_instrument_urls(&instrument_urls)
-            .await
+        let results = self
+            .get_option_market_data_by_instrument_urls(&instrument_urls)
+            .await?;
+        for (index, instrument_url) in instrument_urls.iter().enumerate() {
+            if !results
+                .iter()
+                .any(|result| result.instrument.as_deref() == Some(instrument_url.as_str()))
+            {
+                return Err(RhoodError::InvalidParameter(format!(
+                    "option market data is missing for contract at input ordinal {}",
+                    index.saturating_add(1)
+                )));
+            }
+        }
+        Ok(results)
     }
 
     /// Fetches live market data for option instrument URLs.
     ///
     /// Sends the supplied URLs directly to `/marketdata/options/` without
-    /// performing option-instrument discovery. Results are identified by their
-    /// existing [`OptionMarketData::instrument`] field; their order is not
-    /// guaranteed to match the input order.
+    /// performing option-instrument discovery. URLs are stable-deduplicated
+    /// into sequential requests of at most 17, with the joined value encoded
+    /// exactly once. Results follow caller order and repeat for duplicate input
+    /// URLs; missing records are omitted.
     ///
     /// # Errors
     ///
-    /// Returns an error if the HTTP request fails or the response cannot be
-    /// deserialized.
+    /// If a request chunk fails, returns [`RhoodError::RequestChunkFailed`]
+    /// with its one-based position and no partial results.
     pub async fn get_option_market_data_by_instrument_urls(
         &self,
         instrument_urls: &[String],
     ) -> Result<Vec<OptionMarketData>> {
-        if instrument_urls.is_empty() {
-            return Ok(Vec::new());
+        let chunks = plan_request_chunks(
+            "option market data",
+            instrument_urls,
+            ChunkLimit::ItemCount(OPTION_MARKET_DATA_ITEM_LIMIT),
+        )?;
+        let total_chunks = chunks.len();
+        let url = self.api_url(paths::OPTION_MARKET_DATA);
+        let mut by_instrument = HashMap::with_capacity(instrument_urls.len());
+
+        for (index, chunk) in chunks.iter().enumerate() {
+            let joined_instruments = chunk
+                .iter()
+                .map(|input| input.value.as_str())
+                .collect::<Vec<_>>()
+                .join(",");
+            let params = [("instruments", joined_instruments.as_str())];
+            let resp: ResultsResponse<OptionMarketData> = self
+                .get_with_params(&url, &params)
+                .await
+                .map_err(|source| {
+                    chunk_failed(
+                        "option market data",
+                        index.saturating_add(1),
+                        total_chunks,
+                        source,
+                    )
+                })?;
+            for market_data in resp.results {
+                if let Some(instrument) = market_data.instrument.as_ref() {
+                    by_instrument
+                        .entry(instrument.clone())
+                        .or_insert(market_data);
+                }
+            }
         }
 
-        let joined_instruments = instrument_urls.join(",");
-        let params = [("instruments", joined_instruments.as_str())];
-        let resp: ResultsResponse<OptionMarketData> = self
-            .get_with_params(&self.api_url(paths::OPTION_MARKET_DATA), &params)
-            .await?;
-        Ok(resp.results)
+        Ok(instrument_urls
+            .iter()
+            .filter_map(|instrument| by_instrument.get(instrument).cloned())
+            .collect())
     }
 
     /// Fetches the option chain for an index symbol (e.g., "SPX").
@@ -448,6 +501,151 @@ mod tests {
         let requests = server.received_requests().await.unwrap();
         assert_eq!(requests.len(), 1, "URL mode must make exactly one request");
         assert_eq!(requests[0].url.path(), "/marketdata/options/");
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn option_market_data_sends_seventeen_plus_one_and_restores_order_and_duplicates() {
+        let server = MockServer::start().await;
+        let unique = (0..18)
+            .map(|index| {
+                format!("https://api.robinhood.com/options/instruments/option-{index:02}/")
+            })
+            .collect::<Vec<_>>();
+        let first_results = unique[..17]
+            .iter()
+            .rev()
+            .map(|instrument| {
+                serde_json::json!({
+                    "instrument": instrument,
+                    "instrument_id": instrument.trim_end_matches('/').rsplit('/').next()
+                })
+            })
+            .collect::<Vec<_>>();
+        Mock::given(method("GET"))
+            .and(path("/marketdata/options/"))
+            .and(query_param("instruments", unique[..17].join(",")))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"results": first_results})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/marketdata/options/"))
+            .and(query_param("instruments", unique[17].as_str()))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [{
+                    "instrument": unique[17],
+                    "instrument_id": "option-17"
+                }]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server.uri()).await;
+        let mut caller = unique.clone();
+        caller.push(unique[0].clone());
+
+        let results = client
+            .get_option_market_data_by_instrument_urls(&caller)
+            .await
+            .unwrap();
+
+        assert_eq!(results.len(), 19);
+        assert_eq!(
+            results
+                .iter()
+                .filter_map(|result| result.instrument.as_ref())
+                .collect::<Vec<_>>(),
+            caller.iter().collect::<Vec<_>>()
+        );
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 2);
+        let decoded = requests
+            .iter()
+            .map(|request| {
+                request
+                    .url
+                    .query_pairs()
+                    .find(|(name, _)| name == "instruments")
+                    .unwrap()
+                    .1
+                    .into_owned()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(decoded, [unique[..17].join(","), unique[17].clone()]);
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn option_market_data_empty_urls_make_no_http_request() {
+        let server = MockServer::start().await;
+        let (_dir, client) = client_for_server(&server.uri()).await;
+
+        assert!(
+            client
+                .get_option_market_data_by_instrument_urls(&[])
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn contract_market_data_fails_when_a_resolved_contract_has_no_result() {
+        let server = MockServer::start().await;
+        mount_equity_option_lookup(&server).await;
+        let instrument_url = "https://api.robinhood.com/options/instruments/missing-market-data/";
+        Mock::given(method("GET"))
+            .and(path("/options/instruments/"))
+            .and(query_param("chain_id", "chain-aapl"))
+            .and(query_param("expiration_dates", "2026-06-18"))
+            .and(query_param("type", "call"))
+            .and(query_param("state", "active"))
+            .and(query_param("strike_price", "310.0000"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [{
+                    "chain_id": "chain-aapl",
+                    "chain_symbol": "AAPL",
+                    "expiration_date": "2026-06-18",
+                    "id": "call-310",
+                    "state": "active",
+                    "strike_price": "310.0000",
+                    "type": "call",
+                    "url": instrument_url
+                }],
+                "next": null,
+                "previous": null
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/marketdata/options/"))
+            .and(query_param("instruments", instrument_url))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": []
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server.uri()).await;
+        let contracts = [OptionContractSpec {
+            strike_price: "310.0000",
+            expiration_date: "2026-06-18",
+            option_type: "call",
+        }];
+
+        let error = client
+            .get_option_market_data("AAPL", &contracts)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, RhoodError::InvalidParameter(_)));
+        assert!(error.to_string().contains("input ordinal 1"));
         server.verify().await;
     }
 

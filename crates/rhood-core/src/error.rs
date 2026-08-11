@@ -179,6 +179,29 @@ pub enum RhoodError {
     #[error("Invalid parameter: {0}")]
     InvalidParameter(String),
 
+    /// One request in an endpoint-managed sequence of chunks failed.
+    #[error("{endpoint} request chunk {chunk_index} of {total_chunks} failed: {source}")]
+    RequestChunkFailed {
+        /// Endpoint whose batched request failed.
+        endpoint: String,
+        /// One-based index of the failed chunk.
+        chunk_index: usize,
+        /// Total number of planned chunks.
+        total_chunks: usize,
+        /// Underlying transport, API, or deserialization failure.
+        #[source]
+        source: Box<RhoodError>,
+    },
+
+    /// A market-data response could not be associated with the requested input safely.
+    #[error("Invalid {endpoint} response: {message}")]
+    InvalidMarketDataResponse {
+        /// Endpoint whose response violated the association contract.
+        endpoint: String,
+        /// Stable local diagnostic that does not echo untrusted response content.
+        message: String,
+    },
+
     /// A write operation was attempted while the client is in read-only mode.
     #[error("Operation blocked, client is in read-only mode")]
     ReadOnlyMode,
