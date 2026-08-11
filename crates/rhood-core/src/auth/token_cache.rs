@@ -72,6 +72,13 @@ impl std::fmt::Debug for CachedToken {
     }
 }
 
+impl CachedToken {
+    pub(crate) fn access_token_is_expired_at(&self, unix_timestamp: i64) -> bool {
+        self.expires_at
+            .is_some_and(|expires_at| unix_timestamp >= expires_at)
+    }
+}
+
 /// Manages reading and writing [`CachedToken`] values to a JSON file on disk.
 ///
 /// On Unix systems, the token file is created with mode `0600` (owner read/write only).
@@ -88,10 +95,9 @@ impl TokenCache {
 
     /// Loads a cached token from disk.
     ///
-    /// Returns `None` if the file does not exist, contains malformed or unrecognized
-    /// JSON, or holds an expired token. A corrupt cache is treated the same as an
-    /// absent one so the caller can prompt the user to log in again rather than
-    /// surfacing a raw deserialization error.
+    /// Returns `None` if the file does not exist or contains malformed or unrecognized
+    /// JSON. A corrupt cache is removed and treated as absent so the caller can prompt
+    /// the user to log in again rather than surfacing a raw deserialization error.
     ///
     /// # Errors
     ///
@@ -113,17 +119,11 @@ impl TokenCache {
                     "Token cache is corrupt or unrecognized so treating as absent; \
                      run `rhood login` to create a fresh session"
                 );
+                self.clear()?;
                 return Ok(None);
             }
         };
-        let token = CachedToken::from(on_disk);
-        if let Some(exp) = token.expires_at
-            && chrono::Utc::now().timestamp() >= exp
-        {
-            self.clear()?;
-            return Ok(None);
-        }
-        Ok(Some(token))
+        Ok(Some(CachedToken::from(on_disk)))
     }
 
     /// Serializes and writes the given token to disk with restricted file permissions.
@@ -195,10 +195,11 @@ impl TokenCache {
 
     /// Deletes the cached token file from disk, if it exists.
     pub fn clear(&self) -> Result<()> {
-        if self.path.exists() {
-            std::fs::remove_file(&self.path)?;
+        match std::fs::remove_file(&self.path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
         }
-        Ok(())
     }
 }
 
@@ -237,7 +238,7 @@ mod tests {
     fn save_atomically_replaces_existing_cache() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("token.json");
-        let cache = TokenCache::with_path(path);
+        let cache = TokenCache::with_path(path.clone());
 
         cache.save(&make_token("old", None)).unwrap();
         cache.save(&make_token("new", None)).unwrap();
@@ -264,13 +265,19 @@ mod tests {
     }
 
     #[test]
-    fn expired_token_returns_none() {
+    fn expired_access_token_loads_with_recovery_credentials_intact() {
         let dir = tempfile::tempdir().unwrap();
-        let cache = TokenCache::with_path(dir.path().join("token.json"));
+        let path = dir.path().join("token.json");
+        let cache = TokenCache::with_path(path.clone());
 
         let token = make_token("old", Some(0));
         cache.save(&token).unwrap();
-        assert!(cache.load().unwrap().is_none());
+        let loaded = cache.load().unwrap().unwrap();
+
+        assert!(loaded.access_token_is_expired_at(1));
+        assert_eq!(loaded.refresh_token.expose_secret(), "ref");
+        assert_eq!(loaded.device_token, "dev");
+        assert!(path.exists());
     }
 
     #[test]
@@ -281,13 +288,14 @@ mod tests {
         std::fs::write(&path, b"{\"not_a_token\": true}").unwrap();
         #[cfg(unix)]
         set_mode(&path, 0o600);
-        let cache = TokenCache::with_path(path);
+        let cache = TokenCache::with_path(path.clone());
         // A corrupt cache should be treated as absent, not as a hard error.
         let result = cache.load().unwrap();
         assert!(
             result.is_none(),
             "expected None for corrupt cache, got Some"
         );
+        assert!(!path.exists(), "corrupt cache should be removed");
     }
 
     #[test]
@@ -297,8 +305,31 @@ mod tests {
         std::fs::write(&path, b"this is not json at all!!!").unwrap();
         #[cfg(unix)]
         set_mode(&path, 0o600);
-        let cache = TokenCache::with_path(path);
+        let cache = TokenCache::with_path(path.clone());
         assert!(cache.load().unwrap().is_none());
+        assert!(!path.exists(), "corrupt cache should be removed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn corrupt_cache_cleanup_failure_is_propagated() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("token.json");
+        std::fs::write(&path, b"not-json").unwrap();
+        set_mode(&path, 0o600);
+        set_mode(dir.path(), 0o500);
+        let cache = TokenCache::with_path(path.clone());
+
+        let result = cache.load();
+
+        set_mode(dir.path(), 0o700);
+        let error = result.unwrap_err();
+        assert!(matches!(
+            error,
+            crate::RhoodError::Io(ref source)
+                if source.kind() == std::io::ErrorKind::PermissionDenied
+        ));
+        assert!(path.exists());
     }
 
     #[cfg(unix)]
