@@ -4,7 +4,88 @@ use crate::models::account::*;
 use crate::pagination::ResultsResponse;
 use crate::{Result, RhoodError};
 
+pub(crate) fn validate_account_number(account_number: &str) -> Result<()> {
+    if account_number.is_empty()
+        || !account_number
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric())
+    {
+        return Err(RhoodError::InvalidParameter(
+            "account_number must contain only ASCII letters and digits".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 impl RobinhoodClient {
+    /// Discovers every brokerage account, including IRA accounts.
+    ///
+    /// The Bonfire response is intentionally modeled as a tolerant descriptor.
+    /// Call [`resolve_account`](Self::resolve_account) before an
+    /// account-sensitive operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the HTTP request fails or the response cannot be
+    /// deserialized.
+    pub async fn get_accounts(&self) -> Result<Vec<AccountDescriptor>> {
+        let response: ResultsResponse<AccountDescriptor> =
+            self.get(&self.bonfire_url(paths::UNIFIED_ACCOUNTS)).await?;
+        Ok(response.results)
+    }
+
+    /// Resolves an optional canonical account number against fresh discovery.
+    ///
+    /// When `account_number` is omitted, resolution succeeds only when exactly
+    /// one discovered account has a non-empty canonical number. An explicit
+    /// number must match exactly one discovered account.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RhoodError::InvalidParameter`], [`RhoodError::NoEligibleAccount`],
+    /// [`RhoodError::UnknownAccount`], [`RhoodError::AmbiguousAccount`], or
+    /// [`RhoodError::InvalidAccountResponse`] when selection cannot produce one
+    /// unambiguous account. Also returns transport and deserialization errors.
+    pub async fn resolve_account(&self, account_number: Option<&str>) -> Result<AccountDescriptor> {
+        if let Some(requested) = account_number {
+            validate_account_number(requested)?;
+        }
+        let accounts = self.get_accounts().await?;
+        let eligible: Vec<AccountDescriptor> = accounts
+            .into_iter()
+            .filter(|account| account.canonical_account_number().is_some())
+            .collect();
+
+        if let Some(requested) = account_number {
+            let mut matches = eligible.into_iter().filter(|account| {
+                account
+                    .canonical_account_number()
+                    .is_some_and(|number| number == requested)
+            });
+            let selected = matches.next().ok_or_else(|| RhoodError::UnknownAccount {
+                account: mask_account_number(requested),
+            })?;
+            if matches.next().is_some() {
+                return Err(RhoodError::InvalidAccountResponse(
+                    "duplicate canonical account numbers".to_string(),
+                ));
+            }
+            return Ok(selected);
+        }
+
+        match eligible.as_slice() {
+            [] => Err(RhoodError::NoEligibleAccount),
+            [selected] => Ok(selected.clone()),
+            _ => Err(RhoodError::AmbiguousAccount {
+                choices: eligible
+                    .iter()
+                    .map(AccountDescriptor::selection_label)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            }),
+        }
+    }
+
     /// Fetches the unified account summary.
     ///
     /// Returns a comprehensive snapshot including buying power, equity,
@@ -12,12 +93,11 @@ impl RobinhoodClient {
     ///
     /// # Errors
     ///
-    /// Returns [`RhoodError::NotAuthenticated`] if the account number
-    /// cannot be determined. Also returns an error on HTTP or
-    /// deserialization failures.
-    pub async fn get_account_summary(&self) -> Result<AccountSummary> {
-        let profile = self.get_account_profile().await?;
-        let account_number = profile.account_number.ok_or(RhoodError::NotAuthenticated)?;
+    /// Returns [`RhoodError::InvalidParameter`] if the account number is not a
+    /// canonical selector. Also returns an error on HTTP or deserialization
+    /// failures.
+    pub async fn get_account_summary(&self, account_number: &str) -> Result<AccountSummary> {
+        validate_account_number(account_number)?;
         let url = format!(
             "{}/accounts/{}{}",
             self.config().api.bonfire_url,
@@ -33,19 +113,13 @@ impl RobinhoodClient {
     ///
     /// # Errors
     ///
-    /// Returns [`RhoodError::NotAuthenticated`] if no account is found.
-    /// Also returns an error on HTTP or deserialization failures.
-    pub async fn get_account_profile(&self) -> Result<AccountProfile> {
-        let resp: ResultsResponse<AccountProfile> = self
-            .get_with_params(
-                &self.api_url(paths::ACCOUNTS),
-                &[("default_to_all_accounts", "true")],
-            )
-            .await?;
-        resp.results
-            .into_iter()
-            .next()
-            .ok_or(RhoodError::NotAuthenticated)
+    /// Returns [`RhoodError::InvalidParameter`] if the account number is not a
+    /// canonical selector. Also returns an error on HTTP or deserialization
+    /// failures.
+    pub async fn get_account_profile(&self, account_number: &str) -> Result<AccountProfile> {
+        validate_account_number(account_number)?;
+        let url = format!("{}{account_number}/", self.api_url(paths::ACCOUNTS));
+        self.get(&url).await
     }
 
     /// Fetches the portfolio profile containing equity, market value, and
@@ -53,15 +127,13 @@ impl RobinhoodClient {
     ///
     /// # Errors
     ///
-    /// Returns [`RhoodError::NotAuthenticated`] if no portfolio is found.
-    /// Also returns an error on HTTP or deserialization failures.
-    pub async fn get_portfolio(&self) -> Result<PortfolioProfile> {
-        let resp: ResultsResponse<PortfolioProfile> =
-            self.get(&self.api_url(paths::PORTFOLIOS)).await?;
-        resp.results
-            .into_iter()
-            .next()
-            .ok_or(RhoodError::NotAuthenticated)
+    /// Returns [`RhoodError::InvalidParameter`] if the account number is not a
+    /// canonical selector. Also returns an error on HTTP or deserialization
+    /// failures.
+    pub async fn get_portfolio(&self, account_number: &str) -> Result<PortfolioProfile> {
+        validate_account_number(account_number)?;
+        let url = format!("{}{account_number}/", self.api_url(paths::PORTFOLIOS));
+        self.get(&url).await
     }
 
     /// Fetches all stock positions with a non-zero quantity.
@@ -69,7 +141,7 @@ impl RobinhoodClient {
     /// Excludes positions that have been fully closed (quantity of zero).
     ///
     /// Instrument URLs are resolved to ticker symbols on a best-effort basis
-    /// via [`enrich_position_symbols`]; any failure, including a failure of
+    /// via [`Self::enrich_position_symbols`]; any failure, including a failure of
     /// the batched symbol-resolution request, is silently ignored so that the
     /// caller always receives the raw positions.
     ///
@@ -77,9 +149,13 @@ impl RobinhoodClient {
     ///
     /// Returns an error if the HTTP request fails or the response cannot be
     /// deserialized.
-    pub async fn get_positions(&self) -> Result<Vec<Position>> {
+    pub async fn get_positions(&self, account_number: &str) -> Result<Vec<Position>> {
+        validate_account_number(account_number)?;
         let mut positions: Vec<Position> = self
-            .get_paginated(&self.api_url(paths::POSITIONS), &[("nonzero", "true")])
+            .get_paginated(
+                &self.api_url(paths::POSITIONS),
+                &[("account_number", account_number), ("nonzero", "true")],
+            )
             .await?;
         #[expect(
             clippy::let_underscore_must_use,
@@ -92,7 +168,7 @@ impl RobinhoodClient {
     /// Fetches all stock positions, including those with a zero quantity.
     ///
     /// Instrument URLs are resolved to ticker symbols on a best-effort basis
-    /// via [`enrich_position_symbols`]; any failure, including a failure of
+    /// via [`Self::enrich_position_symbols`]; any failure, including a failure of
     /// the batched symbol-resolution request, is silently ignored so that the
     /// caller always receives the raw positions.
     ///
@@ -100,9 +176,13 @@ impl RobinhoodClient {
     ///
     /// Returns an error if the HTTP request fails or the response cannot be
     /// deserialized.
-    pub async fn get_all_positions(&self) -> Result<Vec<Position>> {
+    pub async fn get_all_positions(&self, account_number: &str) -> Result<Vec<Position>> {
+        validate_account_number(account_number)?;
         let mut positions: Vec<Position> = self
-            .get_paginated(&self.api_url(paths::POSITIONS), &[])
+            .get_paginated(
+                &self.api_url(paths::POSITIONS),
+                &[("account_number", account_number)],
+            )
             .await?;
         #[expect(
             clippy::let_underscore_must_use,
@@ -393,5 +473,188 @@ mod tests {
         assert_eq!(margin.is_pdt_forever, Some(false));
         let eligibility = account.instant_eligibility.unwrap();
         assert_eq!(eligibility.state.as_deref(), Some("ok"));
+    }
+}
+
+#[cfg(test)]
+mod endpoint_tests {
+    use crate::RhoodError;
+    use crate::client::RobinhoodClient;
+    use crate::config::RhoodConfig;
+    use secrecy::SecretString;
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    async fn client_for_server(server: &MockServer) -> (tempfile::TempDir, RobinhoodClient) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = RhoodConfig::default();
+        config.auth.token_cache_path = dir
+            .path()
+            .join("nonexistent-token.json")
+            .to_string_lossy()
+            .into_owned();
+        config.api.base_url = server.uri();
+        config.api.phoenix_url = server.uri();
+        config.api.bonfire_url = server.uri();
+        let client = RobinhoodClient::with_config(config).unwrap();
+        client
+            .inject_test_auth(
+                SecretString::from("access-token"),
+                "Bearer".to_string(),
+                SecretString::from("refresh-token"),
+            )
+            .await;
+        (dir, client)
+    }
+
+    async fn mount_accounts(server: &MockServer, accounts: serde_json::Value) {
+        Mock::given(method("GET"))
+            .and(path("/accounts/unified/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": accounts
+            })))
+            .expect(1)
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn get_accounts_uses_bonfire_discovery_and_preserves_unknown_fields() {
+        let server = MockServer::start().await;
+        mount_accounts(
+            &server,
+            serde_json::json!([{
+                "account_number": "ABC123",
+                "rhs_account_number": 987,
+                "brokerage_account_type": "individual",
+                "equities": {"rhs_account_number": "equity-route"},
+                "future_field": "retained"
+            }]),
+        )
+        .await;
+        let (_dir, client) = client_for_server(&server).await;
+
+        let accounts = client.get_accounts().await.unwrap();
+
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].canonical_account_number(), Some("ABC123"));
+        assert_eq!(
+            accounts[0].additional_fields.get("future_field"),
+            Some(&serde_json::json!("retained"))
+        );
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn resolve_account_auto_selects_only_account_and_matches_explicit_account() {
+        for requested in [None, Some("IRA456")] {
+            let server = MockServer::start().await;
+            mount_accounts(
+                &server,
+                serde_json::json!([{
+                    "account_number": "IRA456",
+                    "brokerage_account_type": "ira_roth"
+                }]),
+            )
+            .await;
+            let (_dir, client) = client_for_server(&server).await;
+
+            let selected = client.resolve_account(requested).await.unwrap();
+
+            assert_eq!(selected.canonical_account_number(), Some("IRA456"));
+            server.verify().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_account_fails_closed_for_none_unknown_multiple_and_duplicates() {
+        let cases = [
+            (
+                serde_json::json!([]),
+                None,
+                "no eligible brokerage account was found",
+            ),
+            (
+                serde_json::json!([{"account_number": "ABC123"}]),
+                Some("ZZZ999"),
+                "unknown brokerage account",
+            ),
+            (
+                serde_json::json!([
+                    {"account_number": "ABC123", "brokerage_account_type": "individual"},
+                    {"account_number": "IRA456", "brokerage_account_type": "ira_roth"}
+                ]),
+                None,
+                "multiple brokerage accounts",
+            ),
+            (
+                serde_json::json!([
+                    {"account_number": "ABC123"},
+                    {"account_number": "ABC123"}
+                ]),
+                Some("ABC123"),
+                "invalid unified account response: duplicate canonical account numbers",
+            ),
+        ];
+
+        for (accounts, requested, expected) in cases {
+            let server = MockServer::start().await;
+            mount_accounts(&server, accounts).await;
+            let (_dir, client) = client_for_server(&server).await;
+
+            let error = client.resolve_account(requested).await.unwrap_err();
+
+            assert!(
+                error.to_string().to_ascii_lowercase().contains(expected),
+                "got: {error}"
+            );
+            if let RhoodError::UnknownAccount { account } = error {
+                assert_eq!(account, "****Z999");
+            }
+            server.verify().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn account_reads_use_selected_paths_and_position_filters() {
+        let server = MockServer::start().await;
+        for endpoint in [
+            "/accounts/ABC123/",
+            "/portfolios/ABC123/",
+            "/accounts/ABC123/unified/",
+        ] {
+            Mock::given(method("GET"))
+                .and(path(endpoint))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+        Mock::given(method("GET"))
+            .and(path("/positions/"))
+            .and(query_param("account_number", "ABC123"))
+            .and(query_param("nonzero", "true"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [],
+                "next": null
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server).await;
+
+        client.get_account_profile("ABC123").await.unwrap();
+        client.get_portfolio("ABC123").await.unwrap();
+        client.get_account_summary("ABC123").await.unwrap();
+        assert!(client.get_positions("ABC123").await.unwrap().is_empty());
+        server.verify().await;
+    }
+
+    #[test]
+    fn account_number_rejects_path_and_query_injection() {
+        for invalid in ["", "ABC-123", "../ABC123", "ABC123?all=true"] {
+            let error = super::validate_account_number(invalid).unwrap_err();
+            assert!(matches!(error, RhoodError::InvalidParameter(_)));
+        }
     }
 }

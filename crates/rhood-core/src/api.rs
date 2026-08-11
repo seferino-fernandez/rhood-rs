@@ -26,6 +26,8 @@ pub mod paths {
     pub const ACCOUNT_SUMMARY_SUFFIX: &str = "/unified/";
     /// Account listing endpoint.
     pub const ACCOUNTS: &str = "/accounts/";
+    /// Bonfire endpoint that discovers every brokerage account, including IRAs.
+    pub const UNIFIED_ACCOUNTS: &str = "/accounts/unified/";
     /// Stock positions endpoint.
     pub const POSITIONS: &str = "/positions/";
     /// Portfolio summary endpoint.
@@ -144,6 +146,7 @@ mod tests {
             paths::CHALLENGE,
             paths::ACCOUNT_SUMMARY_SUFFIX,
             paths::ACCOUNTS,
+            paths::UNIFIED_ACCOUNTS,
             paths::POSITIONS,
             paths::PORTFOLIOS,
             paths::QUOTES,

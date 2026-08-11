@@ -3,9 +3,89 @@
 //! Contains structs representing user account profiles, portfolio summaries,
 //! unified account summary data, and individual stock positions.
 
+use std::collections::BTreeMap;
+use std::fmt;
+
 use serde::{Deserialize, Serialize};
 
 use super::dividend::MoneyAmount;
+
+/// A tolerant account record returned by Bonfire unified-account discovery.
+///
+/// Robinhood does not publish this response schema. Only a non-empty
+/// [`account_number`](Self::account_number) is used for account selection;
+/// every other field is informational and may be absent or change shape.
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct AccountDescriptor {
+    /// Canonical account number used by account-specific brokerage endpoints.
+    pub account_number: Option<String>,
+    /// Robinhood Securities account identifier in its upstream-provided shape.
+    pub rhs_account_number: Option<serde_json::Value>,
+    /// Brokerage account classification, such as `individual` or `ira_roth`.
+    pub brokerage_account_type: Option<String>,
+    /// Account-specific equities metadata retained without assuming its schema.
+    pub equities: Option<serde_json::Value>,
+    /// Additional fields retained for forward compatibility.
+    #[serde(default, flatten)]
+    pub additional_fields: BTreeMap<String, serde_json::Value>,
+}
+
+impl AccountDescriptor {
+    /// Returns the canonical account number when it is present and non-empty.
+    #[must_use]
+    pub fn canonical_account_number(&self) -> Option<&str> {
+        self.account_number
+            .as_deref()
+            .filter(|number| !number.is_empty())
+    }
+
+    /// Returns a safe human-facing label with a masked account number.
+    #[must_use]
+    pub fn selection_label(&self) -> String {
+        let account_type = self
+            .brokerage_account_type
+            .as_deref()
+            .map(sanitize_account_label)
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "account".to_string());
+        let number = self
+            .canonical_account_number()
+            .map(mask_account_number)
+            .unwrap_or_else(|| "unknown".to_string());
+        format!("{account_type} {number}")
+    }
+}
+
+impl fmt::Debug for AccountDescriptor {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AccountDescriptor")
+            .field("account", &self.selection_label())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Masks an account number, retaining only its final four characters.
+#[must_use]
+pub fn mask_account_number(account_number: &str) -> String {
+    let suffix: String = account_number
+        .chars()
+        .rev()
+        .take(4)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("****{suffix}")
+}
+
+fn sanitize_account_label(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(48)
+        .collect()
+}
 
 /// Represents a Robinhood brokerage account profile.
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -12,6 +12,8 @@ Powers the [`rhood-cli`](https://github.com/seferino-fernandez/rhood-rs/tree/mai
 - Endpoint coverage for stocks, options, futures, indices, orders, account, watchlists, recurring investments, dividends, transfers, and research.
 - Typed error model (`RhoodError`) covering challenges, rate limits, read-only mode, and API errors.
 - Configuration via TOML files, environment variables, or programmatic construction.
+- Unified brokerage account discovery with fail-closed explicit selection for multi-account and IRA users.
+- Two-step stock order preparation and submission with exact confirmation data, a 60-second lifetime, no redirects, and no automatic retries.
 
 ## Configuration and Safety
 
@@ -36,9 +38,18 @@ let quotes = client.get_quotes(&["AAPL", "TSLA"]).await?;
 for quote in quotes {
     println!("{:?}: {:?}", quote.symbol, quote.last_trade_price);
 }
+
+let accounts = client.get_accounts().await?;
+println!("accounts: {}", accounts.len());
+let selected = client.resolve_account(None).await?;
+println!("selected: {}", selected.selection_label());
 # Ok(())
 # }
 ```
+
+Account-sensitive methods require a canonical account number. `resolve_account(None)` succeeds only when discovery returns exactly one usable account; otherwise pass a number returned by `get_accounts`.
+
+Interactive stock-order callers should call `prepare_stock_order`, show `PreparedStockOrder::preview`, and then consume the preparation with `submit_prepared_stock_order`. Immediate market orders require positive bid and ask quotes. Dollar buys are converted to an estimated fractional quantity and are not broker-native notional orders. If submission is uncertain, use the returned client reference to reconcile open and recent orders before deciding whether to retry.
 
 See the [API documentation](https://docs.rs/rhood-core) for the full reference.
 

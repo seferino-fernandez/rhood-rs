@@ -26,6 +26,16 @@ pub fn format_tool_error(err: &rhood_core::RhoodError) -> String {
         ),
         rhood_core::RhoodError::ReadOnlyMode => ("read_only", err.to_string()),
         rhood_core::RhoodError::InvalidParameter(msg) => ("invalid_parameter", msg.clone()),
+        rhood_core::RhoodError::PreparedOrderExpired => ("prepared_order_expired", err.to_string()),
+        rhood_core::RhoodError::SubmissionUncertain { .. } => {
+            ("submission_uncertain", err.to_string())
+        }
+        rhood_core::RhoodError::NoEligibleAccount => ("no_eligible_account", err.to_string()),
+        rhood_core::RhoodError::UnknownAccount { .. } => ("unknown_account", err.to_string()),
+        rhood_core::RhoodError::AmbiguousAccount { .. } => ("ambiguous_account", err.to_string()),
+        rhood_core::RhoodError::InvalidAccountResponse(_) => {
+            ("invalid_account_response", err.to_string())
+        }
         rhood_core::RhoodError::Api { status, message } => {
             ("api_error", normalize_api_body(*status, message))
         }

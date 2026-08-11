@@ -440,6 +440,64 @@ mod router_tests {
     }
 
     #[test]
+    fn account_sensitive_tools_advertise_optional_canonical_selection() {
+        let tools = tools_with(false);
+        for name in [
+            "get_positions",
+            "get_all_positions",
+            "get_portfolio",
+            "get_account_profile",
+            "get_account_summary",
+            "get_option_positions",
+            "get_open_option_orders",
+            "get_open_orders",
+            "get_recurring_investments",
+            "get_day_trades",
+            "place_stock_order",
+            "place_option_order",
+        ] {
+            let tool = tools
+                .tool_router
+                .list_all()
+                .into_iter()
+                .find(|tool| tool.name == name)
+                .unwrap_or_else(|| panic!("{name} must be advertised"));
+            let schema = Value::Object((*tool.input_schema).clone());
+            assert!(
+                schema["properties"].get("account_number").is_some(),
+                "{name} must accept account_number: {schema}"
+            );
+            assert!(
+                !schema["required"]
+                    .as_array()
+                    .is_some_and(|required| required.iter().any(|field| field == "account_number")),
+                "{name} must allow single-account auto-selection"
+            );
+            assert!(
+                schema["properties"]["account_number"]["description"]
+                    .as_str()
+                    .is_some_and(|description| description.contains("get_accounts")),
+                "{name} must direct callers to get_accounts"
+            );
+            assert!(
+                schema["properties"].get("resolved_account_label").is_none(),
+                "{name} must not expose sealed internal state"
+            );
+        }
+
+        let get_accounts = tools
+            .tool_router
+            .list_all()
+            .into_iter()
+            .find(|tool| tool.name == "get_accounts")
+            .expect("get_accounts must be advertised");
+        assert_eq!(
+            get_accounts.input_schema.get("properties"),
+            Some(&serde_json::json!({}))
+        );
+    }
+
+    #[test]
     fn place_option_order_requires_an_explicit_position_effect() {
         let tools = tools_with(false);
         let tool = tools

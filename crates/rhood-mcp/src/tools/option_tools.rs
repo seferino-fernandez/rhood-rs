@@ -29,13 +29,18 @@ impl RhoodTools {
     async fn get_option_positions(
         &self,
         peer: Peer<RoleServer>,
-        Parameters(params): Parameters<CollectionPageParams>,
+        Parameters(params): Parameters<AccountCollectionPageParams>,
     ) -> Result<String, String> {
-        let pager =
-            CollectionPager::new("option-positions", params.cursor.as_deref(), params.limit)?;
         let client = self.ensure_client(&peer).await?;
+        let account =
+            Self::resolve_account_number(&client, params.account_number.as_deref()).await?;
+        let pager = CollectionPager::new(
+            format!("option-positions:{account}"),
+            params.cursor.as_deref(),
+            params.limit,
+        )?;
         let positions = client
-            .get_open_option_positions()
+            .get_open_option_positions(&account)
             .await
             .map_err(|rhood_error| format_tool_error(&rhood_error))?;
         pager.serialize(positions)
@@ -159,8 +164,10 @@ impl RhoodTools {
         Parameters(params): Parameters<OptionOrderHistoryParams>,
     ) -> Result<String, String> {
         let client = self.ensure_client(&peer).await?;
+        let account =
+            Self::resolve_account_number(&client, params.account_number.as_deref()).await?;
         let orders = client
-            .get_all_option_orders(params.since.as_deref())
+            .get_all_option_orders(&account, params.since.as_deref())
             .await
             .map_err(|rhood_error| format_tool_error(&rhood_error))?;
         serde_json::to_string_pretty(&orders).map_err(|error| error.to_string())
@@ -171,10 +178,16 @@ impl RhoodTools {
         description = "List all open option orders",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
-    async fn get_open_option_orders(&self, peer: Peer<RoleServer>) -> Result<String, String> {
+    async fn get_open_option_orders(
+        &self,
+        peer: Peer<RoleServer>,
+        Parameters(params): Parameters<AccountSelectorParams>,
+    ) -> Result<String, String> {
         let client = self.ensure_client(&peer).await?;
+        let account =
+            Self::resolve_account_number(&client, params.account_number.as_deref()).await?;
         let orders = client
-            .get_open_option_orders()
+            .get_open_option_orders(&account)
             .await
             .map_err(|rhood_error| format_tool_error(&rhood_error))?;
         serde_json::to_string_pretty(&orders).map_err(|error| error.to_string())

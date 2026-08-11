@@ -14,7 +14,7 @@ const MAX_CURSOR_LENGTH: usize = 128;
 
 /// A validated request for one bounded collection page.
 pub(super) struct CollectionPager {
-    scope: &'static str,
+    scope: String,
     offset: usize,
     limit: usize,
 }
@@ -28,16 +28,17 @@ struct CollectionPage<T> {
 impl CollectionPager {
     /// Validates paging inputs before a tool authenticates or contacts Robinhood.
     pub(super) fn new(
-        scope: &'static str,
+        scope: impl Into<String>,
         cursor: Option<&str>,
         limit: Option<usize>,
     ) -> Result<Self, String> {
+        let scope = scope.into();
         let limit = limit.unwrap_or(DEFAULT_PAGE_SIZE);
         if !(1..=MAX_PAGE_SIZE).contains(&limit) {
             return Err(format!("limit must be between 1 and {MAX_PAGE_SIZE} items"));
         }
 
-        let offset = cursor.map_or(Ok(0), |cursor| decode_cursor(cursor, scope))?;
+        let offset = cursor.map_or(Ok(0), |cursor| decode_cursor(cursor, &scope))?;
         Ok(Self {
             scope,
             offset,
@@ -61,7 +62,7 @@ impl CollectionPager {
             .skip(self.offset)
             .take(self.limit)
             .collect();
-        let next_cursor = (end < total).then(|| encode_cursor(self.scope, end));
+        let next_cursor = (end < total).then(|| encode_cursor(&self.scope, end));
         Ok((page_items, next_cursor))
     }
 

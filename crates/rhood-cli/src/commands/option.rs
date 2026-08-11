@@ -80,12 +80,14 @@ pub async fn run(
     cmd: &OptionCommand,
     format: OutputFormat,
     config: RhoodConfig,
+    requested_account: Option<&str>,
 ) -> anyhow::Result<()> {
     let client = RobinhoodClient::with_config(config)?;
     super::ensure_logged_in(&client).await?;
     match cmd {
         OptionCommand::Positions => {
-            let positions = client.get_open_option_positions().await?;
+            let account = super::resolve_account_number(&client, requested_account).await?;
+            let positions = client.get_open_option_positions(&account).await?;
             let headers = &["Symbol", "Type", "Quantity", "Avg Price"];
             let rows: Vec<Vec<String>> = positions
                 .iter()
@@ -101,10 +103,13 @@ pub async fn run(
             output(format, headers, &rows, &positions);
         }
         OptionCommand::Orders { open, since } => {
+            let account = super::resolve_account_number(&client, requested_account).await?;
             let orders = if *open {
-                client.get_open_option_orders().await?
+                client.get_open_option_orders(&account).await?
             } else {
-                client.get_all_option_orders(since.as_deref()).await?
+                client
+                    .get_all_option_orders(&account, since.as_deref())
+                    .await?
             };
             let headers = &[
                 "ID",

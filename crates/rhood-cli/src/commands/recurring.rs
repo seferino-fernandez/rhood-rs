@@ -95,12 +95,14 @@ pub async fn run(
     cmd: &RecurringCommand,
     format: OutputFormat,
     config: RhoodConfig,
+    requested_account: Option<&str>,
 ) -> anyhow::Result<()> {
     let client = RobinhoodClient::with_config(config)?;
     super::ensure_logged_in(&client).await?;
     match cmd {
         RecurringCommand::List => {
-            let investments = client.get_recurring_investments().await?;
+            let account = super::resolve_account_number(&client, requested_account).await?;
+            let investments = client.get_recurring_investments(&account).await?;
             let headers = &["ID", "Symbol", "Amount", "Frequency", "State", "Start Date"];
             let rows = recurring_rows(&investments);
             output(format, headers, &rows, &investments);
@@ -112,7 +114,9 @@ pub async fn run(
             start_date,
             source,
         } => {
+            let account = super::resolve_account_number(&client, requested_account).await?;
             let req = CreateRecurringRequest {
+                account_number: account,
                 symbol: symbol.clone(),
                 amount: *amount,
                 frequency: *frequency,

@@ -43,6 +43,7 @@ rust_decimal = { workspace = true }
 
 [dev-dependencies]
 wiremock = "0.6.5"
+serde_urlencoded = "0.7.1"
 tokio = { workspace = true, features = ["test-util"] }
 
 [[test]]

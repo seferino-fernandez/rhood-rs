@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Add `get_accounts` and optional canonical account selectors to account-sensitive tools.
+
+### Changed
+
+- Stock-order elicitation now seals the exact prepared payload, selected account, quote collar, fractional quantity, client reference, and form version before confirmation.
+- Multi-account requests fail before staging unless `account_number` is supplied. Prepared stock orders expire after 60 seconds and submission timeouts return `submission_uncertain`.
+
 ## [0.2.0](https://github.com/seferino-fernandez/rhood-rs/compare/rhood-mcp-v0.1.4...rhood-mcp-v0.2.0) - 2026-08-11
 
 ### Added

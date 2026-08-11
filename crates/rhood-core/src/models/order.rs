@@ -71,6 +71,15 @@ pub enum TimeInForce {
     Gtc,
 }
 
+impl fmt::Display for TimeInForce {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Gfd => write!(formatter, "gfd"),
+            Self::Gtc => write!(formatter, "gtc"),
+        }
+    }
+}
+
 /// Specifies when the order should trigger execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
@@ -124,7 +133,7 @@ impl fmt::Display for MarketHours {
 pub enum OrderAmount {
     /// Whole or fractional share quantity (e.g., 10.0 shares, 0.5 shares).
     Quantity(f64),
-    /// Dollar amount to invest - broker calculates share count (e.g., $50.00).
+    /// Dollar intent converted to a six-decimal share estimate before submission.
     DollarAmount(f64),
 }
 
@@ -227,6 +236,8 @@ pub struct OptionOrder {
 /// Represents a request to place a stock order.
 #[derive(Debug, Clone)]
 pub struct StockOrderRequest {
+    /// Canonical brokerage account number selected through account discovery.
+    pub account_number: String,
     /// Ticker symbol of the stock to trade.
     pub symbol: String,
     /// Order amount - either a share quantity or a dollar amount.
@@ -250,6 +261,8 @@ pub struct StockOrderRequest {
 /// Represents a request to place an option order.
 #[derive(Debug, Clone)]
 pub struct OptionOrderRequest {
+    /// Canonical brokerage account number selected through account discovery.
+    pub account_number: String,
     /// Ticker symbol of the underlying stock.
     pub symbol: String,
     /// Expiration date of the option contract (YYYY-MM-DD).
@@ -270,14 +283,7 @@ pub struct OptionOrderRequest {
     pub time_in_force: TimeInForce,
 }
 
-/// Dollar-based amount for fractional/dollar orders.
-#[derive(Debug, Serialize)]
-pub(crate) struct DollarBasedAmount {
-    pub amount: String,
-    pub currency_code: String,
-}
-
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct StockOrderPayload {
     pub account: String,
     pub instrument: String,
@@ -289,12 +295,99 @@ pub(crate) struct StockOrderPayload {
     pub time_in_force: TimeInForce,
     pub trigger: Trigger,
     pub market_hours: MarketHours,
+    pub extended_hours: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub price: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stop_price: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub dollar_based_amount: Option<DollarBasedAmount>,
+    pub ask_price: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bid_price: Option<String>,
+    pub override_day_trade_checks: bool,
+    pub override_dtbp_checks: bool,
+    pub ref_id: String,
+    pub order_form_version: u8,
+}
+
+/// A validated stock order with every broker-facing field fixed.
+///
+/// Prepare immediately before human confirmation, then consume the value with
+/// [`RobinhoodClient::submit_prepared_stock_order`](crate::RobinhoodClient::submit_prepared_stock_order).
+/// Prepared orders expire after 60 seconds so quote-derived collar data cannot
+/// be submitted after it becomes stale.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PreparedStockOrder {
+    pub(crate) payload: StockOrderPayload,
+    pub(crate) account_number: String,
+    pub(crate) prepared_at_unix_ms: i64,
+    pub(crate) requested_dollar_amount: Option<String>,
+    pub(crate) conversion_price: Option<String>,
+}
+
+/// Human-readable fields fixed by stock-order preparation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PreparedStockOrderPreview {
+    /// Canonical account number placed in the broker account URL.
+    pub account_number: String,
+    /// Uppercase ticker symbol.
+    pub symbol: String,
+    /// Exact share quantity submitted to the broker.
+    pub quantity: String,
+    /// Buy or sell side.
+    pub side: Side,
+    /// Market or limit order type.
+    pub order_type: OrderType,
+    /// Duration policy.
+    pub time_in_force: TimeInForce,
+    /// Trigger condition.
+    pub trigger: Trigger,
+    /// Trading session.
+    pub market_hours: MarketHours,
+    /// Broker extended-hours flag derived from the trading session.
+    pub extended_hours: bool,
+    /// Broker submission price, including the selected market collar.
+    pub price: Option<String>,
+    /// Stop trigger price when present.
+    pub stop_price: Option<String>,
+    /// Fresh ask quote included for immediate market orders.
+    pub ask_price: Option<String>,
+    /// Fresh bid quote included for immediate market orders.
+    pub bid_price: Option<String>,
+    /// Original dollar intent when converted to fractional shares.
+    pub requested_dollar_amount: Option<String>,
+    /// Quote used to convert dollar intent to shares.
+    pub conversion_price: Option<String>,
+    /// Per-attempt client reference sent to the broker.
+    pub client_ref: String,
+    /// Private broker order-form contract version.
+    pub order_form_version: u8,
+}
+
+impl PreparedStockOrder {
+    /// Returns an owned preview suitable for confirmation and audit output.
+    #[must_use]
+    pub fn preview(&self) -> PreparedStockOrderPreview {
+        PreparedStockOrderPreview {
+            account_number: self.account_number.clone(),
+            symbol: self.payload.symbol.clone(),
+            quantity: self.payload.quantity.clone(),
+            side: self.payload.side,
+            order_type: self.payload.order_type,
+            time_in_force: self.payload.time_in_force,
+            trigger: self.payload.trigger,
+            market_hours: self.payload.market_hours,
+            extended_hours: self.payload.extended_hours,
+            price: self.payload.price.clone(),
+            stop_price: self.payload.stop_price.clone(),
+            ask_price: self.payload.ask_price.clone(),
+            bid_price: self.payload.bid_price.clone(),
+            requested_dollar_amount: self.requested_dollar_amount.clone(),
+            conversion_price: self.conversion_price.clone(),
+            client_ref: self.payload.ref_id.clone(),
+            order_form_version: self.payload.order_form_version,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]

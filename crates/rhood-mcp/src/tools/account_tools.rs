@@ -1,4 +1,4 @@
-use rhood_core::models::account::{AccountProfile, AccountSummary};
+use rhood_core::models::account::{AccountDescriptor, AccountProfile, AccountSummary};
 use rhood_core::models::dividend::MoneyAmount;
 use rmcp::{Peer, RoleServer, handler::server::wrapper::Parameters, tool, tool_router};
 use serde::Serialize;
@@ -10,6 +10,26 @@ use super::types::format_tool_error;
 
 fn amount_of(m: &Option<MoneyAmount>) -> Option<String> {
     m.as_ref().and_then(|v| v.amount.clone())
+}
+
+#[derive(Serialize)]
+struct AccountDiscoveryView {
+    account_number: String,
+    brokerage_account_type: Option<String>,
+}
+
+impl TryFrom<&AccountDescriptor> for AccountDiscoveryView {
+    type Error = String;
+
+    fn try_from(account: &AccountDescriptor) -> Result<Self, Self::Error> {
+        let account_number = account
+            .canonical_account_number()
+            .ok_or_else(|| "Unified account is missing a canonical account number".to_string())?;
+        Ok(Self {
+            account_number: account_number.to_string(),
+            brokerage_account_type: account.brokerage_account_type.clone(),
+        })
+    }
 }
 
 /// Decision-relevant projection of [`AccountSummary`] with `MoneyAmount`
@@ -84,14 +104,39 @@ impl From<&AccountProfile> for AccountProfileView {
 #[tool_router(router = account_router, vis = "pub(super)")]
 impl RhoodTools {
     #[tool(
+        name = "get_accounts",
+        description = "Discover brokerage accounts and canonical account numbers for account-sensitive tools",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    async fn get_accounts(&self, peer: Peer<RoleServer>) -> Result<String, String> {
+        let client = self.ensure_client(&peer).await?;
+        let accounts = client
+            .get_accounts()
+            .await
+            .map_err(|error| format_tool_error(&error))?;
+        let views: Vec<AccountDiscoveryView> = accounts
+            .iter()
+            .filter(|account| account.canonical_account_number().is_some())
+            .map(AccountDiscoveryView::try_from)
+            .collect::<Result<_, _>>()?;
+        serde_json::to_string_pretty(&views).map_err(|error| error.to_string())
+    }
+
+    #[tool(
         name = "get_positions",
         description = "Get all current stock positions",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
-    async fn get_positions(&self, peer: Peer<RoleServer>) -> Result<String, String> {
+    async fn get_positions(
+        &self,
+        peer: Peer<RoleServer>,
+        Parameters(params): Parameters<AccountSelectorParams>,
+    ) -> Result<String, String> {
         let client = self.ensure_client(&peer).await?;
+        let account =
+            Self::resolve_account_number(&client, params.account_number.as_deref()).await?;
         let positions = client
-            .get_positions()
+            .get_positions(&account)
             .await
             .map_err(|error| format_tool_error(&error))?;
         let urls: Vec<Option<String>> = positions
@@ -108,10 +153,16 @@ impl RhoodTools {
         description = "Get all stock positions including closed (zero quantity) ones",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
-    async fn get_all_positions(&self, peer: Peer<RoleServer>) -> Result<String, String> {
+    async fn get_all_positions(
+        &self,
+        peer: Peer<RoleServer>,
+        Parameters(params): Parameters<AccountSelectorParams>,
+    ) -> Result<String, String> {
         let client = self.ensure_client(&peer).await?;
+        let account =
+            Self::resolve_account_number(&client, params.account_number.as_deref()).await?;
         let positions = client
-            .get_all_positions()
+            .get_all_positions(&account)
             .await
             .map_err(|error| format_tool_error(&error))?;
         let urls: Vec<Option<String>> = positions
@@ -128,10 +179,16 @@ impl RhoodTools {
         description = "Get the raw portfolio profile (equity, market value, extended-hours balances, margin)",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
-    async fn get_portfolio(&self, peer: Peer<RoleServer>) -> Result<String, String> {
+    async fn get_portfolio(
+        &self,
+        peer: Peer<RoleServer>,
+        Parameters(params): Parameters<AccountSelectorParams>,
+    ) -> Result<String, String> {
         let client = self.ensure_client(&peer).await?;
+        let account =
+            Self::resolve_account_number(&client, params.account_number.as_deref()).await?;
         let portfolio = client
-            .get_portfolio()
+            .get_portfolio(&account)
             .await
             .map_err(|rhood_error| format_tool_error(&rhood_error))?;
         serde_json::to_string_pretty(&portfolio).map_err(|error| error.to_string())
@@ -142,10 +199,16 @@ impl RhoodTools {
         description = "Get account profile (account number, type, buying power, cash)",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
-    async fn get_account_profile(&self, peer: Peer<RoleServer>) -> Result<String, String> {
+    async fn get_account_profile(
+        &self,
+        peer: Peer<RoleServer>,
+        Parameters(params): Parameters<AccountSelectorParams>,
+    ) -> Result<String, String> {
         let client = self.ensure_client(&peer).await?;
+        let account =
+            Self::resolve_account_number(&client, params.account_number.as_deref()).await?;
         let profile = client
-            .get_account_profile()
+            .get_account_profile(&account)
             .await
             .map_err(|rhood_error| format_tool_error(&rhood_error))?;
         let view = AccountProfileView::from(&profile);
@@ -157,10 +220,16 @@ impl RhoodTools {
         description = "Get unified account summary (buying power, total equity, market value, cash, margin health)",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
-    async fn get_account_summary(&self, peer: Peer<RoleServer>) -> Result<String, String> {
+    async fn get_account_summary(
+        &self,
+        peer: Peer<RoleServer>,
+        Parameters(params): Parameters<AccountSelectorParams>,
+    ) -> Result<String, String> {
         let client = self.ensure_client(&peer).await?;
+        let account =
+            Self::resolve_account_number(&client, params.account_number.as_deref()).await?;
         let summary = client
-            .get_account_summary()
+            .get_account_summary(&account)
             .await
             .map_err(|rhood_error| format_tool_error(&rhood_error))?;
         let view = AccountSummaryView::from(&summary);
