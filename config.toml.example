@@ -64,6 +64,31 @@ timeout_secs = 120
 # Env: RHOOD_LOG_LEVEL
 level = "info"
 
+[http]
+# Total request and TCP connection timeouts in seconds.
+# Env: RHOOD_HTTP_REQUEST_TIMEOUT_SECS, RHOOD_HTTP_CONNECT_TIMEOUT_SECS
+request_timeout_secs = 30
+connect_timeout_secs = 10
+
+# Authenticated GET requests share one pacing and retry policy across every
+# clone of a RobinhoodClient. Request starts are spaced by this interval.
+# Env: RHOOD_HTTP_READ_REQUEST_INTERVAL_MS
+read_request_interval_ms = 250
+
+# Total attempts for authenticated GET requests after connection errors,
+# timeouts, or HTTP 429. Writes and 5xx/API/JSON failures are never retried.
+# Env: RHOOD_HTTP_READ_MAX_ATTEMPTS
+read_max_attempts = 3
+
+# Initial retry backoff in milliseconds; subsequent transient retries double.
+# Retry delays and valid Retry-After values are capped at 60 seconds. A
+# Retry-After above the cap is returned immediately instead of retried early.
+# Env: RHOOD_HTTP_READ_RETRY_BACKOFF_MS
+read_retry_backoff_ms = 250
+
+# All three read resilience values must be positive. Zero or malformed values
+# fail configuration loading instead of falling back to defaults.
+
 [mcp]
 # MCP server settings (used by rhood-mcp)
 

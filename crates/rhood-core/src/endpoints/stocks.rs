@@ -819,8 +819,8 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/fundamentals/"))
             .and(query_param("symbols", symbols[100..200].join(",")))
-            .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "9"))
-            .expect(1)
+            .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "0"))
+            .expect(3)
             .mount(&server)
             .await;
         let (_dir, client) = client_for_server(&server.uri()).await;
@@ -842,7 +842,7 @@ mod tests {
             }
             other => panic!("unexpected error: {other}"),
         }
-        assert_eq!(server.received_requests().await.unwrap().len(), 2);
+        assert_eq!(server.received_requests().await.unwrap().len(), 4);
         server.verify().await;
     }
 

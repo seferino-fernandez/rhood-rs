@@ -10,14 +10,15 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn request_timeout_aborts_slow_upstream() {
     let server = MockServer::start().await;
-    // Respond after 3 seconds; the client's timeout is 1 second.
+    // Keep every attempt pending well beyond the 1-second per-request timeout.
     Mock::given(method("GET"))
         .and(path("/api/slow"))
         .respond_with(
             ResponseTemplate::new(200)
                 .set_body_string("{}")
-                .set_delay(Duration::from_secs(3)),
+                .set_delay(Duration::from_secs(10)),
         )
+        .expect(3)
         .mount(&server)
         .await;
 
@@ -41,11 +42,12 @@ async fn request_timeout_aborts_slow_upstream() {
 
     assert!(result.is_err(), "expected timeout error, got {result:?}");
     assert!(
-        elapsed < Duration::from_millis(2500),
-        "client should have given up well before the 3s upstream delay; took {elapsed:?}"
+        elapsed < Duration::from_millis(5_500),
+        "three bounded attempts should finish well before the 10s upstream delay; took {elapsed:?}"
     );
     assert!(
-        elapsed >= Duration::from_millis(900),
-        "client should not have errored before the 1s timeout; took {elapsed:?}"
+        elapsed >= Duration::from_millis(2_700),
+        "client should allow all three 1s timeout attempts; took {elapsed:?}"
     );
+    server.verify().await;
 }
