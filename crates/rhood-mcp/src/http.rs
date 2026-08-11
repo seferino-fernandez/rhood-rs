@@ -362,8 +362,8 @@ mod wire_tests {
     use rmcp::{
         handler::server::tool::{ToolRoute, ToolRouter},
         model::{
-            CallToolResponse, CallToolResult, ContentBlock, CreateTaskResult, MetaObject,
-            ProtocolVersion, Task, TaskStatus, Tool,
+            CallToolResponse, CallToolResult, ContentBlock, CreateTaskResult, InputRequiredResult,
+            MetaObject, ProtocolVersion, Task, TaskStatus, Tool,
         },
     };
     use serde_json::{Value, json};
@@ -1162,24 +1162,10 @@ mod wire_tests {
 
     #[tokio::test]
     async fn tools_call_result_serializes_rhood_server_info_metadata() {
-        let service = mcp_service(false);
+        let service = mcp_service_returning(InputRequiredResult::new(None, None).into(), 262_144);
         let _ = post(&service, initialize(V_MODERN), None, None).await;
-        let (status, _, payloads) = post(
-            &service,
-            modern_tools_call_with_arguments(
-                "place_stock_order",
-                json!({
-                    "symbol": "F",
-                    "side": "buy",
-                    "quantity": 1,
-                    "order_type": "market",
-                    "time_in_force": "gfd"
-                }),
-            ),
-            None,
-            Some(V_MODERN),
-        )
-        .await;
+        let (status, _, payloads) =
+            post(&service, modern_tools_call(TEST_TOOL), None, Some(V_MODERN)).await;
 
         assert!(
             status.is_success(),

@@ -142,10 +142,16 @@ impl RhoodTools {
         description = "List all open stock orders",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
-    async fn get_open_orders(&self, peer: Peer<RoleServer>) -> Result<String, String> {
+    async fn get_open_orders(
+        &self,
+        peer: Peer<RoleServer>,
+        Parameters(params): Parameters<AccountSelectorParams>,
+    ) -> Result<String, String> {
         let client = self.ensure_client(&peer).await?;
+        let account =
+            Self::resolve_account_number(&client, params.account_number.as_deref()).await?;
         let orders = client
-            .get_open_stock_orders()
+            .get_open_stock_orders(&account)
             .await
             .map_err(|rhood_error| format_tool_error(&rhood_error))?;
         let instrument_urls: Vec<Option<String>> = orders
@@ -168,8 +174,10 @@ impl RhoodTools {
         Parameters(params): Parameters<StockOrderHistoryParams>,
     ) -> Result<String, String> {
         let client = self.ensure_client(&peer).await?;
+        let account =
+            Self::resolve_account_number(&client, params.account_number.as_deref()).await?;
         let orders = client
-            .get_all_stock_orders(params.since.as_deref())
+            .get_all_stock_orders(&account, params.since.as_deref())
             .await
             .map_err(|rhood_error| format_tool_error(&rhood_error))?;
         let instrument_urls: Vec<Option<String>> = orders

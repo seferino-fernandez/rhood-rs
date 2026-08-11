@@ -1,5 +1,6 @@
 use crate::api::paths;
 use crate::client::RobinhoodClient;
+use crate::endpoints::account::validate_account_number;
 use crate::models::recurring::{
     CreateRecurringAssetPayload, CreateRecurringPayload, CreateRecurringRequest, MoneyAmount,
     NextInvestmentDate, RecurringFrequency, RecurringInvestment, RecurringState,
@@ -14,9 +15,16 @@ impl RobinhoodClient {
     ///
     /// Returns an error if the HTTP request fails or the response cannot be
     /// deserialized.
-    pub async fn get_recurring_investments(&self) -> Result<Vec<RecurringInvestment>> {
-        self.get_paginated(&self.bonfire_url(paths::RECURRING_SCHEDULES), &[])
-            .await
+    pub async fn get_recurring_investments(
+        &self,
+        account_number: &str,
+    ) -> Result<Vec<RecurringInvestment>> {
+        validate_account_number(account_number)?;
+        self.get_paginated(
+            &self.bonfire_url(paths::RECURRING_SCHEDULES),
+            &[("account_number", account_number)],
+        )
+        .await
     }
 
     /// Creates a new recurring investment schedule.
@@ -34,6 +42,7 @@ impl RobinhoodClient {
         create_recurring_request: &CreateRecurringRequest,
     ) -> Result<RecurringInvestment> {
         self.require_writable()?;
+        validate_account_number(&create_recurring_request.account_number)?;
 
         let instrument = self
             .cached_instrument(&create_recurring_request.symbol)
@@ -44,11 +53,8 @@ impl RobinhoodClient {
             .clone()
             .ok_or_else(|| RhoodError::InvalidSymbol(create_recurring_request.symbol.clone()))?;
 
-        let profile = self.get_account_profile().await?;
-        let account_number = profile.account_number.ok_or(RhoodError::NotAuthenticated)?;
-
         let payload = CreateRecurringPayload {
-            account_number: account_number.clone(),
+            account_number: create_recurring_request.account_number.clone(),
             amount: MoneyAmount {
                 amount: format!("{:.2}", create_recurring_request.amount),
                 currency_code: "USD".to_string(),
@@ -68,7 +74,7 @@ impl RobinhoodClient {
         let url = format!(
             "{}?account_number={}",
             self.bonfire_url(paths::RECURRING_SCHEDULES),
-            account_number
+            create_recurring_request.account_number
         );
         self.post_json(&url, &payload).await
     }
@@ -213,6 +219,7 @@ mod endpoint_tests {
 
     fn sample_create_request() -> CreateRecurringRequest {
         CreateRecurringRequest {
+            account_number: "ABC123".to_string(),
             symbol: "tsla".to_string(),
             amount: 10.0,
             frequency: RecurringFrequency::Weekly,
@@ -226,6 +233,7 @@ mod endpoint_tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/recurring_schedules/"))
+            .and(query_param("account_number", "ABC123"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "results": [
                     {"id": "sched-001", "frequency": "weekly", "state": "active"},
@@ -238,7 +246,7 @@ mod endpoint_tests {
             .await;
         let (_dir, client) = client_for_server(&server.uri(), true).await;
 
-        let schedules = client.get_recurring_investments().await.unwrap();
+        let schedules = client.get_recurring_investments("ABC123").await.unwrap();
 
         assert_eq!(schedules.len(), 2);
         assert_eq!(schedules[0].id.as_deref(), Some("sched-001"));
@@ -268,19 +276,11 @@ mod endpoint_tests {
             })))
             .mount(&server)
             .await;
-        // Account discovery.
-        Mock::given(method("GET"))
-            .and(path("/accounts/"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "results": [{"account_number": "ACC-123"}],
-                "next": null
-            })))
-            .mount(&server)
-            .await;
         // The actual create call. Assert the derived payload fields.
         Mock::given(method("POST"))
             .and(path("/recurring_schedules/"))
-            .and(query_param("account_number", "ACC-123"))
+            .and(query_param("account_number", "ABC123"))
+            .and(body_string_contains("\"account_number\":\"ABC123\""))
             .and(body_string_contains("\"amount\":\"10.00\""))
             .and(body_string_contains("\"frequency\":\"weekly\""))
             .and(body_string_contains("\"asset_symbol\":\"TSLA\""))
@@ -289,7 +289,7 @@ mod endpoint_tests {
             .and(body_string_contains("\"is_backup_ach_enabled\":false"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "id": "sched-new",
-                "account_number": "ACC-123",
+                "account_number": "ABC123",
                 "frequency": "weekly",
                 "state": "active"
             })))
@@ -303,7 +303,7 @@ mod endpoint_tests {
             .unwrap();
 
         assert_eq!(created.id.as_deref(), Some("sched-new"));
-        assert_eq!(created.account_number.as_deref(), Some("ACC-123"));
+        assert_eq!(created.account_number.as_deref(), Some("ABC123"));
     }
 
     #[tokio::test]
@@ -350,31 +350,16 @@ mod endpoint_tests {
 
     #[tokio::test]
     async fn create_recurring_investment_missing_account_number_errors() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/instruments/"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "results": [{"id": "inst-tsla", "symbol": "TSLA"}],
-                "next": null
-            })))
-            .mount(&server)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/accounts/"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "results": [{"buying_power": "100.00"}],
-                "next": null
-            })))
-            .mount(&server)
-            .await;
-        let (_dir, client) = client_for_server(&server.uri(), false).await;
+        let (_dir, client) = client_for_server("https://unused.invalid", false).await;
+        let mut request = sample_create_request();
+        request.account_number.clear();
 
         let err = client
-            .create_recurring_investment(&sample_create_request())
+            .create_recurring_investment(&request)
             .await
             .unwrap_err();
 
-        assert!(matches!(err, RhoodError::NotAuthenticated));
+        assert!(matches!(err, RhoodError::InvalidParameter(_)));
     }
 
     #[tokio::test]
@@ -518,7 +503,8 @@ mod endpoint_tests {
             .await;
         let (_dir, client) = client_for_server(&server.uri(), true).await;
 
-        let result: Result<Vec<RecurringInvestment>> = client.get_recurring_investments().await;
+        let result: Result<Vec<RecurringInvestment>> =
+            client.get_recurring_investments("ABC123").await;
 
         assert!(result.is_err());
     }

@@ -1,5 +1,6 @@
 use crate::api::paths;
 use crate::client::RobinhoodClient;
+use crate::endpoints::account::validate_account_number;
 use crate::models::option::*;
 use crate::pagination::ResultsResponse;
 use crate::{Result, RhoodError};
@@ -80,9 +81,13 @@ impl RobinhoodClient {
     ///
     /// Returns an error if the HTTP request fails or the response cannot be
     /// deserialized.
-    pub async fn get_option_positions(&self) -> Result<Vec<OptionPosition>> {
-        self.get_paginated(&self.api_url(paths::OPTION_POSITIONS), &[])
-            .await
+    pub async fn get_option_positions(&self, account_number: &str) -> Result<Vec<OptionPosition>> {
+        validate_account_number(account_number)?;
+        self.get_paginated(
+            &self.api_url(paths::OPTION_POSITIONS),
+            &[("account_numbers", account_number)],
+        )
+        .await
     }
 
     /// Fetches only open option positions (quantity greater than zero).
@@ -90,8 +95,11 @@ impl RobinhoodClient {
     /// # Errors
     ///
     /// Returns an error if the underlying positions request fails.
-    pub async fn get_open_option_positions(&self) -> Result<Vec<OptionPosition>> {
-        let positions = self.get_option_positions().await?;
+    pub async fn get_open_option_positions(
+        &self,
+        account_number: &str,
+    ) -> Result<Vec<OptionPosition>> {
+        let positions = self.get_option_positions(account_number).await?;
         Ok(positions
             .into_iter()
             .filter(|position| {
@@ -320,6 +328,31 @@ mod tests {
             "next": null,
             "previous": null
         }))
+    }
+
+    #[tokio::test]
+    async fn option_positions_use_plural_account_filter() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/options/positions/"))
+            .and(query_param("account_numbers", "ABC123"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [],
+                "next": null
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server.uri()).await;
+
+        assert!(
+            client
+                .get_option_positions("ABC123")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        server.verify().await;
     }
 
     #[tokio::test]

@@ -77,7 +77,9 @@ const FUTURES_CONTRACT_HEADER_VALUE: &str = "true";
 /// # async fn run() -> rhood_core::Result<()> {
 /// let client = RobinhoodClient::new()?;
 /// client.login_from_cache().await?;
-/// let portfolio = client.get_portfolio().await?;
+/// let account = client.resolve_account(None).await?;
+/// let account_number = account.canonical_account_number().expect("resolved account has a number");
+/// let portfolio = client.get_portfolio(account_number).await?;
 /// println!("equity: {:?}", portfolio.equity);
 /// # Ok(())
 /// # }
@@ -85,6 +87,7 @@ const FUTURES_CONTRACT_HEADER_VALUE: &str = "true";
 #[derive(Clone)]
 pub struct RobinhoodClient {
     http: reqwest::Client,
+    write_http: reqwest::Client,
     auth_state: Arc<RwLock<AuthState>>,
     token_cache: TokenCache,
     device_token: Arc<RwLock<String>>,
@@ -123,10 +126,12 @@ impl RobinhoodClient {
         let cache_path = PathBuf::from(&config.auth.token_cache_path);
         let token_cache = TokenCache::with_path(cache_path);
         let http = build_http_client(&config.http)?;
+        let write_http = build_stock_order_http_client(&config.http)?;
         let read_only = config.read_only;
         let resolvers = ResolverCache::from_config(&config.cache);
         Ok(Self {
             http,
+            write_http,
             auth_state: Arc::new(RwLock::new(AuthState::Unauthenticated)),
             token_cache,
             read_only,
@@ -224,6 +229,17 @@ impl RobinhoodClient {
 }
 
 fn build_http_client(http_config: &HttpConfig) -> Result<reqwest::Client> {
+    build_http_client_with_redirect_policy(http_config, reqwest::redirect::Policy::limited(10))
+}
+
+fn build_stock_order_http_client(http_config: &HttpConfig) -> Result<reqwest::Client> {
+    build_http_client_with_redirect_policy(http_config, reqwest::redirect::Policy::none())
+}
+
+fn build_http_client_with_redirect_policy(
+    http_config: &HttpConfig,
+    redirect_policy: reqwest::redirect::Policy,
+) -> Result<reqwest::Client> {
     let mut headers = HeaderMap::new();
     headers.insert("Accept", HeaderValue::from_static("*/*"));
     headers.insert("Accept-Language", HeaderValue::from_static("en-US,en;q=1"));
@@ -240,6 +256,7 @@ fn build_http_client(http_config: &HttpConfig) -> Result<reqwest::Client> {
     reqwest::Client::builder()
         .default_headers(headers)
         .cookie_store(true)
+        .redirect(redirect_policy)
         .timeout(Duration::from_secs(http_config.request_timeout_secs))
         .connect_timeout(Duration::from_secs(http_config.connect_timeout_secs))
         .build()

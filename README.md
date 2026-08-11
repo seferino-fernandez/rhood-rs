@@ -56,6 +56,10 @@ rhood stock history AAPL --span year --interval day
 # Portfolio
 rhood account portfolio
 
+# If more than one brokerage account exists, discover and select one
+rhood account list
+rhood --account ABC123 account portfolio
+
 # Place an order (orders require --read-write; you'll be prompted to confirm)
 rhood --read-write order buy AAPL --quantity 10 --type market
 
@@ -97,11 +101,12 @@ A few representative tools:
 | Tool                | What it does                                                 |
 | ------------------- | ------------------------------------------------------------ |
 | `get_stock_quotes`  | Current quotes for stock tickers                             |
+| `get_accounts`      | Discover canonical brokerage account selectors               |
 | `get_portfolio`     | Portfolio summary (equity, cash, etc.)                       |
-| `place_stock_order` | Request confirmation; the same tool submits after acceptance |
+| `place_stock_order` | Prepare exact wire fields, confirm, then submit once          |
 | `cancel_order`      | Cancel an open stock order                                   |
 
-For the live tool list, page through MCP `tools/list` against the running server. Each response contains at most 20 definitions; pass `nextCursor` back as `cursor` until it is absent. Order placement uses MCP elicitation: a `place_*` call returns an order summary asking the human to confirm; after acceptance, the client retries the same call with the confirmation response, which submits the order. Read-only mode (default) hides write tools.
+For the live tool list, page through MCP `tools/list` against the running server. Each response contains at most 20 definitions; pass `nextCursor` back as `cursor` until it is absent. Account-sensitive tools accept `account_number`. It may be omitted only when unified discovery returns exactly one account; otherwise call `get_accounts` and pass a canonical number. Order placement uses MCP elicitation. Stock orders are fully prepared before confirmation, including quote collar data, fractional-share conversion, client reference, and form version. After acceptance, the client retries the same call with the sealed state and submits that exact preparation once. Read-only mode (default) hides write tools.
 
 ## Testing
 

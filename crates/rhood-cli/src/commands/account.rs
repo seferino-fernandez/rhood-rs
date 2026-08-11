@@ -7,6 +7,8 @@ use rhood_core::{RhoodConfig, RobinhoodClient};
 
 #[derive(Subcommand)]
 pub enum AccountCommand {
+    /// List brokerage accounts and their canonical selectors
+    List,
     /// List your stock positions
     Positions,
     /// View portfolio summary (equity, market value)
@@ -46,12 +48,40 @@ pub async fn run(
     cmd: &AccountCommand,
     format: OutputFormat,
     config: RhoodConfig,
+    requested_account: Option<&str>,
 ) -> anyhow::Result<()> {
     let client = RobinhoodClient::with_config(config)?;
     super::ensure_logged_in(&client).await?;
+    if requested_account.is_some()
+        && matches!(
+            cmd,
+            AccountCommand::Dividends { .. }
+                | AccountCommand::Interest
+                | AccountCommand::Transfers
+                | AccountCommand::Documents { .. }
+                | AccountCommand::UserProfile
+        )
+    {
+        anyhow::bail!("this aggregate command does not support --account filtering");
+    }
     match cmd {
+        AccountCommand::List => {
+            let accounts = client.get_accounts().await?;
+            let headers = &["Account #", "Brokerage Type"];
+            let rows: Vec<Vec<String>> = accounts
+                .iter()
+                .map(|account| {
+                    vec![
+                        account.account_number.clone().unwrap_or_default(),
+                        account.brokerage_account_type.clone().unwrap_or_default(),
+                    ]
+                })
+                .collect();
+            output(format, headers, &rows, &accounts);
+        }
         AccountCommand::Positions => {
-            let positions = client.get_positions().await?;
+            let account = super::resolve_account_number(&client, requested_account).await?;
+            let positions = client.get_positions(&account).await?;
             let headers = &["Symbol", "Quantity", "Avg Buy Price"];
             let rows: Vec<Vec<String>> = positions
                 .iter()
@@ -66,7 +96,8 @@ pub async fn run(
             output(format, headers, &rows, &positions);
         }
         AccountCommand::Portfolio => {
-            let portfolio = client.get_portfolio().await?;
+            let account = super::resolve_account_number(&client, requested_account).await?;
+            let portfolio = client.get_portfolio(&account).await?;
             let headers = &["Equity", "Market Value", "Ext Hours Equity", "Withdrawable"];
             let rows = vec![vec![
                 portfolio.equity.clone().unwrap_or_default(),
@@ -77,7 +108,8 @@ pub async fn run(
             output(format, headers, &rows, &portfolio);
         }
         AccountCommand::Profile => {
-            let profile = client.get_account_profile().await?;
+            let account = super::resolve_account_number(&client, requested_account).await?;
+            let profile = client.get_account_profile(&account).await?;
             let headers = &["Account #", "Type", "Buying Power", "Cash", "Cash Held"];
             let rows = vec![vec![
                 profile.account_number.clone().unwrap_or_default(),
@@ -89,7 +121,8 @@ pub async fn run(
             output(format, headers, &rows, &profile);
         }
         AccountCommand::BuyingPower => {
-            let summary = client.get_account_summary().await?;
+            let account = super::resolve_account_number(&client, requested_account).await?;
+            let summary = client.get_account_summary(&account).await?;
             let headers = &[
                 "Buying Power",
                 "Total Equity",
@@ -102,7 +135,8 @@ pub async fn run(
             output(format, headers, &rows, &summary);
         }
         AccountCommand::AllPositions => {
-            let positions = client.get_all_positions().await?;
+            let account = super::resolve_account_number(&client, requested_account).await?;
+            let positions = client.get_all_positions(&account).await?;
             let headers = &["Symbol", "Quantity", "Avg Buy Price"];
             let rows: Vec<Vec<String>> = positions
                 .iter()
@@ -198,7 +232,8 @@ pub async fn run(
             output(format, headers, &rows, &documents);
         }
         AccountCommand::DayTrades => {
-            let check = client.get_day_trades().await?;
+            let account = super::resolve_account_number(&client, requested_account).await?;
+            let check = client.get_day_trades(&account).await?;
             let headers = &[
                 "Equity Day Trades",
                 "Option Day Trades",

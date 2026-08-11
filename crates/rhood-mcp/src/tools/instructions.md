@@ -8,7 +8,7 @@ An MCP server for the Robinhood brokerage API. Tools are grouped by domain.
 
 **Indices** - `get_index_quotes` (SPX, NDX, VIX, RUT, XSP), `get_index_option_chain` for chain metadata, `find_index_options` to search contracts.
 
-**Account** - `get_positions`, `get_all_positions`, `get_portfolio`, `get_account_profile`, `get_account_summary` for state; page through `get_documents` for statements, tax forms, and trade confirmations.
+**Account** - Call `get_accounts` to discover canonical account numbers. Account-sensitive tools auto-select only when exactly one account exists; otherwise pass `account_number`. Use `get_positions`, `get_all_positions`, `get_portfolio`, `get_account_profile`, and `get_account_summary` for selected-account state. Page through `get_documents` for aggregate statements, tax forms, and trade confirmations.
 
 **Income** - `get_dividends` and `get_total_dividends` for dividend history; `get_interest_payments` for sweep/interest; page through `get_transfers` for unified ACH / wire / debit-card movement. Paginated tools return `items` and `next_cursor`; pass a non-null cursor back unchanged until it becomes null.
 
@@ -22,4 +22,4 @@ An MCP server for the Robinhood brokerage API. Tools are grouped by domain.
 
 **Market** - `get_markets`, `get_market_hours`, `get_market_today_hours`, `get_daily_movers` (top 20 daily movers).
 
-**Orders (human-confirmed)** - `place_stock_order` and `place_option_order` use MCP elicitation to show the complete Staged Order to a human. For options, always set both `side` and `position_effect`: buy + open is buy-to-open, sell + close is sell-to-close, sell + open is sell-to-open, and buy + close is buy-to-close. After the human accepts, the client retries the same tool with its sealed request state and the tool submits the order. Cancel an open stock order with `cancel_order`, or an open option order with `cancel_option_order`. In read-only mode, all order tools are disabled.
+**Orders (human-confirmed)** - `place_stock_order` resolves the account and fixes the instrument, share quantity, quote collar, client reference, and form version before MCP elicitation. The accepted retry submits that exact sealed preparation once. It expires after 60 seconds. Dollar buys require at least $1 and good-for-day duration and are converted from the ask quote to a six-decimal share estimate. A timeout returns `submission_uncertain`; reconcile open and recent orders before retrying. `place_option_order` also seals the selected account. For options, always set both `side` and `position_effect`: buy + open is buy-to-open, sell + close is sell-to-close, sell + open is sell-to-open, and buy + close is buy-to-close. Cancel an open stock order with `cancel_order`, or an open option order with `cancel_option_order`. In read-only mode, all order tools are disabled.

@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Add global `--account` selection and `account list` discovery for individual and IRA accounts.
+
+### Changed
+
+- Stock orders are fully prepared before confirmation and display their resolved quantity, collar quote, client reference, and form version.
+- Dollar buys require at least $1 and use a good-for-day fractional-share estimate.
+
 ## [0.2.0](https://github.com/seferino-fernandez/rhood-rs/compare/v0.1.4...v0.2.0) - 2026-08-11
 
 ### Added

@@ -187,6 +187,45 @@ pub enum RhoodError {
     #[error("Invalid order: {0}")]
     InvalidOrder(String),
 
+    /// A prepared order exceeded its short confirmation lifetime.
+    #[error("Prepared order expired; prepare and confirm the order again")]
+    PreparedOrderExpired,
+
+    /// Submission may have reached the broker, but no authoritative response arrived.
+    #[error(
+        "Stock order submission is uncertain for client reference {client_ref}: {message}. Reconcile open and recent orders before retrying"
+    )]
+    SubmissionUncertain {
+        /// Per-attempt client reference sent in the broker payload.
+        client_ref: String,
+        /// Sanitized transport or response diagnostic.
+        message: String,
+    },
+
+    /// Unified discovery returned no account with a usable canonical number.
+    #[error("No eligible brokerage account was found")]
+    NoEligibleAccount,
+
+    /// The requested account number was not present in unified discovery.
+    #[error("Unknown brokerage account {account}")]
+    UnknownAccount {
+        /// Masked account number supplied by the caller.
+        account: String,
+    },
+
+    /// More than one account exists and the caller did not select one.
+    #[error(
+        "Multiple brokerage accounts are available; pass account_number from get_accounts: {choices}"
+    )]
+    AmbiguousAccount {
+        /// Safe, masked labels for the available accounts.
+        choices: String,
+    },
+
+    /// Unified discovery returned a contradictory account shape.
+    #[error("Invalid unified account response: {0}")]
+    InvalidAccountResponse(String),
+
     /// Device verification is required before the client can authenticate.
     #[error("Device verification required, run `rhood login` interactively first")]
     DeviceVerificationRequired,

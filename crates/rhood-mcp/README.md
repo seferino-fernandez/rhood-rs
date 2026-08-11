@@ -248,7 +248,7 @@ Tools are grouped by domain. The complete authoritative list is what `tools/list
 - **Options** - chain metadata, equity contract search, contract quotes (bid/ask, Greeks, volume), positions, and order history.
 - **Futures** - contract lookup, real-time quotes, order history, and futures-account discovery.
 - **Indices** - index quotes (SPX, NDX, VIX, RUT, XSP), index option chains, and contract search.
-- **Account** - positions (current and including closed), portfolio summary, account profile and unified summary, account documents (statements, tax forms).
+- **Account** - unified account discovery, positions (current and including closed), portfolio summary, account profile and unified summary, account documents (statements, tax forms).
 - **Income** - dividend history (and total), interest/sweep payments, and unified transfers (ACH, wire, debit card).
 - **Research** - earnings, ratings, news, splits, and category tags.
 - **Recurring investments** - list, create, update, cancel, and next-investment-date lookup.
@@ -274,7 +274,9 @@ Each list must be non-empty. Do not combine the modes.
 
 Order placement and cancellation are write operations. The server starts in read-only mode by default and write tools are hidden from `tools/list` and rejected on call. Pass `--read-write` or set `read_only = false` in config to enable them.
 
-Order placement uses MCP elicitation: a `place_*` call returns an order summary asking the human to confirm; after acceptance, the client retries the same call with the confirmation response, which submits the order.
+Call `get_accounts` before account-sensitive operations when more than one account exists. Those tools accept an optional `account_number`, auto-select only when discovery yields exactly one account, and otherwise fail before staging or submission. The selected account is fixed inside the sealed confirmation state. Income, transfer, and document tools remain aggregate because no reliable account filter is established for those routes.
+
+Order placement uses MCP elicitation. A stock order is fully prepared before the elicitation, including its selected account, resolved share quantity, quote collar, client reference, and form version. The accepted retry submits that exact sealed preparation once. Preparations expire after 60 seconds and must be prepared and confirmed again. Dollar buys require at least $1 and good-for-day duration; they use the ask quote and round the estimated quantity upward to six decimals. A submission timeout returns `submission_uncertain` with reconciliation guidance and is never retried automatically. Option order preparation remains separate and preserves the selected account in sealed state.
 
 ## CLI Reference
 
