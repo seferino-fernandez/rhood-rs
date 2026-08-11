@@ -66,6 +66,7 @@ These flags apply to every subcommand.
 --config <PATH>              Path to config.toml
 --token-cache <PATH>         Path to on-disk token cache
 --read-write                 Enable order placement and cancellation
+--account <NUMBER>           Select a canonical brokerage account number
 ```
 
 Logs are written to stderr. `--output json` and `--output csv` are therefore safe to pipe, stdout carries only structured data.
@@ -74,7 +75,9 @@ Logs are written to stderr. `--output json` and `--output csv` are therefore saf
 
 The CLI defaults to read-only mode (`read_only = true` in config). Mutating commands order buy/sell, recurring create/update/cancel, and watchlist add/remove are blocked unless `--read-write` is passed.
 
-Order placement also prompts interactively before submitting. Pass `--yes` to skip the prompt when running non-interactively (e.g. in scripts).
+Account-sensitive commands automatically select an account only when unified discovery returns exactly one usable account. Run `rhood account list`, then pass global `--account <NUMBER>` when multiple accounts exist. The selector covers individual and IRA accounts. Aggregate income, transfer, and document commands remain unfiltered because Robinhood's account filter contract is not established for those routes.
+
+Stock order placement resolves the account, instrument, quote collar, share quantity, client reference, and private form version before prompting. The preparation expires after 60 seconds. Pass `--yes` to skip the prompt when running non-interactively. A dollar buy requires at least $1, uses good-for-day duration, and converts the requested dollars to a six-decimal share estimate from the current ask price.
 
 ## Command Reference
 
@@ -216,6 +219,8 @@ rhood order cancel <ORDER_ID>
 
 `--limit` is required when `--type limit` is set; `--stop-price` is required when `--trigger stop` is set.
 
+Immediate market orders require a fresh positive bid and ask. Buy orders use the ask as the broker collar; sell orders use the bid. Limit and stop-market orders do not fetch a quote during preparation. If submission times out, the CLI reports an uncertain submission with its client reference. Reconcile open and recent orders before retrying.
+
 ### Market
 
 Exchange listings and trading hours.
@@ -249,6 +254,7 @@ Positions, portfolio, profile, and income history.
 
 | Subcommand      | Description                                          |
 | --------------- | ---------------------------------------------------- |
+| `list`          | Discover canonical account selectors                 |
 | `positions`     | Open stock positions (non-zero quantity)             |
 | `all-positions` | All stock positions including closed (zero quantity) |
 | `portfolio`     | Portfolio summary (equity, market value)             |
@@ -262,6 +268,7 @@ Positions, portfolio, profile, and income history.
 | `user-profile`  | Authenticated user profile                           |
 
 ```bash
+rhood account list
 rhood account positions
 rhood account all-positions
 rhood account portfolio
@@ -290,6 +297,8 @@ rhood account documents --doc-type trade_confirm
 rhood account day-trades
 rhood account user-profile
 ```
+
+When multiple accounts are listed, select one with the global flag, for example `rhood --account ABC123 account positions`.
 
 ### Futures
 

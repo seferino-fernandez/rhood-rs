@@ -1,9 +1,8 @@
+use crate::Result;
 use crate::api::paths;
 use crate::client::RobinhoodClient;
-use crate::models::account::AccountProfile;
+use crate::endpoints::account::validate_account_number;
 use crate::models::user::{DayTradeCheck, UserProfile};
-use crate::pagination::ResultsResponse;
-use crate::{Result, RhoodError};
 
 /// The raw recent-day-trades endpoint payload.
 #[derive(serde::Deserialize)]
@@ -32,35 +31,21 @@ impl RobinhoodClient {
 
     /// Fetches recent day trades for the user's account.
     ///
-    /// Discovers the account number from the account endpoint, then fetches
-    /// day trade data. The PDT flag is derived from the account's margin
-    /// balances.
+    /// Fetches the selected account profile and day-trade route. The PDT flag
+    /// is derived from that account's margin balances.
     ///
     /// # Errors
     ///
-    /// Returns [`RhoodError::NotAuthenticated`] if no account is found.
-    pub async fn get_day_trades(&self) -> Result<DayTradeCheck> {
-        let resp: ResultsResponse<AccountProfile> = self
-            .get_with_params(
-                &self.api_url(paths::ACCOUNTS),
-                &[("default_to_all_accounts", "true")],
-            )
-            .await?;
-        // Pull the account number and PDT flag before the next await so we
-        // don't hold a borrow of `resp` across it.
-        let (account_number, flagged) = {
-            let account = resp.results.first().ok_or(RhoodError::NotAuthenticated)?;
-            let number = account
-                .account_number
-                .clone()
-                .ok_or(RhoodError::NotAuthenticated)?;
-            let flagged = account
-                .margin_balances
-                .as_ref()
-                .map(is_flagged_pdt)
-                .unwrap_or(false);
-            (number, flagged)
-        };
+    /// Returns an error when the account selector is invalid or either account
+    /// request fails.
+    pub async fn get_day_trades(&self, account_number: &str) -> Result<DayTradeCheck> {
+        validate_account_number(account_number)?;
+        let profile = self.get_account_profile(account_number).await?;
+        let flagged = profile
+            .margin_balances
+            .as_ref()
+            .map(is_flagged_pdt)
+            .unwrap_or(false);
         let url = format!(
             "{}{account_number}/recent_day_trades/",
             self.api_url(paths::DAY_TRADES)

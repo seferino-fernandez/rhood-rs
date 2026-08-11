@@ -42,6 +42,10 @@ struct Cli {
     /// Enable write operations (order placement and cancellation)
     #[arg(long, global = true)]
     read_write: bool,
+
+    /// Canonical brokerage account number from `rhood account list`
+    #[arg(long, global = true, value_name = "NUMBER")]
+    account: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -133,14 +137,20 @@ async fn try_main() -> anyhow::Result<()> {
         Command::Login => commands::login::run_login(config).await,
         Command::Logout => commands::login::run_logout(config).await,
         Command::Stock { command } => commands::stock::run(command, cli.output, config).await,
-        Command::Option { command } => commands::option::run(command, cli.output, config).await,
-        Command::Order { command } => commands::order::run(command, cli.output, config).await,
+        Command::Option { command } => {
+            commands::option::run(command, cli.output, config, cli.account.as_deref()).await
+        }
+        Command::Order { command } => {
+            commands::order::run(command, cli.output, config, cli.account.as_deref()).await
+        }
         Command::Market { command } => commands::market::run(command, cli.output, config).await,
-        Command::Account { command } => commands::account::run(command, cli.output, config).await,
+        Command::Account { command } => {
+            commands::account::run(command, cli.output, config, cli.account.as_deref()).await
+        }
         Command::Futures { command } => commands::futures::run(command, cli.output, config).await,
         Command::Index { command } => commands::index::run(command, cli.output, config).await,
         Command::Recurring { command } => {
-            commands::recurring::run(command, cli.output, config).await
+            commands::recurring::run(command, cli.output, config, cli.account.as_deref()).await
         }
         Command::Watchlist { command } => {
             commands::watchlist::run(command, cli.output, config).await

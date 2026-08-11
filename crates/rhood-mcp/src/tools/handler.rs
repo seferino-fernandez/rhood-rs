@@ -152,6 +152,20 @@ pub struct RhoodTools {
 }
 
 impl RhoodTools {
+    pub(super) async fn resolve_account_number(
+        client: &RobinhoodClient,
+        requested: Option<&str>,
+    ) -> Result<String, String> {
+        let account = client
+            .resolve_account(requested)
+            .await
+            .map_err(|error| super::types::format_tool_error(&error))?;
+        account
+            .canonical_account_number()
+            .map(str::to_owned)
+            .ok_or_else(|| "Resolved account has no canonical account number".to_string())
+    }
+
     /// Creates a new `RhoodTools` with an already-authenticated client.
     ///
     /// Used by the HTTP transport, which authenticates once at startup and

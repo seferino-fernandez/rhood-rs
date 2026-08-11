@@ -78,9 +78,11 @@ pub fn default_span() -> HistoricalSpan {
     HistoricalSpan::Week
 }
 
-#[derive(Deserialize, Serialize, JsonSchema)]
+#[derive(Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PlaceStockOrderParams {
+    /// Canonical brokerage account number from get_accounts. May be omitted only when exactly one account exists.
+    pub account_number: Option<String>,
     /// Stock symbol
     #[schemars(length(max = 12), regex(pattern = r"^[A-Za-z0-9.]{1,12}$"))]
     pub symbol: String,
@@ -90,7 +92,7 @@ pub struct PlaceStockOrderParams {
     #[serde(default, deserialize_with = "opt_f64_or_str")]
     #[schemars(range(min = 0.0))]
     pub quantity: Option<f64>,
-    /// Dollar amount to invest (mutually exclusive with quantity, buy only)
+    /// Dollar intent of at least $1. Mutually exclusive with quantity; requires buy, market, immediate, and GFD. Converted from the current ask to a six-decimal share estimate.
     #[serde(default, deserialize_with = "opt_f64_or_str")]
     #[schemars(range(min = 0.0))]
     pub dollar_amount: Option<f64>,
@@ -147,9 +149,11 @@ pub struct FindOptionsParams {
     pub strike_price: Option<f64>,
 }
 
-#[derive(Deserialize, Serialize, JsonSchema)]
+#[derive(Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PlaceOptionOrderParams {
+    /// Canonical brokerage account number from get_accounts. May be omitted only when exactly one account exists.
+    pub account_number: Option<String>,
     /// Stock symbol (e.g. "AAPL")
     #[schemars(length(max = 12), regex(pattern = r"^[A-Za-z0-9.]{1,12}$"))]
     pub symbol: String,
@@ -418,6 +422,8 @@ pub struct MarketTodayHoursParams {
 
 #[derive(Deserialize, JsonSchema)]
 pub struct StockOrderHistoryParams {
+    /// Canonical brokerage account number from get_accounts. May be omitted only when exactly one account exists.
+    pub account_number: Option<String>,
     /// Filter orders updated since this date (ISO 8601, e.g. "2025-01-01")
     #[schemars(regex(pattern = r"^\d{4}-\d{2}-\d{2}$"))]
     pub since: Option<String>,
@@ -425,6 +431,8 @@ pub struct StockOrderHistoryParams {
 
 #[derive(Deserialize, JsonSchema)]
 pub struct OptionOrderHistoryParams {
+    /// Canonical brokerage account number from get_accounts. May be omitted only when exactly one account exists.
+    pub account_number: Option<String>,
     /// Filter orders updated since this date (ISO 8601, e.g. "2025-01-01")
     #[schemars(regex(pattern = r"^\d{4}-\d{2}-\d{2}$"))]
     pub since: Option<String>,
@@ -489,6 +497,8 @@ pub struct DividendParams {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CreateRecurringInvestmentParams {
+    /// Canonical brokerage account number from get_accounts. May be omitted only when exactly one account exists.
+    pub account_number: Option<String>,
     /// Stock symbol (e.g. "TSLA")
     #[schemars(length(max = 12), regex(pattern = r"^[A-Za-z0-9.]{1,12}$"))]
     pub symbol: String,
@@ -619,6 +629,28 @@ pub struct WatchlistModifyParams {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CollectionPageParams {
+    /// Opaque continuation cursor returned as `next_cursor` by the previous call.
+    #[schemars(length(max = 128))]
+    pub cursor: Option<String>,
+    /// Maximum items to return. Defaults to 50 and cannot exceed 100.
+    #[schemars(range(min = 1, max = 100))]
+    pub limit: Option<usize>,
+}
+
+/// Optional account selector for account-sensitive tools.
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AccountSelectorParams {
+    /// Canonical brokerage account number from get_accounts. May be omitted only when exactly one account exists.
+    pub account_number: Option<String>,
+}
+
+/// Account selector plus paging controls for account-sensitive collections.
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AccountCollectionPageParams {
+    /// Canonical brokerage account number from get_accounts. May be omitted only when exactly one account exists.
+    pub account_number: Option<String>,
     /// Opaque continuation cursor returned as `next_cursor` by the previous call.
     #[schemars(length(max = 128))]
     pub cursor: Option<String>,

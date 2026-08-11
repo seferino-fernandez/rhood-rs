@@ -11,10 +11,16 @@ impl RhoodTools {
         description = "List all recurring investment schedules",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
-    async fn get_recurring_investments(&self, peer: Peer<RoleServer>) -> Result<String, String> {
+    async fn get_recurring_investments(
+        &self,
+        peer: Peer<RoleServer>,
+        Parameters(params): Parameters<AccountSelectorParams>,
+    ) -> Result<String, String> {
         let client = self.ensure_client(&peer).await?;
+        let account =
+            Self::resolve_account_number(&client, params.account_number.as_deref()).await?;
         let investments = client
-            .get_recurring_investments()
+            .get_recurring_investments(&account)
             .await
             .map_err(|rhood_error| format_tool_error(&rhood_error))?;
         serde_json::to_string_pretty(&investments).map_err(|error| error.to_string())
@@ -38,7 +44,10 @@ impl RhoodTools {
         use rhood_core::models::recurring::CreateRecurringRequest;
 
         let client = self.ensure_client(&peer).await?;
+        let account =
+            Self::resolve_account_number(&client, params.account_number.as_deref()).await?;
         let req = CreateRecurringRequest {
+            account_number: account,
             symbol: params.symbol,
             amount: params.amount,
             frequency: params.frequency,

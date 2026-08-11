@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Add Bonfire unified account discovery and explicit canonical account selection across account-sensitive endpoints.
+- Add `prepare_stock_order` and `submit_prepared_stock_order` for exact pre-confirmation stock payloads.
+
+### Changed
+
+- Account-sensitive methods now require a canonical account number instead of selecting the first standard account.
+- Stock orders now send form version 7, a call-scoped client reference, derived session flags, and strict quote collars. Dollar buys convert to good-for-day fractional shares using the current ask.
+
+### Fixed
+
+- Reject stale prepared orders, redirects, and automatic stock-order retries. Transport timeouts now return `SubmissionUncertain` with a reconciliation reference.
+
 ## [0.2.0](https://github.com/seferino-fernandez/rhood-rs/compare/rhood-core-v0.1.4...rhood-core-v0.2.0) - 2026-08-11
 
 ### Added

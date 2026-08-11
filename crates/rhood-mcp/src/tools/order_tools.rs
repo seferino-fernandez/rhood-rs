@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use axum::http::request::Parts;
 use rhood_core::models::order::{
-    MarketHours, OptionOrderRequest, OrderAmount, OrderType, Side, StockOrderRequest, TimeInForce,
-    Trigger,
+    MarketHours, OptionOrderRequest, OrderAmount, PreparedStockOrder, PreparedStockOrderPreview,
+    Side, StockOrderRequest, TimeInForce, Trigger,
 };
 use rmcp::handler::server::tool::{InputResponses as ToolInputResponses, RequestState};
 use rmcp::model::{
@@ -29,25 +29,34 @@ const OPTION_ORDER_TOOL: &str = "place_option_order";
 const STDIO_PRINCIPAL: &str = "transport:stdio";
 const NON_OAUTH_HTTP_PRINCIPAL: &str = "transport:http-non-oauth";
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "order")]
 enum StagedOrder {
     Stock(PlaceStockOrderParams),
     Option(PlaceOptionOrderParams),
 }
 
-enum OrderRequest {
-    Stock(StockOrderRequest),
-    Option(OptionOrderRequest),
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", content = "order")]
+enum SealedOrder {
+    Stock {
+        prepared: Box<PreparedStockOrder>,
+        account_label: String,
+    },
+    Option {
+        params: PlaceOptionOrderParams,
+        account_label: String,
+    },
 }
 
 struct PreparedOrder {
-    request: OrderRequest,
+    request: OptionOrderRequest,
     summary: String,
 }
 
 struct OrderRoundRequest {
-    order: StagedOrder,
+    binding_order: StagedOrder,
+    staged_order: Option<SealedOrder>,
     request_state: Option<String>,
     input_responses: Option<InputResponses>,
 }
@@ -99,11 +108,11 @@ fn side_name(side: Side) -> &'static str {
     }
 }
 
-fn prepare_stock_order(params: &PlaceStockOrderParams) -> Result<PreparedOrder, String> {
+fn stock_order_request(
+    params: &PlaceStockOrderParams,
+    account_number: String,
+) -> Result<StockOrderRequest, String> {
     validate_symbol_format(&params.symbol)?;
-    if params.order_type == OrderType::Limit && params.limit_price.is_none() {
-        return Err("limit_price required for limit orders".into());
-    }
     if let Some(quantity) = params.quantity {
         validate_positive("quantity", quantity)?;
     }
@@ -125,30 +134,8 @@ fn prepare_stock_order(params: &PlaceStockOrderParams) -> Result<PreparedOrder, 
     };
     let trigger = params.trigger.unwrap_or(Trigger::Immediate);
     let market_hours = params.market_hours.unwrap_or(MarketHours::RegularHours);
-    let amount_summary = match amount {
-        OrderAmount::Quantity(quantity) => format!("{quantity} shares"),
-        OrderAmount::DollarAmount(dollar_amount) => format!("${dollar_amount:.2}"),
-    };
-    let limit_price_summary = params.limit_price.map_or_else(
-        || "not applicable".to_string(),
-        |limit_price| format!("${limit_price:.2}"),
-    );
-    let stop_price_summary = params.stop_price.map_or_else(
-        || "not applicable".to_string(),
-        |stop_price| format!("${stop_price:.2}"),
-    );
-    let summary = format!(
-        "Confirm stock order: side={}; amount={}; symbol={}; order type={}; limit price={}; trigger={}; stop price={}; time in force={}; market hours={market_hours}",
-        side_name(params.side),
-        amount_summary,
-        params.symbol,
-        params.order_type,
-        limit_price_summary,
-        trigger,
-        stop_price_summary,
-        time_in_force_name(params.time_in_force),
-    );
     let request = StockOrderRequest {
+        account_number,
         symbol: params.symbol.clone(),
         amount,
         side: params.side,
@@ -159,13 +146,44 @@ fn prepare_stock_order(params: &PlaceStockOrderParams) -> Result<PreparedOrder, 
         time_in_force: params.time_in_force,
         market_hours,
     };
-    Ok(PreparedOrder {
-        request: OrderRequest::Stock(request),
-        summary,
-    })
+    rhood_core::endpoints::orders::validate_stock_order(&request)
+        .map_err(|error| format_tool_error(&error))?;
+    Ok(request)
 }
 
-fn prepare_option_order(params: &PlaceOptionOrderParams) -> Result<PreparedOrder, String> {
+fn stock_confirmation_summary(preview: &PreparedStockOrderPreview, account_label: &str) -> String {
+    let requested = preview.requested_dollar_amount.as_ref().map_or_else(
+        || format!("{} shares", preview.quantity),
+        |dollars| format!("${dollars}, resolved to {} shares", preview.quantity),
+    );
+    let price = preview
+        .price
+        .as_deref()
+        .map_or_else(|| "not applicable".to_string(), |price| format!("${price}"));
+    let quote = match (&preview.bid_price, &preview.ask_price) {
+        (Some(bid), Some(ask)) => format!("bid=${bid}, ask=${ask}"),
+        _ => "not applicable".to_string(),
+    };
+    format!(
+        "Confirm prepared stock order: account={account_label}; side={}; amount={requested}; symbol={}; order type={}; submission price={price}; trigger={}; stop price={}; time in force={}; market hours={}; extended hours={}; quote={quote}; client ref={}; form version={}",
+        side_name(preview.side),
+        preview.symbol,
+        preview.order_type,
+        preview.trigger,
+        preview.stop_price.as_deref().unwrap_or("not applicable"),
+        time_in_force_name(preview.time_in_force),
+        preview.market_hours,
+        preview.extended_hours,
+        preview.client_ref,
+        preview.order_form_version,
+    )
+}
+
+fn prepare_option_order(
+    params: &PlaceOptionOrderParams,
+    account_number: String,
+    account_label: &str,
+) -> Result<PreparedOrder, String> {
     validate_symbol_format(&params.symbol)?;
     validate_positive("strike_price", params.strike_price)?;
     validate_positive("quantity", params.quantity)?;
@@ -175,7 +193,8 @@ fn prepare_option_order(params: &PlaceOptionOrderParams) -> Result<PreparedOrder
         Side::Sell => "credit",
     };
     let summary = format!(
-        "Confirm option order: side={}; quantity={} contracts; symbol={}; option type={}; strike price=${:.2}; expiration={}; order type=limit; limit price=${:.2}; position effect={}; credit or debit={}; time in force={}",
+        "Confirm option order: account={}; side={}; quantity={} contracts; symbol={}; option type={}; strike price=${:.2}; expiration={}; order type=limit; limit price=${:.2}; position effect={}; credit or debit={}; time in force={}",
+        account_label,
         side_name(params.side),
         params.quantity,
         params.symbol,
@@ -188,6 +207,7 @@ fn prepare_option_order(params: &PlaceOptionOrderParams) -> Result<PreparedOrder
         time_in_force_name(params.time_in_force),
     );
     let request = OptionOrderRequest {
+        account_number,
         symbol: params.symbol.clone(),
         expiration_date: params.expiration_date.clone(),
         strike_price: params.strike_price,
@@ -198,16 +218,30 @@ fn prepare_option_order(params: &PlaceOptionOrderParams) -> Result<PreparedOrder
         position_effect: params.position_effect,
         time_in_force: params.time_in_force,
     };
-    Ok(PreparedOrder {
-        request: OrderRequest::Option(request),
-        summary,
-    })
+    Ok(PreparedOrder { request, summary })
 }
 
-fn prepare_order(order: &StagedOrder) -> Result<PreparedOrder, String> {
+fn sealed_order_summary(order: &SealedOrder) -> Result<String, String> {
     match order {
-        StagedOrder::Stock(params) => prepare_stock_order(params),
-        StagedOrder::Option(params) => prepare_option_order(params),
+        SealedOrder::Stock {
+            prepared,
+            account_label,
+        } => Ok(stock_confirmation_summary(
+            &prepared.preview(),
+            account_label,
+        )),
+        SealedOrder::Option {
+            params,
+            account_label,
+        } => prepare_option_order(
+            params,
+            params
+                .account_number
+                .clone()
+                .ok_or_else(|| "Option order has no resolved account number".to_string())?,
+            account_label,
+        )
+        .map(|prepared| prepared.summary),
     }
 }
 
@@ -255,7 +289,7 @@ fn stage_order(
     codec: &RequestStateCodec,
     ttl: Duration,
     associated_data: &[u8],
-    order: &StagedOrder,
+    order: &SealedOrder,
     summary: String,
 ) -> Result<CallToolResponse, String> {
     let request_state = codec
@@ -314,11 +348,10 @@ async fn run_order_round<F, Fut>(
     submit: F,
 ) -> Result<CallToolResponse, String>
 where
-    F: FnOnce(OrderRequest) -> Fut,
+    F: FnOnce(SealedOrder) -> Fut,
     Fut: Future<Output = Result<Option<String>, String>>,
 {
-    let prepared = prepare_order(&round.order)?;
-    let binding = associated_data(principal, tool_name, &round.order)?;
+    let binding = associated_data(principal, tool_name, &round.binding_order)?;
     let Some(request_state) = round.request_state else {
         if round.input_responses.is_some() {
             return Err(
@@ -326,20 +359,24 @@ where
                     .to_string(),
             );
         }
-        return stage_order(codec, ttl, &binding, &round.order, prepared.summary);
+        let staged_order = round
+            .staged_order
+            .ok_or_else(|| "Prepared order is missing from the staging round".to_string())?;
+        let summary = sealed_order_summary(&staged_order)?;
+        return stage_order(codec, ttl, &binding, &staged_order, summary);
     };
 
     verify_confirmation(round.input_responses)?;
-    let staged_order = codec
+    let staged_order: SealedOrder = codec
         .open_json_with(&request_state, &binding)
         .map_err(|error| RhoodTools::request_state_error(&error))?;
     redemptions.consume(&request_state)?;
-    let prepared = prepare_order(&staged_order)?;
-    let order_id = submit(prepared.request).await?;
+    let summary = sealed_order_summary(&staged_order)?;
+    let order_id = submit(staged_order).await?;
     let result = serde_json::json!({
         "order_id": order_id,
         "status": "submitted",
-        "summary": prepared.summary,
+        "summary": summary,
     });
     let content = serde_json::to_string_pretty(&result).map_err(|error| error.to_string())?;
     Ok(CallToolResult::success(vec![ContentBlock::text(content)]).into())
@@ -349,7 +386,7 @@ where
 impl RhoodTools {
     #[tool(
         name = "place_stock_order",
-        description = "Stage a stock order and request human Confirmation through MCP elicitation; the accepted retry submits it.",
+        description = "Resolve the account and prepare an exact stock-order payload with quote collar, share quantity, client reference, and form version; request human Confirmation through MCP elicitation, then submit that sealed preparation once on the accepted retry.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -366,6 +403,29 @@ impl RhoodTools {
         Parameters(params): Parameters<PlaceStockOrderParams>,
     ) -> Result<CallToolResponse, String> {
         let principal = request_principal(&extensions)?;
+        let binding_order = StagedOrder::Stock(params.clone());
+        let staged_order = if request_state.is_none() && input_responses.is_none() {
+            let mut request = stock_order_request(&params, "PENDING".to_string())?;
+            let client = self.ensure_client(&peer).await?;
+            let account = client
+                .resolve_account(params.account_number.as_deref())
+                .await
+                .map_err(|error| format_tool_error(&error))?;
+            request.account_number = account
+                .canonical_account_number()
+                .map(str::to_owned)
+                .ok_or_else(|| "Resolved account has no canonical account number".to_string())?;
+            let prepared = client
+                .prepare_stock_order(&request)
+                .await
+                .map_err(|error| format_tool_error(&error))?;
+            Some(SealedOrder::Stock {
+                prepared: Box::new(prepared),
+                account_label: account.selection_label(),
+            })
+        } else {
+            None
+        };
         run_order_round(
             &self.request_state_codec,
             &self.order_redemptions,
@@ -373,17 +433,18 @@ impl RhoodTools {
             &principal,
             STOCK_ORDER_TOOL,
             OrderRoundRequest {
-                order: StagedOrder::Stock(params),
+                binding_order,
+                staged_order,
                 request_state,
                 input_responses,
             },
-            |request| async move {
-                let OrderRequest::Stock(request) = request else {
+            |order| async move {
+                let SealedOrder::Stock { prepared, .. } = order else {
                     return Err("Sealed request state contains the wrong order type".to_string());
                 };
                 let client = self.ensure_client(&peer).await?;
                 let order = client
-                    .place_stock_order(&request)
+                    .submit_prepared_stock_order(*prepared)
                     .await
                     .map_err(|error| format_tool_error(&error))?;
                 Ok(order.id)
@@ -411,6 +472,23 @@ impl RhoodTools {
         Parameters(params): Parameters<PlaceOptionOrderParams>,
     ) -> Result<CallToolResponse, String> {
         let principal = request_principal(&extensions)?;
+        let binding_order = StagedOrder::Option(params.clone());
+        let staged_order = if request_state.is_none() && input_responses.is_none() {
+            prepare_option_order(&params, "PENDING".to_string(), "account")?;
+            let client = self.ensure_client(&peer).await?;
+            let account = client
+                .resolve_account(params.account_number.as_deref())
+                .await
+                .map_err(|error| format_tool_error(&error))?;
+            let mut resolved = params;
+            resolved.account_number = account.canonical_account_number().map(str::to_owned);
+            Some(SealedOrder::Option {
+                params: resolved,
+                account_label: account.selection_label(),
+            })
+        } else {
+            None
+        };
         run_order_round(
             &self.request_state_codec,
             &self.order_redemptions,
@@ -418,17 +496,30 @@ impl RhoodTools {
             &principal,
             OPTION_ORDER_TOOL,
             OrderRoundRequest {
-                order: StagedOrder::Option(params),
+                binding_order,
+                staged_order,
                 request_state,
                 input_responses,
             },
-            |request| async move {
-                let OrderRequest::Option(request) = request else {
+            |order| async move {
+                let SealedOrder::Option {
+                    params,
+                    account_label,
+                } = order
+                else {
                     return Err("Sealed request state contains the wrong order type".to_string());
                 };
+                let prepared = prepare_option_order(
+                    &params,
+                    params
+                        .account_number
+                        .clone()
+                        .ok_or_else(|| "Option order has no resolved account number".to_string())?,
+                    &account_label,
+                )?;
                 let client = self.ensure_client(&peer).await?;
                 let order = client
-                    .place_option_order(&request)
+                    .place_option_order(&prepared.request)
                     .await
                     .map_err(|error| format_tool_error(&error))?;
                 Ok(order.id)
@@ -498,11 +589,14 @@ mod tests {
 
     use axum::http::Request;
     use rhood_core::models::option::OptionType;
-    use rhood_core::models::order::{OptionPositionEffect, OrderType, Side, TimeInForce};
+    use rhood_core::models::order::{
+        MarketHours, OptionPositionEffect, OrderType, PreparedStockOrderPreview, Side, TimeInForce,
+        Trigger,
+    };
     use rhood_core::{RhoodConfig, RobinhoodClient};
     use rmcp::model::{
-        CallToolResponse, ElicitRequestParams, ElicitResult, ElicitationAction, Extensions,
-        InputRequest, InputRequiredResult, InputResponses,
+        CallToolResponse, ElicitResult, ElicitationAction, Extensions, InputRequiredResult,
+        InputResponses,
     };
     use tokio::sync::Barrier;
 
@@ -511,9 +605,10 @@ mod tests {
     use crate::tools::handler::{ORDER_REDEMPTION_RETENTION, OrderRedemptionStore, RhoodTools};
 
     use super::{
-        CONFIRMATION_REQUEST_ID, NON_OAUTH_HTTP_PRINCIPAL, OPTION_ORDER_TOOL, OrderRequest,
-        OrderRoundRequest, STDIO_PRINCIPAL, STOCK_ORDER_TOOL, StagedOrder, prepare_option_order,
-        request_principal, run_order_round, side_name, validate_positive, validate_symbol_format,
+        CONFIRMATION_REQUEST_ID, NON_OAUTH_HTTP_PRINCIPAL, OPTION_ORDER_TOOL, OrderRoundRequest,
+        STDIO_PRINCIPAL, STOCK_ORDER_TOOL, SealedOrder, StagedOrder, prepare_option_order,
+        request_principal, run_order_round, side_name, stock_confirmation_summary,
+        validate_positive, validate_symbol_format,
     };
     use crate::tools::ToolRateLimiter;
     use crate::tools::params::{PlaceOptionOrderParams, PlaceStockOrderParams};
@@ -589,6 +684,7 @@ mod tests {
 
     fn stock_order() -> PlaceStockOrderParams {
         PlaceStockOrderParams {
+            account_number: Some("ABC123".to_string()),
             symbol: "AAPL".to_string(),
             side: Side::Buy,
             quantity: Some(2.0),
@@ -604,6 +700,7 @@ mod tests {
 
     fn option_order() -> PlaceOptionOrderParams {
         PlaceOptionOrderParams {
+            account_number: Some("ABC123".to_string()),
             symbol: "AAPL".to_string(),
             expiration_date: "2026-09-18".to_string(),
             strike_price: 200.0,
@@ -630,10 +727,10 @@ mod tests {
             params.side = side;
             params.position_effect = position_effect;
 
-            let prepared = prepare_option_order(&params).expect("valid option order prepares");
-            let OrderRequest::Option(request) = prepared.request else {
-                panic!("option parameters must produce an option request");
-            };
+            let prepared =
+                prepare_option_order(&params, "ABC123".to_string(), "individual ****C123")
+                    .expect("valid option order prepares");
+            let request = prepared.request;
             assert_eq!(request.side, side);
             assert_eq!(request.position_effect, position_effect);
             assert!(
@@ -659,8 +756,13 @@ mod tests {
         request_state: Option<String>,
         input_responses: Option<InputResponses>,
     ) -> OrderRoundRequest {
+        let staged_order = request_state.is_none().then(|| SealedOrder::Option {
+            params: option_order(),
+            account_label: "individual ****C123".to_string(),
+        });
         OrderRoundRequest {
-            order,
+            binding_order: order.clone(),
+            staged_order,
             request_state,
             input_responses,
         }
@@ -1045,40 +1147,39 @@ mod tests {
         assert!(error.contains("stage the order again"), "got: {error}");
     }
 
-    #[tokio::test]
-    async fn limit_order_elicitation_shows_every_execution_attribute() {
-        let tools = tools();
-        let staged = run_order_round(
-            &tools.request_state_codec,
-            &tools.order_redemptions,
-            tools.order_confirmation_ttl,
-            "principal-a",
-            STOCK_ORDER_TOOL,
-            round(StagedOrder::Stock(stock_order()), None, None),
-            |_| async { Ok(Some("unused".to_string())) },
-        )
-        .await
-        .expect("valid order stages");
-        let required = input_required(staged);
-        let request = required
-            .input_requests
-            .as_ref()
-            .and_then(|requests| requests.get(CONFIRMATION_REQUEST_ID))
-            .expect("staged order carries a Confirmation elicitation");
-        let InputRequest::Elicitation(request) = request else {
-            panic!("trade Confirmation must use elicitation/create");
+    #[test]
+    fn prepared_stock_confirmation_shows_every_execution_attribute() {
+        let preview = PreparedStockOrderPreview {
+            account_number: "ABC123".to_string(),
+            symbol: "AAPL".to_string(),
+            quantity: "2".to_string(),
+            side: Side::Buy,
+            order_type: OrderType::Limit,
+            time_in_force: TimeInForce::Gtc,
+            trigger: Trigger::Immediate,
+            market_hours: MarketHours::RegularHours,
+            extended_hours: false,
+            price: Some("187.25".to_string()),
+            stop_price: None,
+            ask_price: None,
+            bid_price: None,
+            requested_dollar_amount: None,
+            conversion_price: None,
+            client_ref: "client-ref".to_string(),
+            order_form_version: 7,
         };
-        let ElicitRequestParams::FormElicitationParams { message, .. } = &request.params else {
-            panic!("trade Confirmation must use form elicitation");
-        };
+        let message = stock_confirmation_summary(&preview, "individual ****C123");
 
         for expected in [
+            "account=individual ****C123",
             "side=buy",
             "amount=2 shares",
             "symbol=AAPL",
             "order type=limit",
-            "limit price=$187.25",
+            "submission price=$187.25",
             "time in force=gtc (good till cancelled)",
+            "client ref=client-ref",
+            "form version=7",
         ] {
             assert!(
                 message.contains(expected),

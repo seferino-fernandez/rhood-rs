@@ -1,7 +1,8 @@
 use crate::output::{OutputFormat, output};
 use clap::Subcommand;
 use rhood_core::models::order::{
-    MarketHours, OrderAmount, OrderType, Side, StockOrderRequest, TimeInForce, Trigger,
+    MarketHours, OrderAmount, OrderType, PreparedStockOrderPreview, Side, StockOrderRequest,
+    TimeInForce, Trigger,
 };
 use rhood_core::{RhoodConfig, RobinhoodClient};
 
@@ -13,7 +14,7 @@ pub enum OrderCommand {
         /// Number of shares (mutually exclusive with --dollar-amount)
         #[arg(long, group = "amount_spec")]
         quantity: Option<f64>,
-        /// Dollar amount to invest (mutually exclusive with --quantity)
+        /// Dollar intent of at least $1, converted to a GFD fractional-share estimate
         #[arg(long, group = "amount_spec")]
         dollar_amount: Option<f64>,
         /// Order type
@@ -100,10 +101,42 @@ fn placed_order_message(id: &str, state: Option<&str>) -> String {
     }
 }
 
+fn prepared_order_message(preview: &PreparedStockOrderPreview, account_label: &str) -> String {
+    let side = match preview.side {
+        Side::Buy => "buy",
+        Side::Sell => "sell",
+    };
+    let amount = preview.requested_dollar_amount.as_ref().map_or_else(
+        || format!("{} shares", preview.quantity),
+        |dollars| format!("${dollars}, resolved to {} shares", preview.quantity),
+    );
+    let price = preview
+        .price
+        .as_deref()
+        .map_or_else(|| "n/a".to_string(), |price| format!("${price}"));
+    let quote = match (&preview.bid_price, &preview.ask_price) {
+        (Some(bid), Some(ask)) => format!("bid ${bid}, ask ${ask}"),
+        _ => "n/a".to_string(),
+    };
+    format!(
+        "Prepared stock order\n  Account: {account_label}\n  Trade: {} {amount} {}\n  Type: {}, trigger {}, price {price}\n  Session: {}, extended hours {}, time in force {}\n  Quote: {quote}\n  Client ref: {}\n  Form version: {}",
+        side,
+        preview.symbol,
+        preview.order_type,
+        preview.trigger,
+        preview.market_hours,
+        preview.extended_hours,
+        preview.time_in_force,
+        preview.client_ref,
+        preview.order_form_version,
+    )
+}
+
 pub async fn run(
     cmd: &OrderCommand,
     format: OutputFormat,
     config: RhoodConfig,
+    requested_account: Option<&str>,
 ) -> anyhow::Result<()> {
     let read_only = config.read_only;
     let client = RobinhoodClient::with_config(config)?;
@@ -136,28 +169,13 @@ pub async fn run(
                 )]
                 _ => unreachable!("clap group prevents both"),
             };
-            let amount_str = match amount {
-                OrderAmount::Quantity(q) => format!("{q}x"),
-                OrderAmount::DollarAmount(d) => format!("${d:.2} of"),
-            };
-            let type_str = if *r#type == OrderType::Market {
-                "market".to_string()
+            let time_in_force = if matches!(amount, OrderAmount::DollarAmount(_)) {
+                TimeInForce::Gfd
             } else {
-                let limit = {
-                    #[expect(
-                        clippy::unwrap_used,
-                        reason = "the preceding limit-order guard rejects a missing limit price"
-                    )]
-                    limit.unwrap()
-                };
-                format!("limit @ ${limit:.2}")
+                TimeInForce::Gtc
             };
-            println!("Buy {amount_str} {symbol} at {type_str}");
-            if !confirm_order(*yes)? {
-                println!("Order cancelled.");
-                return Ok(());
-            }
-            let req = StockOrderRequest {
+            let mut req = StockOrderRequest {
+                account_number: "PENDING".to_string(),
                 symbol: symbol.clone(),
                 amount,
                 side: Side::Buy,
@@ -165,10 +183,25 @@ pub async fn run(
                 limit_price: *limit,
                 trigger: *trigger,
                 stop_price: *stop_price,
-                time_in_force: TimeInForce::Gtc,
+                time_in_force,
                 market_hours: *market_hours,
             };
-            let order = client.place_stock_order(&req).await?;
+            rhood_core::endpoints::orders::validate_stock_order(&req)?;
+            let account = super::resolve_account(&client, requested_account).await?;
+            req.account_number = account
+                .canonical_account_number()
+                .ok_or_else(|| anyhow::anyhow!("resolved account has no canonical number"))?
+                .to_string();
+            let prepared = client.prepare_stock_order(&req).await?;
+            println!(
+                "{}",
+                prepared_order_message(&prepared.preview(), &account.selection_label())
+            );
+            if !confirm_order(*yes)? {
+                println!("Order cancelled.");
+                return Ok(());
+            }
+            let order = client.submit_prepared_stock_order(prepared).await?;
             let id = order.id.clone().unwrap_or_else(|| "unknown".into());
             println!("{}", placed_order_message(&id, order.state.as_deref()));
         }
@@ -188,24 +221,8 @@ pub async fn run(
             if *r#type == OrderType::Limit && limit.is_none() {
                 anyhow::bail!("Limit price required for limit orders (--limit)");
             }
-            let type_str = if *r#type == OrderType::Market {
-                "market".to_string()
-            } else {
-                let limit = {
-                    #[expect(
-                        clippy::unwrap_used,
-                        reason = "the preceding limit-order guard rejects a missing limit price"
-                    )]
-                    limit.unwrap()
-                };
-                format!("limit @ ${limit:.2}")
-            };
-            println!("Sell {quantity}x {symbol} at {type_str}");
-            if !confirm_order(*yes)? {
-                println!("Order cancelled.");
-                return Ok(());
-            }
-            let req = StockOrderRequest {
+            let mut req = StockOrderRequest {
+                account_number: "PENDING".to_string(),
                 symbol: symbol.clone(),
                 amount: OrderAmount::Quantity(*quantity),
                 side: Side::Sell,
@@ -216,14 +233,34 @@ pub async fn run(
                 time_in_force: TimeInForce::Gtc,
                 market_hours: *market_hours,
             };
-            let order = client.place_stock_order(&req).await?;
+            rhood_core::endpoints::orders::validate_stock_order(&req)?;
+            let account = super::resolve_account(&client, requested_account).await?;
+            req.account_number = account
+                .canonical_account_number()
+                .ok_or_else(|| anyhow::anyhow!("resolved account has no canonical number"))?
+                .to_string();
+            let prepared = client.prepare_stock_order(&req).await?;
+            println!(
+                "{}",
+                prepared_order_message(&prepared.preview(), &account.selection_label())
+            );
+            if !confirm_order(*yes)? {
+                println!("Order cancelled.");
+                return Ok(());
+            }
+            let order = client.submit_prepared_stock_order(prepared).await?;
             let id = order.id.clone().unwrap_or_else(|| "unknown".into());
             println!("{}", placed_order_message(&id, order.state.as_deref()));
         }
         OrderCommand::List { status, since } => {
+            let account = super::resolve_account_number(&client, requested_account).await?;
             let mut orders = match status.as_deref() {
-                Some("open") => client.get_open_stock_orders().await?,
-                _ => client.get_all_stock_orders(since.as_deref()).await?,
+                Some("open") => client.get_open_stock_orders(&account).await?,
+                _ => {
+                    client
+                        .get_all_stock_orders(&account, since.as_deref())
+                        .await?
+                }
             };
             // Best-effort symbol resolution: don't fail the listing if a
             // per-instrument lookup errors out.

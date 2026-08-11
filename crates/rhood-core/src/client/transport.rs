@@ -8,6 +8,7 @@ use super::{
     DEFAULT_RETRY_AFTER_SECS, FUTURES_CONTRACT_HEADER, FUTURES_CONTRACT_HEADER_VALUE,
     RobinhoodClient,
 };
+use crate::models::order::{StockOrder, StockOrderPayload};
 use crate::pagination::{CursorPaginatedResponse, PaginatedResponse};
 use crate::{Result, RhoodError};
 use serde::Serialize;
@@ -198,6 +199,36 @@ impl RobinhoodClient {
             .send()
             .await?;
         handle_response(res).await
+    }
+
+    pub(crate) async fn submit_stock_order_form(
+        &self,
+        url: &str,
+        payload: &StockOrderPayload,
+    ) -> Result<StockOrder> {
+        let auth = self.require_auth().await?;
+        let client_ref = payload.ref_id.clone();
+        let response = self
+            .write_http
+            .post(url)
+            .header("Authorization", &auth)
+            .form(payload)
+            .send()
+            .await
+            .map_err(|error| RhoodError::SubmissionUncertain {
+                client_ref: client_ref.clone(),
+                message: error.to_string(),
+            })?;
+
+        match handle_response(response).await {
+            Err(RhoodError::Api { status, message }) if (200..300).contains(&status) => {
+                Err(RhoodError::SubmissionUncertain {
+                    client_ref,
+                    message,
+                })
+            }
+            result => result,
+        }
     }
 
     /// Sends an authenticated POST request with a JSON body and deserializes
