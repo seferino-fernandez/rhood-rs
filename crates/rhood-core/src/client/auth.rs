@@ -50,70 +50,42 @@ impl RobinhoodClient {
         password: &str,
         mfa_secret: Option<&str>,
     ) -> Result<()> {
-        // Step 1: Try loading from cache
-        if let Some(cached) = self.token_cache.load()? {
-            tracing::debug!("Found cached token, restoring auth state");
-            self.device_token
-                .write()
-                .await
-                .clone_from(&cached.device_token);
-            *self.auth_state.write().await = AuthState::Authenticated {
-                access_token: cached.access_token.clone(),
-                token_type: cached.token_type.clone(),
-                refresh_token: cached.refresh_token.clone(),
-            };
-
-            // Step 2: Validate cached token with a live API call
-            match self.validate_token().await {
-                Ok(true) => {
-                    tracing::debug!("Cached token validated successfully");
-                    return Ok(());
-                }
-                Ok(false) => {
-                    tracing::debug!("Cached token rejected by server, trying refresh");
-                }
-                Err(err) => {
-                    tracing::warn!(%err, "Token validation failed with error, trying refresh");
-                }
-            }
-
-            // Step 3: Try refreshing the token
-            match self.try_refresh_token().await {
-                Ok(true) => {
-                    tracing::debug!("Token refresh succeeded");
-                    return Ok(());
-                }
-                Ok(false) => {
-                    tracing::debug!("Token refresh failed, falling through to headless login");
-                }
-                Err(err) => {
-                    tracing::warn!(%err, "Token refresh error, falling through to headless login");
-                }
-            }
+        if self.recover_from_cache_at(Utc::now().timestamp()).await? {
+            return Ok(());
         }
 
-        // Step 4: Full headless login
+        // Full headless login
         tracing::debug!("Attempting headless login");
         *self.auth_state.write().await = AuthState::Unauthenticated;
-        self.login_headless(username, password, mfa_secret).await
+        self.login_headless_without_cache(username, password, mfa_secret)
+            .await
     }
 
     /// Attempts to restore an authenticated session from the on-disk token cache.
     ///
-    /// Loads the cached token, validates it with a live API call via
-    /// [`validate_token()`](Self::validate_token), and on failure attempts
-    /// to refresh it. Returns `true` if the client is now authenticated,
-    /// `false` if all recovery strategies failed.
+    /// Loads the cached token and checks its local access-token expiry. An expired
+    /// access token is refreshed directly; otherwise the access token is validated
+    /// via [`validate_token()`](Self::validate_token) before refresh is attempted.
+    /// Returns `true` if the client is now authenticated and `false` if the cache is
+    /// absent or the server rejects recovery without an actionable error.
     ///
     /// # Errors
     ///
-    /// Returns an error on I/O failures or HTTP transport errors.
+    /// Returns cache permission, filesystem I/O, HTTP transport/body, response
+    /// parsing, incomplete token-pair, expiry calculation, persistence, and cache
+    /// cleanup errors. Once cached credentials are staged for recovery, every error
+    /// leaves the live authentication state unauthenticated.
     pub async fn login_from_cache(&self) -> Result<bool> {
+        self.recover_from_cache_at(Utc::now().timestamp()).await
+    }
+
+    async fn recover_from_cache_at(&self, unix_timestamp: i64) -> Result<bool> {
         let Some(cached) = self.token_cache.load()? else {
             tracing::debug!("No cached token found");
             return Ok(false);
         };
-        tracing::debug!("Found cached token, validating");
+        let access_token_expired = cached.access_token_is_expired_at(unix_timestamp);
+        tracing::debug!(access_token_expired, "Found cached token");
         self.device_token
             .write()
             .await
@@ -124,29 +96,36 @@ impl RobinhoodClient {
             refresh_token: cached.refresh_token.clone(),
         };
 
-        // Validate with a live API call
-        match self.validate_token().await {
-            Ok(true) => {
-                tracing::debug!("Cached token is valid");
-                return Ok(true);
+        let recovery = async {
+            if access_token_expired {
+                tracing::debug!("Cached access token is expired, refreshing without validation");
+            } else {
+                match self.validate_token().await {
+                    Ok(true) => {
+                        tracing::debug!("Cached token is valid");
+                        return Ok(true);
+                    }
+                    Ok(false) => {
+                        tracing::debug!("Cached token validation failed, attempting refresh");
+                    }
+                    Err(err) => {
+                        tracing::debug!(%err, "Token validation error, attempting refresh");
+                    }
+                }
             }
-            Ok(false) => {
-                tracing::debug!("Cached token validation failed, attempting refresh");
-            }
-            Err(err) => {
-                tracing::debug!(%err, "Token validation error, attempting refresh");
-            }
+
+            self.try_refresh_token_at(unix_timestamp).await
+        }
+        .await;
+
+        if recovery.as_ref().is_ok_and(|restored| *restored) {
+            tracing::debug!("Cached authentication recovery succeeded");
+        } else {
+            tracing::debug!("Cached authentication recovery failed, clearing auth state");
+            *self.auth_state.write().await = AuthState::Unauthenticated;
         }
 
-        // Token validation failed so try to refresh before giving up
-        if self.try_refresh_token().await? {
-            tracing::debug!("Token refresh succeeded");
-            return Ok(true);
-        }
-
-        tracing::debug!("Token refresh failed, clearing auth state");
-        *self.auth_state.write().await = AuthState::Unauthenticated;
-        Ok(false)
+        recovery
     }
 
     /// Validates the current access token by making a lightweight API call.
@@ -180,7 +159,7 @@ impl RobinhoodClient {
     /// Returns `Ok(false)` if refresh failed gracefully (no refresh token, server
     /// rejection, or the refresh token itself has expired which is indicated by the
     /// server returning a `verification_workflow` in the response).
-    async fn try_refresh_token(&self) -> Result<bool> {
+    async fn try_refresh_token_at(&self, unix_timestamp: i64) -> Result<bool> {
         let refresh_token = match self.auth_state.read().await.refresh_token() {
             Some(rt) if !rt.expose_secret().is_empty() => rt.clone(),
             _ => return Ok(false),
@@ -198,34 +177,78 @@ impl RobinhoodClient {
         tracing::debug!("Attempting token refresh");
         let res = self.http.post(&token_url).form(&payload).send().await?;
         let status = res.status();
-        let body = res.text().await.unwrap_or_default();
+        let body = res.text().await?;
         tracing::debug!(
             status = status.as_u16(),
             body_len = body.len(),
             "Token refresh response"
         );
 
+        let parsed = serde_json::from_str::<OAuthResponse>(&body);
+        if parsed
+            .as_ref()
+            .is_ok_and(|data| data.verification_workflow.is_some())
+        {
+            tracing::debug!("Refresh token expired (verification_workflow in response)");
+            *self.auth_state.write().await = AuthState::Unauthenticated;
+            self.token_cache.clear()?;
+            return Ok(false);
+        }
+
         if !status.is_success() {
             return Ok(false);
         }
 
-        let data: OAuthResponse = serde_json::from_str(&body).map_err(|err| RhoodError::Api {
+        let data = parsed.map_err(|err| RhoodError::Api {
             status: status.as_u16(),
             message: format!("Failed to parse token refresh response: {err}"),
         })?;
+        let access_token = data
+            .access_token
+            .as_deref()
+            .filter(|token| !token.is_empty())
+            .ok_or_else(|| RhoodError::Api {
+                status: status.as_u16(),
+                message: "Incomplete token refresh response: missing access_token".into(),
+            })?;
+        let refresh_token = data
+            .refresh_token
+            .as_deref()
+            .filter(|token| !token.is_empty())
+            .ok_or_else(|| RhoodError::Api {
+                status: status.as_u16(),
+                message: "Incomplete token refresh response: missing refresh_token".into(),
+            })?;
+        let token_type = data
+            .token_type
+            .as_deref()
+            .unwrap_or(DEFAULT_TOKEN_TYPE)
+            .to_string();
+        let device_token = self.device_token.read().await.clone();
+        let token_expiry_secs =
+            i64::try_from(self.config.auth.token_expiry_secs).map_err(|_conversion_error| {
+                RhoodError::InvalidParameter("Token expiry duration exceeds i64::MAX".into())
+            })?;
+        let expires_at = unix_timestamp
+            .checked_add(token_expiry_secs)
+            .ok_or_else(|| {
+                RhoodError::InvalidParameter("Token expiry timestamp overflowed".into())
+            })?;
+        let rotated = CachedToken {
+            access_token: SecretString::from(access_token),
+            refresh_token: SecretString::from(refresh_token),
+            token_type: token_type.clone(),
+            device_token,
+            expires_at: Some(expires_at),
+        };
 
-        // If the refresh response contains a verification_workflow, the refresh
-        // token itself has expired and a full re-authentication is required.
-        // Return false to let the cascade fall through to headless login.
-        if data.verification_workflow.is_some() {
-            tracing::debug!("Refresh token expired (verification_workflow in response)");
-            return Ok(false);
-        }
-
-        match self.extract_tokens(&data).await {
-            Ok(()) => Ok(true),
-            Err(_) => Ok(false),
-        }
+        self.token_cache.save(&rotated)?;
+        *self.auth_state.write().await = AuthState::Authenticated {
+            access_token: rotated.access_token.clone(),
+            token_type,
+            refresh_token: rotated.refresh_token.clone(),
+        };
+        Ok(true)
     }
 
     /// Submit the initial OAuth2 password grant. Sets `auth_state` based on
@@ -236,10 +259,20 @@ impl RobinhoodClient {
         password: &str,
         mfa_secret: Option<&str>,
     ) -> Result<()> {
-        if self.login_from_cache().await? {
+        if self.recover_from_cache_at(Utc::now().timestamp()).await? {
             return Ok(());
         }
 
+        self.login_headless_without_cache(username, password, mfa_secret)
+            .await
+    }
+
+    async fn login_headless_without_cache(
+        &self,
+        username: &str,
+        password: &str,
+        mfa_secret: Option<&str>,
+    ) -> Result<()> {
         let mfa_code = if let Some(secret) = mfa_secret {
             let totp = totp_rs::Builder::new()
                 .with_algorithm(totp_rs::Algorithm::SHA1)
@@ -748,7 +781,12 @@ mod tests {
         let server = MockServer::start().await;
         let (_dir, client) = authenticated_client_for_server(&server.uri(), "").await;
 
-        assert!(!client.try_refresh_token().await.unwrap());
+        assert!(
+            !client
+                .try_refresh_token_at(Utc::now().timestamp())
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]
@@ -767,7 +805,12 @@ mod tests {
             .await;
         let (dir, client) = authenticated_client_for_server(&server.uri(), "old-refresh").await;
 
-        assert!(client.try_refresh_token().await.unwrap());
+        assert!(
+            client
+                .try_refresh_token_at(Utc::now().timestamp())
+                .await
+                .unwrap()
+        );
         let state = client.auth_state().await;
         assert_eq!(
             state.authorization_header().as_deref(),
@@ -780,28 +823,86 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn try_refresh_token_returns_false_on_server_rejection() {
+    async fn generic_refresh_rejection_preserves_cached_pair() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/oauth2/token/"))
             .respond_with(ResponseTemplate::new(400).set_body_string("bad refresh"))
             .mount(&server)
             .await;
-        let (_dir, client) = authenticated_client_for_server(&server.uri(), "old-refresh").await;
+        let (dir, client) = authenticated_client_for_server(&server.uri(), "old-refresh").await;
+        client
+            .token_cache
+            .save(&CachedToken {
+                access_token: SecretString::from("old-access"),
+                refresh_token: SecretString::from("old-refresh"),
+                token_type: "Bearer".into(),
+                device_token: "old-device".into(),
+                expires_at: Some(0),
+            })
+            .unwrap();
 
-        assert!(!client.try_refresh_token().await.unwrap());
-        assert_eq!(
-            client.auth_state().await.authorization_header().as_deref(),
-            Some("Bearer old-access")
-        );
+        assert!(!client.login_from_cache().await.unwrap());
+        assert!(matches!(
+            client.auth_state().await,
+            AuthState::Unauthenticated
+        ));
+        let persisted = client.token_cache.load().unwrap().unwrap();
+        assert_eq!(persisted.access_token.expose_secret(), "old-access");
+        assert_eq!(persisted.refresh_token.expose_secret(), "old-refresh");
+        drop(dir);
     }
 
     #[tokio::test]
-    async fn try_refresh_token_returns_false_when_refresh_requires_verification() {
+    async fn login_from_cache_clears_expired_refresh_for_workflow_on_any_auth_status() {
+        for status in [200, 400, 401, 403] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/oauth2/token/"))
+                .respond_with(
+                    ResponseTemplate::new(status).set_body_json(serde_json::json!({
+                        "verification_workflow": {
+                            "id": "wf-expired",
+                            "workflow_status": "issued"
+                        }
+                    })),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            let dir = tempfile::tempdir().unwrap();
+            let cache_path = dir.path().join("token.json");
+            let mut config = test_config(cache_path.to_str().unwrap());
+            config.api.base_url = server.uri();
+            let client = RobinhoodClient::with_config(config).unwrap();
+            client
+                .token_cache
+                .save(&CachedToken {
+                    access_token: SecretString::from("expired-access"),
+                    refresh_token: SecretString::from("expired-refresh"),
+                    token_type: "Bearer".into(),
+                    device_token: "retained-device".into(),
+                    expires_at: Some(0),
+                })
+                .unwrap();
+
+            assert!(!client.login_from_cache().await.unwrap(), "status {status}");
+            assert!(
+                matches!(client.auth_state().await, AuthState::Unauthenticated),
+                "status {status}"
+            );
+            assert!(!cache_path.exists(), "status {status}");
+            server.verify().await;
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn workflow_cleanup_failure_clears_live_state_and_preserves_cached_pair() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/oauth2/token/"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
                 "verification_workflow": {
                     "id": "wf-expired",
                     "workflow_status": "issued"
@@ -809,9 +910,355 @@ mod tests {
             })))
             .mount(&server)
             .await;
-        let (_dir, client) = authenticated_client_for_server(&server.uri(), "old-refresh").await;
+        let dir = tempfile::tempdir().unwrap();
+        let cache_path = dir.path().join("token.json");
+        let mut config = test_config(cache_path.to_str().unwrap());
+        config.api.base_url = server.uri();
+        let client = RobinhoodClient::with_config(config).unwrap();
+        client
+            .token_cache
+            .save(&CachedToken {
+                access_token: SecretString::from("expired-access"),
+                refresh_token: SecretString::from("retained-refresh"),
+                token_type: "Bearer".into(),
+                device_token: "retained-device".into(),
+                expires_at: Some(0),
+            })
+            .unwrap();
+        set_mode(dir.path(), 0o500);
 
-        assert!(!client.try_refresh_token().await.unwrap());
+        let result = client.login_from_cache().await;
+
+        set_mode(dir.path(), 0o700);
+        let error = result.unwrap_err();
+        assert!(matches!(
+            error,
+            RhoodError::Io(ref source)
+                if source.kind() == std::io::ErrorKind::PermissionDenied
+        ));
+        assert!(matches!(
+            client.auth_state().await,
+            AuthState::Unauthenticated
+        ));
+        let persisted = client.token_cache.load().unwrap().unwrap();
+        assert_eq!(persisted.access_token.expose_secret(), "expired-access");
+        assert_eq!(persisted.refresh_token.expose_secret(), "retained-refresh");
+    }
+
+    #[tokio::test]
+    async fn login_falls_through_to_password_grant_after_refresh_workflow() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/positions/"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/oauth2/token/"))
+            .and(body_string_contains("grant_type=refresh_token"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "verification_workflow": {
+                    "id": "wf-expired",
+                    "workflow_status": "issued"
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/oauth2/token/"))
+            .and(body_string_contains("grant_type=password"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "password-access",
+                "token_type": "Bearer",
+                "refresh_token": "password-refresh"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let cache_path = dir.path().join("token.json");
+        let mut config = test_config(cache_path.to_str().unwrap());
+        config.api.base_url = server.uri();
+        let client = RobinhoodClient::with_config(config).unwrap();
+        client
+            .token_cache
+            .save(&CachedToken {
+                access_token: SecretString::from("expired-access"),
+                refresh_token: SecretString::from("expired-refresh"),
+                token_type: "Bearer".into(),
+                device_token: "retained-device".into(),
+                expires_at: Some(0),
+            })
+            .unwrap();
+
+        client.login("user", "pass", None).await.unwrap();
+
+        assert_eq!(
+            client.auth_state().await.authorization_header().as_deref(),
+            Some("Bearer password-access")
+        );
+        let persisted = client.token_cache.load().unwrap().unwrap();
+        assert_eq!(persisted.access_token.expose_secret(), "password-access");
+        assert_eq!(persisted.refresh_token.expose_secret(), "password-refresh");
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn incomplete_refresh_success_clears_live_state_and_preserves_cached_pair() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/oauth2/token/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "partial-access",
+                "token_type": "Bearer"
+            })))
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let cache_path = dir.path().join("token.json");
+        let mut config = test_config(cache_path.to_str().unwrap());
+        config.api.base_url = server.uri();
+        let client = RobinhoodClient::with_config(config).unwrap();
+        client
+            .token_cache
+            .save(&CachedToken {
+                access_token: SecretString::from("old-access"),
+                refresh_token: SecretString::from("retained-refresh"),
+                token_type: "Bearer".into(),
+                device_token: "retained-device".into(),
+                expires_at: Some(0),
+            })
+            .unwrap();
+
+        let error = client.login_from_cache().await.unwrap_err();
+
+        assert!(matches!(
+            error,
+            RhoodError::Api { message, .. } if message.contains("missing refresh_token")
+        ));
+        assert!(matches!(
+            client.auth_state().await,
+            AuthState::Unauthenticated
+        ));
+        let persisted = client.token_cache.load().unwrap().unwrap();
+        assert_eq!(persisted.access_token.expose_secret(), "old-access");
+        assert_eq!(persisted.refresh_token.expose_secret(), "retained-refresh");
+    }
+
+    #[tokio::test]
+    async fn refresh_expiry_overflow_clears_live_state_and_preserves_cached_pair() {
+        const NOW: i64 = i64::MAX - 1;
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/oauth2/token/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "rotated-access",
+                "token_type": "Bearer",
+                "refresh_token": "rotated-refresh"
+            })))
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let cache_path = dir.path().join("token.json");
+        let mut config = test_config(cache_path.to_str().unwrap());
+        config.api.base_url = server.uri();
+        config.auth.token_expiry_secs = 2;
+        let client = RobinhoodClient::with_config(config).unwrap();
+        client
+            .token_cache
+            .save(&CachedToken {
+                access_token: SecretString::from("old-access"),
+                refresh_token: SecretString::from("retained-refresh"),
+                token_type: "Bearer".into(),
+                device_token: "retained-device".into(),
+                expires_at: Some(NOW - 1),
+            })
+            .unwrap();
+
+        let error = client.recover_from_cache_at(NOW).await.unwrap_err();
+
+        assert!(matches!(
+            error,
+            RhoodError::InvalidParameter(message)
+                if message == "Token expiry timestamp overflowed"
+        ));
+        assert!(matches!(
+            client.auth_state().await,
+            AuthState::Unauthenticated
+        ));
+        let persisted = client.token_cache.load().unwrap().unwrap();
+        assert_eq!(persisted.access_token.expose_secret(), "old-access");
+        assert_eq!(persisted.refresh_token.expose_secret(), "retained-refresh");
+    }
+
+    #[tokio::test]
+    async fn oversized_refresh_expiry_clears_live_state_and_preserves_cached_pair() {
+        const NOW: i64 = 1_700_000_000;
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/oauth2/token/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "rotated-access",
+                "token_type": "Bearer",
+                "refresh_token": "rotated-refresh"
+            })))
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let cache_path = dir.path().join("token.json");
+        let mut config = test_config(cache_path.to_str().unwrap());
+        config.api.base_url = server.uri();
+        config.auth.token_expiry_secs = i64::MAX.cast_unsigned() + 1;
+        let client = RobinhoodClient::with_config(config).unwrap();
+        client
+            .token_cache
+            .save(&CachedToken {
+                access_token: SecretString::from("old-access"),
+                refresh_token: SecretString::from("retained-refresh"),
+                token_type: "Bearer".into(),
+                device_token: "retained-device".into(),
+                expires_at: Some(NOW - 1),
+            })
+            .unwrap();
+
+        let error = client.recover_from_cache_at(NOW).await.unwrap_err();
+
+        assert!(matches!(
+            error,
+            RhoodError::InvalidParameter(message)
+                if message == "Token expiry duration exceeds i64::MAX"
+        ));
+        assert!(matches!(
+            client.auth_state().await,
+            AuthState::Unauthenticated
+        ));
+        let persisted = client.token_cache.load().unwrap().unwrap();
+        assert_eq!(persisted.access_token.expose_secret(), "old-access");
+        assert_eq!(persisted.refresh_token.expose_secret(), "retained-refresh");
+    }
+
+    #[tokio::test]
+    async fn malformed_refresh_success_preserves_cached_pair() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/oauth2/token/"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("not-json"))
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let cache_path = dir.path().join("token.json");
+        let mut config = test_config(cache_path.to_str().unwrap());
+        config.api.base_url = server.uri();
+        let client = RobinhoodClient::with_config(config).unwrap();
+        client
+            .token_cache
+            .save(&CachedToken {
+                access_token: SecretString::from("old-access"),
+                refresh_token: SecretString::from("retained-refresh"),
+                token_type: "Bearer".into(),
+                device_token: "retained-device".into(),
+                expires_at: Some(0),
+            })
+            .unwrap();
+
+        let error = client.login_from_cache().await.unwrap_err();
+
+        assert!(matches!(
+            error,
+            RhoodError::Api { message, .. } if message.contains("Failed to parse token refresh response")
+        ));
+        assert!(matches!(
+            client.auth_state().await,
+            AuthState::Unauthenticated
+        ));
+        let persisted = client.token_cache.load().unwrap().unwrap();
+        assert_eq!(persisted.access_token.expose_secret(), "old-access");
+        assert_eq!(persisted.refresh_token.expose_secret(), "retained-refresh");
+    }
+
+    #[tokio::test]
+    async fn refresh_transport_failure_preserves_cached_pair() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let server_uri = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        let dir = tempfile::tempdir().unwrap();
+        let cache_path = dir.path().join("token.json");
+        let mut config = test_config(cache_path.to_str().unwrap());
+        config.api.base_url = server_uri;
+        let client = RobinhoodClient::with_config(config).unwrap();
+        client
+            .token_cache
+            .save(&CachedToken {
+                access_token: SecretString::from("old-access"),
+                refresh_token: SecretString::from("retained-refresh"),
+                token_type: "Bearer".into(),
+                device_token: "retained-device".into(),
+                expires_at: Some(0),
+            })
+            .unwrap();
+
+        let error = client.login_from_cache().await.unwrap_err();
+        assert!(matches!(error, RhoodError::Http(_)));
+        assert!(matches!(
+            client.auth_state().await,
+            AuthState::Unauthenticated
+        ));
+
+        let persisted = client.token_cache.load().unwrap().unwrap();
+        assert_eq!(persisted.access_token.expose_secret(), "old-access");
+        assert_eq!(persisted.refresh_token.expose_secret(), "retained-refresh");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn refresh_save_failure_does_not_publish_or_persist_rotated_pair() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/oauth2/token/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "rotated-access",
+                "token_type": "Bearer",
+                "refresh_token": "rotated-refresh"
+            })))
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let cache_path = dir.path().join("token.json");
+        let mut config = test_config(cache_path.to_str().unwrap());
+        config.api.base_url = server.uri();
+        let client = RobinhoodClient::with_config(config).unwrap();
+        client
+            .token_cache
+            .save(&CachedToken {
+                access_token: SecretString::from("old-access"),
+                refresh_token: SecretString::from("retained-refresh"),
+                token_type: "Bearer".into(),
+                device_token: "retained-device".into(),
+                expires_at: Some(0),
+            })
+            .unwrap();
+        set_mode(dir.path(), 0o500);
+
+        let result = client.login_from_cache().await;
+
+        set_mode(dir.path(), 0o700);
+        let error = result.unwrap_err();
+        assert!(matches!(
+            error,
+            RhoodError::Io(ref source)
+                if source.kind() == std::io::ErrorKind::PermissionDenied
+        ));
+        assert!(matches!(
+            client.auth_state().await,
+            AuthState::Unauthenticated
+        ));
+        let persisted = client.token_cache.load().unwrap().unwrap();
+        assert_eq!(persisted.access_token.expose_secret(), "old-access");
+        assert_eq!(persisted.refresh_token.expose_secret(), "retained-refresh");
     }
 
     #[tokio::test]
@@ -848,6 +1295,67 @@ mod tests {
             Some("Bearer cached-access")
         );
         assert_eq!(&*client.device_token.read().await, "cached-device");
+    }
+
+    #[tokio::test]
+    async fn expired_cached_access_refreshes_directly_with_retained_credentials() {
+        const NOW: i64 = 1_700_000_000;
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/positions/"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/oauth2/token/"))
+            .and(body_string_contains("grant_type=refresh_token"))
+            .and(body_string_contains("refresh_token=retained-refresh"))
+            .and(body_string_contains("device_token=retained-device"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "rotated-access",
+                "token_type": "Bearer",
+                "refresh_token": "rotated-refresh"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let cache_path = dir.path().join("token.json");
+        let mut config = test_config(cache_path.to_str().unwrap());
+        config.api.base_url = server.uri();
+        let expected_expiry = NOW + config.auth.token_expiry_secs.cast_signed();
+        let client = RobinhoodClient::with_config(config).unwrap();
+        client
+            .token_cache
+            .save(&CachedToken {
+                access_token: SecretString::from("expired-access"),
+                refresh_token: SecretString::from("retained-refresh"),
+                token_type: "Bearer".into(),
+                device_token: "retained-device".into(),
+                expires_at: Some(NOW - 1),
+            })
+            .unwrap();
+
+        assert!(client.recover_from_cache_at(NOW).await.unwrap());
+
+        let state = client.auth_state().await;
+        assert_eq!(
+            state.authorization_header().as_deref(),
+            Some("Bearer rotated-access")
+        );
+        assert_eq!(
+            state.refresh_token().unwrap().expose_secret(),
+            "rotated-refresh"
+        );
+        assert_eq!(&*client.device_token.read().await, "retained-device");
+        let persisted = client.token_cache.load().unwrap().unwrap();
+        assert_eq!(persisted.access_token.expose_secret(), "rotated-access");
+        assert_eq!(persisted.refresh_token.expose_secret(), "rotated-refresh");
+        assert_eq!(persisted.device_token, "retained-device");
+        assert_eq!(persisted.expires_at, Some(expected_expiry));
+        server.verify().await;
     }
 
     #[cfg(unix)]
