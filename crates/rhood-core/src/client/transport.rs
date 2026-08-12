@@ -9,7 +9,7 @@ use super::{
     DEFAULT_RETRY_AFTER_SECS, FUTURES_CONTRACT_HEADER, FUTURES_CONTRACT_HEADER_VALUE,
     RobinhoodClient,
 };
-use crate::models::order::{StockOrder, StockOrderPayload};
+use crate::models::order::{OptionOrder, OptionOrderPayload, StockOrder, StockOrderPayload};
 use crate::pagination::{CursorPaginatedResponse, PaginatedResponse};
 use crate::{Result, RhoodError};
 use serde::Serialize;
@@ -296,6 +296,36 @@ impl RobinhoodClient {
             .post(url)
             .header("Authorization", &auth)
             .form(payload)
+            .send()
+            .await
+            .map_err(|error| RhoodError::SubmissionUncertain {
+                client_ref: client_ref.clone(),
+                message: error.to_string(),
+            })?;
+
+        match handle_response(response).await {
+            Err(RhoodError::Api { status, message }) if (200..300).contains(&status) => {
+                Err(RhoodError::SubmissionUncertain {
+                    client_ref,
+                    message,
+                })
+            }
+            result => result,
+        }
+    }
+
+    pub(crate) async fn submit_option_order_json(
+        &self,
+        url: &str,
+        payload: &OptionOrderPayload,
+    ) -> Result<OptionOrder> {
+        let auth = self.require_auth().await?;
+        let client_ref = payload.ref_id.clone();
+        let response = self
+            .write_http
+            .post(url)
+            .header("Authorization", &auth)
+            .json(payload)
             .send()
             .await
             .map_err(|error| RhoodError::SubmissionUncertain {

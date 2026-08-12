@@ -26,7 +26,7 @@ pub fn format_tool_error(err: &rhood_core::RhoodError) -> String {
         ),
         rhood_core::RhoodError::ReadOnlyMode => ("read_only", err.to_string()),
         rhood_core::RhoodError::InvalidParameter(msg) => ("invalid_parameter", msg.clone()),
-        rhood_core::RhoodError::PreparedOrderExpired => ("prepared_order_expired", err.to_string()),
+        rhood_core::RhoodError::StagedOrderExpired => ("staged_order_expired", err.to_string()),
         rhood_core::RhoodError::SubmissionUncertain { .. } => {
             ("submission_uncertain", err.to_string())
         }
@@ -57,7 +57,7 @@ fn tool_error_code(err: &rhood_core::RhoodError) -> &'static str {
         rhood_core::RhoodError::RateLimited { .. } => "rate_limited",
         rhood_core::RhoodError::ReadOnlyMode => "read_only",
         rhood_core::RhoodError::InvalidParameter(_) => "invalid_parameter",
-        rhood_core::RhoodError::PreparedOrderExpired => "prepared_order_expired",
+        rhood_core::RhoodError::StagedOrderExpired => "staged_order_expired",
         rhood_core::RhoodError::SubmissionUncertain { .. } => "submission_uncertain",
         rhood_core::RhoodError::NoEligibleAccount => "no_eligible_account",
         rhood_core::RhoodError::UnknownAccount { .. } => "unknown_account",

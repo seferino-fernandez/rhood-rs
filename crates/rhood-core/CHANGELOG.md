@@ -13,19 +13,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add account-filtered aggregate option strategy positions with full pagination.
 - Add the account-specific Bonfire portfolio performance chart view model.
 - Add tolerant, authenticated IPO Access list and card view models.
-- Add `prepare_stock_order` and `submit_prepared_stock_order` for exact pre-confirmation stock payloads.
+- Add one `prepare_order` and `submit_order` interface that freezes exact stock and option execution state before user confirmation.
 - Add `RobinhoodClient::get_futures_positions` with authenticated full-URL pagination and tolerant raw position objects.
 
 ### Changed
 
 - Account-sensitive methods now require a canonical account number instead of selecting the first standard account.
+- Replace immediate stock and option placement methods and stock-only preparation types with `OrderIntent`, `StagedOrder`, typed `OrderSummary`, and `SubmittedOrder`.
 - Stock orders now send form version 7, a call-scoped client reference, derived session flags, and strict quote collars. Dollar buys convert to good-for-day fractional shares using the current ask.
 - Authenticated GET requests now share paced starts and 429 cooldowns across client clones, retry connection errors, timeouts, and bounded rate limits up to three total attempts by default, and expose strict TOML/environment controls under `HttpConfig`.
 - Replace the prior instrument-identity source and output contract with core-owned enrichment. Positions, dividends, stock orders, news, tags, and splits retain Instrument References, preserve Wire Symbols, and expose aligned optional Ticker Symbols. Use strict `resolve_instrument_symbols` for explicit resolution; normal reads enrich best-effort.
 
 ### Fixed
 
-- Reject stale prepared orders, redirects, and automatic stock-order retries. Transport timeouts now return `SubmissionUncertain` with a reconciliation reference.
+- Reject stale or internally inconsistent Staged Orders, redirects, and automatic stock or option retries. Transport timeouts now return `SubmissionUncertain` with a reconciliation reference.
 
 ## [0.2.0](https://github.com/seferino-fernandez/rhood-rs/compare/rhood-core-v0.1.4...rhood-core-v0.2.0) - 2026-08-11
 

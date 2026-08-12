@@ -2,21 +2,24 @@ use crate::api::paths;
 use crate::client::RobinhoodClient;
 use crate::endpoints::account::validate_account_number;
 use crate::models::order::{
-    CancelAllFailure, CancelAllOutcome, MarketHours, OptionLeg, OptionOrder, OptionOrderPayload,
-    OptionOrderRequest, OrderAmount, OrderType, PreparedStockOrder, Side, StockOrder,
-    StockOrderPayload, StockOrderRequest, TimeInForce, Trigger,
+    CancelAllFailure, CancelAllOutcome, MarketHours, OptionLeg, OptionOrder, OptionOrderIntent,
+    OptionOrderPayload, OptionOrderSummary, OrderAmount, OrderIntent, OrderSummary, OrderType,
+    Side, StagedOrder, StagedOrderPayload, StockOrder, StockOrderIntent, StockOrderPayload,
+    StockOrderSummary, SubmittedOrder, TimeInForce, Trigger,
 };
 use crate::models::stock::StockQuote;
 use crate::{Result, RhoodError};
 
 const STOCK_ORDER_FORM_VERSION: u8 = 7;
-const PREPARED_STOCK_ORDER_TTL_MS: i64 = 60_000;
+const STAGED_STOCK_ORDER_TTL_MS: i64 = 60_000;
+const STAGED_OPTION_ORDER_TTL_MS: i64 = 600_000;
 
 /// Validates a stock order request for logical consistency.
 ///
 /// Returns `Ok(())` if valid, or `Err(RhoodError::InvalidOrder)` with a
 /// descriptive message if the request contains contradictory parameters.
-pub fn validate_stock_order(req: &StockOrderRequest) -> Result<()> {
+fn validate_stock_order(req: &StockOrderIntent) -> Result<()> {
+    validate_order_symbol(&req.symbol)?;
     match req.amount {
         OrderAmount::Quantity(quantity) => {
             validate_positive_order_value("quantity", quantity)?;
@@ -91,6 +94,37 @@ pub fn validate_stock_order(req: &StockOrderRequest) -> Result<()> {
     Ok(())
 }
 
+fn validate_option_order(req: &OptionOrderIntent) -> Result<()> {
+    validate_order_symbol(&req.symbol)?;
+    if chrono::NaiveDate::parse_from_str(&req.expiration_date, "%Y-%m-%d").is_err() {
+        return Err(RhoodError::InvalidOrder(
+            "expiration_date must use YYYY-MM-DD format".to_string(),
+        ));
+    }
+    if !matches!(req.option_type.as_str(), "call" | "put") {
+        return Err(RhoodError::InvalidOrder(
+            "option_type must be call or put".to_string(),
+        ));
+    }
+    validate_positive_order_value("strike_price", req.strike_price)?;
+    validate_positive_order_value("quantity", req.quantity)?;
+    validate_positive_order_value("limit_price", req.limit_price)
+}
+
+fn validate_order_symbol(symbol: &str) -> Result<()> {
+    if symbol.is_empty()
+        || symbol.len() > 12
+        || !symbol
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '.')
+    {
+        return Err(RhoodError::InvalidOrder(
+            "symbol must contain 1 to 12 ASCII letters, numbers, or periods".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_positive_order_value(name: &str, value: f64) -> Result<()> {
     if !value.is_finite() || value <= 0.0 {
         return Err(RhoodError::InvalidOrder(format!(
@@ -133,6 +167,67 @@ fn quote_for_symbol(quotes: Vec<StockQuote>, symbol: &str) -> Result<StockQuote>
                 .is_some_and(|quoted| quoted.eq_ignore_ascii_case(symbol))
         })
         .ok_or_else(|| RhoodError::InvalidSymbol(symbol.to_string()))
+}
+
+fn validate_staged_order(staged: &StagedOrder) -> Result<()> {
+    let valid = match (&staged.payload, &staged.summary) {
+        (StagedOrderPayload::Stock(payload), OrderSummary::Stock(summary)) => {
+            payload
+                .account
+                .ends_with(&format!("/{}/", summary.account_number))
+                && payload.symbol == summary.symbol
+                && payload.instrument == summary.instrument
+                && payload.quantity == summary.quantity
+                && payload.side == summary.side
+                && payload.order_type == summary.order_type
+                && payload.time_in_force == summary.time_in_force
+                && payload.trigger == summary.trigger
+                && payload.market_hours == summary.market_hours
+                && payload.extended_hours == summary.extended_hours
+                && payload.price == summary.price
+                && payload.stop_price == summary.stop_price
+                && payload.ask_price == summary.ask_price
+                && payload.bid_price == summary.bid_price
+                && payload.ref_id == summary.client_ref
+                && payload.order_form_version == summary.order_form_version
+                && payload.order_form_version == STOCK_ORDER_FORM_VERSION
+                && !payload.override_day_trade_checks
+                && !payload.override_dtbp_checks
+        }
+        (StagedOrderPayload::Option(payload), OrderSummary::Option(summary)) => {
+            let Some(leg) = payload.legs.first() else {
+                return Err(RhoodError::InvalidOrder(
+                    "staged option order has no leg".to_string(),
+                ));
+            };
+            payload.legs.len() == 1
+                && payload
+                    .account
+                    .ends_with(&format!("/{}/", summary.account_number))
+                && payload.direction == summary.direction
+                && payload.time_in_force == summary.time_in_force
+                && payload.order_type == "limit"
+                && payload.trigger == "immediate"
+                && payload.price == summary.limit_price
+                && payload.order_type == summary.order_type
+                && payload.trigger == summary.trigger
+                && payload.quantity == summary.quantity
+                && payload.ref_id == summary.client_ref
+                && leg.position_effect == summary.position_effect
+                && leg.side == summary.side
+                && leg.ratio_quantity == 1
+                && leg.option == summary.option_contract
+                && !payload.override_day_trade_checks
+                && !payload.override_dtbp_checks
+        }
+        _ => false,
+    };
+    if !valid {
+        return Err(RhoodError::InvalidOrder(
+            "staged order payload and summary do not match".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 impl RobinhoodClient {
@@ -196,22 +291,18 @@ impl RobinhoodClient {
         self.post_empty(&url).await
     }
 
-    /// Prepares a stock order without submitting it.
-    ///
-    /// Validation completes before network access. Immediate market orders use
-    /// one fresh bid/ask quote to fix the broker collar. Dollar buys use that
-    /// same ask quote and round the estimated share quantity upward to six
-    /// decimal places. The returned value must be submitted within 60 seconds.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`RhoodError::ReadOnlyMode`] if the client is in read-only
-    /// mode. Returns [`RhoodError::InvalidSymbol`] if the symbol cannot be
-    /// resolved. Also returns an error on HTTP or deserialization failures.
-    pub async fn prepare_stock_order(&self, req: &StockOrderRequest) -> Result<PreparedStockOrder> {
-        self.require_writable()?;
-        validate_stock_order(req)?;
-        validate_account_number(&req.account_number)?;
+    async fn prepare_stock_intent(&self, req: StockOrderIntent) -> Result<StagedOrder> {
+        validate_stock_order(&req)?;
+        let account = self.resolve_account(req.account_number.as_deref()).await?;
+        let account_number = account
+            .canonical_account_number()
+            .ok_or_else(|| {
+                RhoodError::InvalidAccountResponse(
+                    "resolved account has no canonical account number".to_string(),
+                )
+            })?
+            .to_string();
+        validate_account_number(&account_number)?;
         let instrument = self
             .instrument_for_symbol(&req.symbol)
             .await?
@@ -220,7 +311,7 @@ impl RobinhoodClient {
             .url
             .clone()
             .ok_or_else(|| RhoodError::InvalidSymbol(req.symbol.clone()))?;
-        let account_url = format!("{}{}/", self.api_url(paths::ACCOUNTS), req.account_number);
+        let account_url = format!("{}{account_number}/", self.api_url(paths::ACCOUNTS));
 
         let needs_quote = req.order_type == OrderType::Market && req.trigger == Trigger::Immediate;
         let quote = if needs_quote {
@@ -289,16 +380,146 @@ impl RobinhoodClient {
             order_form_version: STOCK_ORDER_FORM_VERSION,
         };
 
-        Ok(PreparedStockOrder {
-            payload,
-            account_number: req.account_number.clone(),
-            prepared_at_unix_ms: chrono::Utc::now().timestamp_millis(),
+        let prepared_at_unix_ms = chrono::Utc::now().timestamp_millis();
+        let expires_at_unix_ms = prepared_at_unix_ms
+            .checked_add(STAGED_STOCK_ORDER_TTL_MS)
+            .ok_or_else(|| RhoodError::InvalidOrder("stock order expiry overflowed".to_string()))?;
+        let summary = StockOrderSummary {
+            account_number,
+            account_label: account.selection_label(),
+            symbol: payload.symbol.clone(),
+            instrument: payload.instrument.clone(),
+            quantity: payload.quantity.clone(),
+            side: payload.side,
+            order_type: payload.order_type,
+            time_in_force: payload.time_in_force,
+            trigger: payload.trigger,
+            market_hours: payload.market_hours,
+            extended_hours: payload.extended_hours,
+            price: payload.price.clone(),
+            stop_price: payload.stop_price.clone(),
+            ask_price: payload.ask_price.clone(),
+            bid_price: payload.bid_price.clone(),
             requested_dollar_amount,
             conversion_price,
+            client_ref: payload.ref_id.clone(),
+            order_form_version: payload.order_form_version,
+        };
+        Ok(StagedOrder {
+            payload: StagedOrderPayload::Stock(payload),
+            summary: OrderSummary::Stock(summary),
+            prepared_at_unix_ms,
+            expires_at_unix_ms,
         })
     }
 
-    /// Consumes and submits a recently prepared stock order exactly once.
+    async fn prepare_option_intent(&self, req: OptionOrderIntent) -> Result<StagedOrder> {
+        validate_option_order(&req)?;
+        let account = self.resolve_account(req.account_number.as_deref()).await?;
+        let account_number = account
+            .canonical_account_number()
+            .ok_or_else(|| {
+                RhoodError::InvalidAccountResponse(
+                    "resolved account has no canonical account number".to_string(),
+                )
+            })?
+            .to_string();
+        validate_account_number(&account_number)?;
+        let options = self
+            .find_options(
+                &req.symbol,
+                &req.expiration_date,
+                &req.option_type,
+                Some(&format!("{:.4}", req.strike_price)),
+            )
+            .await?;
+        let option = options.first().ok_or_else(|| {
+            RhoodError::InvalidSymbol(format!(
+                "{} {} {} {}",
+                req.symbol, req.expiration_date, req.strike_price, req.option_type
+            ))
+        })?;
+        let option_url = option
+            .url
+            .clone()
+            .ok_or_else(|| RhoodError::InvalidSymbol(req.symbol.clone()))?;
+        let direction = match req.side {
+            Side::Buy => "debit".to_string(),
+            Side::Sell => "credit".to_string(),
+        };
+        let payload = OptionOrderPayload {
+            account: format!("{}{account_number}/", self.api_url(paths::ACCOUNTS)),
+            direction: direction.clone(),
+            time_in_force: req.time_in_force,
+            legs: vec![OptionLeg {
+                position_effect: req.position_effect,
+                side: req.side,
+                ratio_quantity: 1,
+                option: option_url.clone(),
+            }],
+            order_type: "limit".to_string(),
+            trigger: "immediate".to_string(),
+            price: format!("{:.2}", req.limit_price),
+            quantity: format_share_quantity(req.quantity),
+            override_day_trade_checks: false,
+            override_dtbp_checks: false,
+            ref_id: uuid::Uuid::new_v4().to_string(),
+        };
+        let prepared_at_unix_ms = chrono::Utc::now().timestamp_millis();
+        let expires_at_unix_ms = prepared_at_unix_ms
+            .checked_add(STAGED_OPTION_ORDER_TTL_MS)
+            .ok_or_else(|| {
+                RhoodError::InvalidOrder("option order expiry overflowed".to_string())
+            })?;
+        let summary = OptionOrderSummary {
+            account_number,
+            account_label: account.selection_label(),
+            symbol: req.symbol.to_uppercase(),
+            option_contract: option_url,
+            expiration_date: req.expiration_date,
+            strike_price: format!("{:.4}", req.strike_price),
+            option_type: req.option_type,
+            side: req.side,
+            position_effect: req.position_effect,
+            direction,
+            quantity: payload.quantity.clone(),
+            limit_price: payload.price.clone(),
+            order_type: payload.order_type.clone(),
+            trigger: payload.trigger.clone(),
+            time_in_force: req.time_in_force,
+            client_ref: payload.ref_id.clone(),
+        };
+        Ok(StagedOrder {
+            payload: StagedOrderPayload::Option(payload),
+            summary: OrderSummary::Option(summary),
+            prepared_at_unix_ms,
+            expires_at_unix_ms,
+        })
+    }
+
+    /// Prepares a stock or option Order Intent without submitting it.
+    ///
+    /// Preparation validates the complete intent before network access, resolves
+    /// the selected account and exact instrument or option contract, fixes the
+    /// broker payload and client reference, and derives a typed human-review
+    /// summary from the same execution terms. It performs no brokerage write.
+    ///
+    /// Stock orders expire after 60 seconds. Option orders expire after 600
+    /// seconds.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation, account-selection, instrument-resolution, market
+    /// data, authentication, transport, or deserialization error.
+    pub async fn prepare_order(&self, intent: OrderIntent) -> Result<StagedOrder> {
+        self.require_writable()?;
+        match intent {
+            OrderIntent::Stock(intent) => self.prepare_stock_intent(intent).await,
+            OrderIntent::Option(intent) => self.prepare_option_intent(intent).await,
+        }
+    }
+
+    /// Consumes and submits a recently staged order exactly once.
     ///
     /// Redirects and automatic retries are disabled for this write. A transport
     /// failure after dispatch returns [`RhoodError::SubmissionUncertain`] with
@@ -306,36 +527,26 @@ impl RobinhoodClient {
     ///
     /// # Errors
     ///
-    /// Returns [`RhoodError::PreparedOrderExpired`] after 60 seconds, or a
+    /// Returns [`RhoodError::StagedOrderExpired`] after the order's preparation
+    /// lifetime, or a
     /// submission, authentication, API, or response error.
-    pub async fn submit_prepared_stock_order(
-        &self,
-        prepared: PreparedStockOrder,
-    ) -> Result<StockOrder> {
+    pub async fn submit_order(&self, staged: StagedOrder) -> Result<SubmittedOrder> {
         self.require_writable()?;
-        let age_ms = chrono::Utc::now()
-            .timestamp_millis()
-            .checked_sub(prepared.prepared_at_unix_ms)
-            .ok_or(RhoodError::PreparedOrderExpired)?;
-        if !(0..=PREPARED_STOCK_ORDER_TTL_MS).contains(&age_ms) {
-            return Err(RhoodError::PreparedOrderExpired);
+        validate_staged_order(&staged)?;
+        let now = chrono::Utc::now().timestamp_millis();
+        if staged.prepared_at_unix_ms > now || now > staged.expires_at_unix_ms {
+            return Err(RhoodError::StagedOrderExpired);
         }
-        self.submit_stock_order_form(&self.api_url(paths::STOCK_ORDERS), &prepared.payload)
-            .await
-    }
-
-    /// Prepares and immediately submits a stock order.
-    ///
-    /// Interactive callers should use [`prepare_stock_order`](Self::prepare_stock_order),
-    /// show its preview for confirmation, then call
-    /// [`submit_prepared_stock_order`](Self::submit_prepared_stock_order).
-    ///
-    /// # Errors
-    ///
-    /// Returns any preparation or submission error.
-    pub async fn place_stock_order(&self, req: &StockOrderRequest) -> Result<StockOrder> {
-        let prepared = self.prepare_stock_order(req).await?;
-        self.submit_prepared_stock_order(prepared).await
+        match staged.payload {
+            StagedOrderPayload::Stock(payload) => self
+                .submit_stock_order_form(&self.api_url(paths::STOCK_ORDERS), &payload)
+                .await
+                .map(SubmittedOrder::Stock),
+            StagedOrderPayload::Option(payload) => self
+                .submit_option_order_json(&self.api_url(paths::OPTION_ORDERS), &payload)
+                .await
+                .map(SubmittedOrder::Option),
+        }
     }
 
     /// Fetches all option orders, including completed, cancelled, and pending.
@@ -385,67 +596,6 @@ impl RobinhoodClient {
         self.require_writable()?;
         let url = format!("{}{order_id}/cancel/", self.api_url(paths::OPTION_ORDERS));
         self.post_empty(&url).await
-    }
-
-    /// Places an option order based on the given request parameters.
-    ///
-    /// Resolves the symbol, expiration date, strike price, and option type
-    /// to a specific option contract before submitting. Requires writable
-    /// mode (`read_only = false`).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`RhoodError::ReadOnlyMode`] if the client is in read-only
-    /// mode. Returns [`RhoodError::InvalidSymbol`] if the option contract
-    /// cannot be found. Also returns an error on HTTP or deserialization
-    /// failures.
-    pub async fn place_option_order(&self, req: &OptionOrderRequest) -> Result<OptionOrder> {
-        self.require_writable()?;
-        validate_account_number(&req.account_number)?;
-        let options = self
-            .find_options(
-                &req.symbol,
-                &req.expiration_date,
-                &req.option_type,
-                Some(&format!("{:.4}", req.strike_price)),
-            )
-            .await?;
-        let option = options.first().ok_or_else(|| {
-            RhoodError::InvalidSymbol(format!(
-                "{} {} {} {}",
-                req.symbol, req.expiration_date, req.strike_price, req.option_type
-            ))
-        })?;
-        let option_url = option
-            .url
-            .as_deref()
-            .ok_or_else(|| RhoodError::InvalidSymbol(req.symbol.clone()))?;
-        let account_url = format!("{}{}/", self.api_url(paths::ACCOUNTS), req.account_number);
-
-        let payload = OptionOrderPayload {
-            account: account_url,
-            direction: match req.side {
-                Side::Buy => "debit".to_string(),
-                Side::Sell => "credit".to_string(),
-            },
-            time_in_force: req.time_in_force,
-            legs: vec![OptionLeg {
-                position_effect: req.position_effect,
-                side: req.side,
-                ratio_quantity: 1,
-                option: option_url.to_string(),
-            }],
-            order_type: "limit",
-            trigger: "immediate",
-            price: format!("{:.2}", req.limit_price),
-            quantity: format!("{}", req.quantity),
-            override_day_trade_checks: false,
-            override_dtbp_checks: false,
-            ref_id: uuid::Uuid::new_v4().to_string(),
-        };
-
-        self.post_json(&self.api_url(paths::OPTION_ORDERS), &payload)
-            .await
     }
 
     /// Cancels all open (cancellable) stock orders.
@@ -527,13 +677,13 @@ mod tests {
     use crate::RhoodError;
     use crate::models::order::{
         MarketHours as OrderMarketHours, OrderAmount, OrderType, Side, StockOrder,
-        StockOrderRequest, TimeInForce, Trigger,
+        StockOrderIntent, TimeInForce, Trigger,
     };
 
     #[test]
     fn stock_order_request_market_no_limit_price() {
-        let req = StockOrderRequest {
-            account_number: "ABC123".to_string(),
+        let req = StockOrderIntent {
+            account_number: Some("ABC123".to_string()),
             symbol: "AAPL".to_string(),
             amount: OrderAmount::Quantity(1.0),
             side: Side::Buy,
@@ -550,8 +700,8 @@ mod tests {
 
     #[test]
     fn stock_order_request_limit_requires_price() {
-        let req = StockOrderRequest {
-            account_number: "ABC123".to_string(),
+        let req = StockOrderIntent {
+            account_number: Some("ABC123".to_string()),
             symbol: "AAPL".to_string(),
             amount: OrderAmount::Quantity(1.0),
             side: Side::Sell,
@@ -619,8 +769,8 @@ mod tests {
 
     #[test]
     fn validate_stop_requires_stop_price() {
-        let req = StockOrderRequest {
-            account_number: "ABC123".to_string(),
+        let req = StockOrderIntent {
+            account_number: Some("ABC123".to_string()),
             symbol: "AAPL".to_string(),
             amount: OrderAmount::Quantity(10.0),
             side: Side::Buy,
@@ -638,8 +788,8 @@ mod tests {
 
     #[test]
     fn validate_immediate_rejects_stop_price() {
-        let req = StockOrderRequest {
-            account_number: "ABC123".to_string(),
+        let req = StockOrderIntent {
+            account_number: Some("ABC123".to_string()),
             symbol: "AAPL".to_string(),
             amount: OrderAmount::Quantity(10.0),
             side: Side::Buy,
@@ -656,8 +806,8 @@ mod tests {
 
     #[test]
     fn validate_dollar_amount_requires_buy() {
-        let req = StockOrderRequest {
-            account_number: "ABC123".to_string(),
+        let req = StockOrderIntent {
+            account_number: Some("ABC123".to_string()),
             symbol: "AAPL".to_string(),
             amount: OrderAmount::DollarAmount(50.0),
             side: Side::Sell,
@@ -675,8 +825,8 @@ mod tests {
 
     #[test]
     fn validate_dollar_amount_requires_market_immediate() {
-        let req = StockOrderRequest {
-            account_number: "ABC123".to_string(),
+        let req = StockOrderIntent {
+            account_number: Some("ABC123".to_string()),
             symbol: "AAPL".to_string(),
             amount: OrderAmount::DollarAmount(50.0),
             side: Side::Buy,
@@ -693,8 +843,8 @@ mod tests {
 
     #[test]
     fn validate_extended_hours_requires_limit() {
-        let req = StockOrderRequest {
-            account_number: "ABC123".to_string(),
+        let req = StockOrderIntent {
+            account_number: Some("ABC123".to_string()),
             symbol: "AAPL".to_string(),
             amount: OrderAmount::Quantity(10.0),
             side: Side::Buy,
@@ -711,8 +861,8 @@ mod tests {
 
     #[test]
     fn validate_all_day_hours_requires_limit() {
-        let req = StockOrderRequest {
-            account_number: "ABC123".to_string(),
+        let req = StockOrderIntent {
+            account_number: Some("ABC123".to_string()),
             symbol: "AAPL".to_string(),
             amount: OrderAmount::Quantity(10.0),
             side: Side::Buy,
@@ -729,8 +879,8 @@ mod tests {
 
     #[test]
     fn validate_valid_market_order_passes() {
-        let req = StockOrderRequest {
-            account_number: "ABC123".to_string(),
+        let req = StockOrderIntent {
+            account_number: Some("ABC123".to_string()),
             symbol: "AAPL".to_string(),
             amount: OrderAmount::Quantity(10.0),
             side: Side::Buy,
@@ -746,8 +896,8 @@ mod tests {
 
     #[test]
     fn validate_valid_stop_limit_passes() {
-        let req = StockOrderRequest {
-            account_number: "ABC123".to_string(),
+        let req = StockOrderIntent {
+            account_number: Some("ABC123".to_string()),
             symbol: "AAPL".to_string(),
             amount: OrderAmount::Quantity(10.0),
             side: Side::Buy,
@@ -763,8 +913,8 @@ mod tests {
 
     #[test]
     fn stock_order_request_stop_limit() {
-        let req = StockOrderRequest {
-            account_number: "ABC123".to_string(),
+        let req = StockOrderIntent {
+            account_number: Some("ABC123".to_string()),
             symbol: "AAPL".to_string(),
             amount: OrderAmount::Quantity(10.0),
             side: Side::Buy,
@@ -781,8 +931,8 @@ mod tests {
 
     #[test]
     fn stock_order_request_dollar_amount() {
-        let req = StockOrderRequest {
-            account_number: "ABC123".to_string(),
+        let req = StockOrderIntent {
+            account_number: Some("ABC123".to_string()),
             symbol: "AAPL".to_string(),
             amount: OrderAmount::DollarAmount(50.0),
             side: Side::Buy,
@@ -798,8 +948,8 @@ mod tests {
 
     #[test]
     fn stock_order_request_all_day_hours() {
-        let req = StockOrderRequest {
-            account_number: "ABC123".to_string(),
+        let req = StockOrderIntent {
+            account_number: Some("ABC123".to_string()),
             symbol: "TSLA".to_string(),
             amount: OrderAmount::Quantity(5.0),
             side: Side::Buy,
@@ -879,8 +1029,8 @@ mod endpoint_tests {
     use crate::client::RobinhoodClient;
     use crate::config::RhoodConfig;
     use crate::models::order::{
-        CancelAllFailure, MarketHours, OptionOrderRequest, OptionPositionEffect, OrderAmount,
-        OrderType, Side, StockOrderRequest, TimeInForce, Trigger,
+        CancelAllFailure, MarketHours, OptionOrderIntent, OptionPositionEffect, OrderAmount,
+        OrderIntent, OrderSummary, OrderType, Side, StockOrderIntent, TimeInForce, Trigger,
     };
     use secrecy::SecretString;
     use wiremock::matchers::{body_partial_json, method, path, query_param};
@@ -920,9 +1070,9 @@ mod endpoint_tests {
         (dir, client)
     }
 
-    fn stock_request() -> StockOrderRequest {
-        StockOrderRequest {
-            account_number: "ABC123".to_string(),
+    fn stock_request() -> StockOrderIntent {
+        StockOrderIntent {
+            account_number: Some("ABC123".to_string()),
             symbol: "aapl".to_string(),
             amount: OrderAmount::Quantity(2.0),
             side: Side::Buy,
@@ -936,6 +1086,17 @@ mod endpoint_tests {
     }
 
     async fn mount_stock_instrument(server: &MockServer) {
+        Mock::given(method("GET"))
+            .and(path("/accounts/unified/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [{
+                    "account_number": "ABC123",
+                    "brokerage_account_type": "individual"
+                }]
+            })))
+            .expect(1)
+            .mount(server)
+            .await;
         let instrument_url = format!("{}/instruments/instrument-aapl/", server.uri());
         Mock::given(method("GET"))
             .and(path("/instruments/"))
@@ -961,9 +1122,21 @@ mod endpoint_tests {
             .await;
     }
 
-    fn form_fields(prepared: &crate::models::order::PreparedStockOrder) -> HashMap<String, String> {
-        let encoded = serde_urlencoded::to_string(&prepared.payload).unwrap();
+    fn form_fields(staged: &crate::models::order::StagedOrder) -> HashMap<String, String> {
+        let crate::models::order::StagedOrderPayload::Stock(payload) = &staged.payload else {
+            panic!("expected stock staged order");
+        };
+        let encoded = serde_urlencoded::to_string(payload).unwrap();
         serde_urlencoded::from_str(&encoded).unwrap()
+    }
+
+    fn stock_summary(
+        staged: &crate::models::order::StagedOrder,
+    ) -> &crate::models::order::StockOrderSummary {
+        let OrderSummary::Stock(summary) = staged.summary() else {
+            panic!("expected stock order summary");
+        };
+        summary
     }
 
     #[tokio::test]
@@ -976,8 +1149,11 @@ mod endpoint_tests {
             let mut request = stock_request();
             request.side = side;
 
-            let prepared = client.prepare_stock_order(&request).await.unwrap();
-            let preview = prepared.preview();
+            let prepared = client
+                .prepare_order(OrderIntent::Stock(request.clone()))
+                .await
+                .unwrap();
+            let preview = stock_summary(&prepared);
             let fields = form_fields(&prepared);
 
             assert_eq!(preview.price.as_deref(), Some(expected_price));
@@ -1022,8 +1198,11 @@ mod endpoint_tests {
         limit.limit_price = Some(99.5);
         limit.market_hours = MarketHours::AllDayHours;
 
-        let prepared = client.prepare_stock_order(&limit).await.unwrap();
-        let preview = prepared.preview();
+        let prepared = client
+            .prepare_order(OrderIntent::Stock(limit.clone()))
+            .await
+            .unwrap();
+        let preview = stock_summary(&prepared);
 
         assert_eq!(preview.price.as_deref(), Some("99.50"));
         assert!(preview.ask_price.is_none());
@@ -1038,8 +1217,11 @@ mod endpoint_tests {
         stop_market.trigger = Trigger::Stop;
         stop_market.stop_price = Some(98.25);
 
-        let prepared = client.prepare_stock_order(&stop_market).await.unwrap();
-        let preview = prepared.preview();
+        let prepared = client
+            .prepare_order(OrderIntent::Stock(stop_market.clone()))
+            .await
+            .unwrap();
+        let preview = stock_summary(&prepared);
 
         assert_eq!(preview.price.as_deref(), Some("98.25"));
         assert_eq!(preview.stop_price.as_deref(), Some("98.25"));
@@ -1057,8 +1239,11 @@ mod endpoint_tests {
         let mut request = stock_request();
         request.amount = OrderAmount::DollarAmount(1.0);
 
-        let prepared = client.prepare_stock_order(&request).await.unwrap();
-        let preview = prepared.preview();
+        let prepared = client
+            .prepare_order(OrderIntent::Stock(request.clone()))
+            .await
+            .unwrap();
+        let preview = stock_summary(&prepared);
 
         assert_eq!(preview.quantity, "0.00317");
         assert_eq!(preview.requested_dollar_amount.as_deref(), Some("1.00"));
@@ -1090,7 +1275,10 @@ mod endpoint_tests {
         cases.push(gtc_dollar_order);
 
         for request in cases {
-            let error = client.prepare_stock_order(&request).await.unwrap_err();
+            let error = client
+                .prepare_order(OrderIntent::Stock(request.clone()))
+                .await
+                .unwrap_err();
             assert!(matches!(error, RhoodError::InvalidOrder(_)));
         }
         assert!(server.received_requests().await.unwrap().is_empty());
@@ -1110,12 +1298,12 @@ mod endpoint_tests {
             .mount(&server)
             .await;
         let (_dir, client) = client_for_server(&server.uri()).await;
-        let prepared = client.prepare_stock_order(&stock_request()).await.unwrap();
-
-        let error = client
-            .submit_prepared_stock_order(prepared)
+        let prepared = client
+            .prepare_order(OrderIntent::Stock(stock_request()))
             .await
-            .unwrap_err();
+            .unwrap();
+
+        let error = client.submit_order(prepared).await.unwrap_err();
 
         assert!(matches!(error, RhoodError::Api { status: 500, .. }));
         server.verify().await;
@@ -1137,13 +1325,13 @@ mod endpoint_tests {
             .mount(&server)
             .await;
         let (_dir, client) = client_for_server_with_timeout(&server.uri(), 1).await;
-        let prepared = client.prepare_stock_order(&stock_request()).await.unwrap();
-        let client_ref = prepared.preview().client_ref;
-
-        let error = client
-            .submit_prepared_stock_order(prepared)
+        let prepared = client
+            .prepare_order(OrderIntent::Stock(stock_request()))
             .await
-            .unwrap_err();
+            .unwrap();
+        let client_ref = stock_summary(&prepared).client_ref.clone();
+
+        let error = client.submit_order(prepared).await.unwrap_err();
 
         assert!(matches!(
             &error,
@@ -1166,16 +1354,41 @@ mod endpoint_tests {
         mount_stock_instrument(&server).await;
         mount_stock_quote(&server, "101.25", "100.75").await;
         let (_dir, client) = client_for_server(&server.uri()).await;
-        let mut prepared = client.prepare_stock_order(&stock_request()).await.unwrap();
-        prepared.prepared_at_unix_ms -= 60_001;
+        let mut prepared = client
+            .prepare_order(OrderIntent::Stock(stock_request()))
+            .await
+            .unwrap();
+        prepared.expires_at_unix_ms = chrono::Utc::now().timestamp_millis() - 1;
         let request_count = server.received_requests().await.unwrap().len();
 
-        let error = client
-            .submit_prepared_stock_order(prepared)
-            .await
-            .unwrap_err();
+        let error = client.submit_order(prepared).await.unwrap_err();
 
-        assert!(matches!(error, RhoodError::PreparedOrderExpired));
+        assert!(matches!(error, RhoodError::StagedOrderExpired));
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            request_count
+        );
+    }
+
+    #[tokio::test]
+    async fn mismatched_staged_summary_fails_before_submission() {
+        let server = MockServer::start().await;
+        mount_stock_instrument(&server).await;
+        mount_stock_quote(&server, "101.25", "100.75").await;
+        let (_dir, client) = client_for_server(&server.uri()).await;
+        let mut staged = client
+            .prepare_order(OrderIntent::Stock(stock_request()))
+            .await
+            .unwrap();
+        let OrderSummary::Stock(summary) = &mut staged.summary else {
+            panic!("expected stock summary");
+        };
+        summary.client_ref = "different-client-ref".to_string();
+        let request_count = server.received_requests().await.unwrap().len();
+
+        let error = client.submit_order(staged).await.unwrap_err();
+
+        assert!(matches!(error, RhoodError::InvalidOrder(_)));
         assert_eq!(
             server.received_requests().await.unwrap().len(),
             request_count
@@ -1205,26 +1418,30 @@ mod endpoint_tests {
             .mount(&server)
             .await;
         let (_dir, client) = client_for_server(&server.uri()).await;
-        let prepared = client.prepare_stock_order(&stock_request()).await.unwrap();
-
-        let error = client
-            .submit_prepared_stock_order(prepared)
+        let prepared = client
+            .prepare_order(OrderIntent::Stock(stock_request()))
             .await
-            .unwrap_err();
+            .unwrap();
+
+        let error = client.submit_order(prepared).await.unwrap_err();
 
         assert!(matches!(error, RhoodError::Api { status: 307, .. }));
         server.verify().await;
     }
 
-    async fn assert_option_order_action(
-        side: Side,
-        position_effect: OptionPositionEffect,
-        expected_direction: &str,
-    ) {
-        let server = MockServer::start().await;
+    async fn mount_option_preparation(server: &MockServer) -> String {
         let option_url = format!("{}/options/instruments/contract-aapl/", server.uri());
-        let account_url = format!("{}/accounts/ABC123/", server.uri());
-
+        Mock::given(method("GET"))
+            .and(path("/accounts/unified/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [{
+                    "account_number": "ABC123",
+                    "brokerage_account_type": "individual"
+                }]
+            })))
+            .expect(1)
+            .mount(server)
+            .await;
         Mock::given(method("GET"))
             .and(path("/instruments/"))
             .and(query_param("symbol", "AAPL"))
@@ -1232,7 +1449,7 @@ mod endpoint_tests {
                 "results": [{"symbol": "AAPL", "tradable_chain_id": "chain-aapl"}]
             })))
             .expect(1)
-            .mount(&server)
+            .mount(server)
             .await;
         Mock::given(method("GET"))
             .and(path("/options/instruments/"))
@@ -1256,8 +1473,34 @@ mod endpoint_tests {
                 "previous": null
             })))
             .expect(1)
-            .mount(&server)
+            .mount(server)
             .await;
+        option_url
+    }
+
+    fn option_request(side: Side, position_effect: OptionPositionEffect) -> OptionOrderIntent {
+        OptionOrderIntent {
+            account_number: Some("ABC123".to_string()),
+            symbol: "AAPL".to_string(),
+            expiration_date: "2026-09-18".to_string(),
+            strike_price: 200.0,
+            option_type: "call".to_string(),
+            side,
+            quantity: 1.0,
+            limit_price: 2.5,
+            position_effect,
+            time_in_force: TimeInForce::Gtc,
+        }
+    }
+
+    async fn assert_option_order_action(
+        side: Side,
+        position_effect: OptionPositionEffect,
+        expected_direction: &str,
+    ) {
+        let server = MockServer::start().await;
+        let option_url = mount_option_preparation(&server).await;
+        let account_url = format!("{}/accounts/ABC123/", server.uri());
         Mock::given(method("POST"))
             .and(path("/options/orders/"))
             .and(body_partial_json(serde_json::json!({
@@ -1268,7 +1511,7 @@ mod endpoint_tests {
                     "position_effect": position_effect,
                     "side": side,
                     "ratio_quantity": 1,
-                    "option": option_url
+                    "option": option_url.clone()
                 }],
                 "type": "limit",
                 "trigger": "immediate",
@@ -1282,27 +1525,36 @@ mod endpoint_tests {
             .mount(&server)
             .await;
         let (_dir, client) = client_for_server(&server.uri()).await;
-        let request = OptionOrderRequest {
-            account_number: "ABC123".to_string(),
-            symbol: "AAPL".to_string(),
-            expiration_date: "2026-09-18".to_string(),
-            strike_price: 200.0,
-            option_type: "call".to_string(),
-            side,
-            quantity: 1.0,
-            limit_price: 2.5,
-            position_effect,
-            time_in_force: TimeInForce::Gtc,
+        let request = option_request(side, position_effect);
+
+        let staged = client
+            .prepare_order(OrderIntent::Option(request))
+            .await
+            .unwrap();
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .all(|request| request.method.as_str() == "GET"),
+            "option preparation must perform reads only"
+        );
+        let OrderSummary::Option(summary) = staged.summary() else {
+            panic!("expected option order summary");
         };
+        assert_eq!(summary.option_contract, option_url);
+        assert_eq!(summary.direction, expected_direction);
+        let sealed = serde_json::to_string(&staged).unwrap();
+        let reopened = serde_json::from_str(&sealed).unwrap();
+        let order = client.submit_order(reopened).await.unwrap();
 
-        let order = client.place_option_order(&request).await.unwrap();
-
-        assert_eq!(order.id.as_deref(), Some("placed-order"));
+        assert_eq!(order.id(), Some("placed-order"));
         server.verify().await;
     }
 
     #[tokio::test]
-    async fn place_option_order_supports_all_four_position_actions() {
+    async fn staged_option_order_supports_all_four_position_actions() {
         for (side, position_effect, expected_direction) in [
             (Side::Buy, OptionPositionEffect::Open, "debit"),
             (Side::Sell, OptionPositionEffect::Close, "credit"),
@@ -1311,6 +1563,126 @@ mod endpoint_tests {
         ] {
             assert_option_order_action(side, position_effect, expected_direction).await;
         }
+    }
+
+    #[tokio::test]
+    async fn invalid_option_intent_fails_before_network_access() {
+        let server = MockServer::start().await;
+        let (_dir, client) = client_for_server(&server.uri()).await;
+        let mut invalid_strike = option_request(Side::Buy, OptionPositionEffect::Open);
+        invalid_strike.strike_price = f64::INFINITY;
+        let mut invalid_quantity = option_request(Side::Buy, OptionPositionEffect::Open);
+        invalid_quantity.quantity = f64::INFINITY;
+        let mut invalid_type = option_request(Side::Buy, OptionPositionEffect::Open);
+        invalid_type.option_type = "warrant".to_string();
+        for request in [invalid_strike, invalid_quantity, invalid_type] {
+            let error = client
+                .prepare_order(OrderIntent::Option(request))
+                .await
+                .unwrap_err();
+            assert!(matches!(error, RhoodError::InvalidOrder(_)));
+        }
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn option_submission_does_not_retry_or_follow_redirects() {
+        for status in [500, 307] {
+            let server = MockServer::start().await;
+            mount_option_preparation(&server).await;
+            let mut response = ResponseTemplate::new(status);
+            if status == 307 {
+                response =
+                    response.insert_header("Location", format!("{}/redirected/", server.uri()));
+                Mock::given(method("POST"))
+                    .and(path("/redirected/"))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "id": "must-not-submit"
+                    })))
+                    .expect(0)
+                    .mount(&server)
+                    .await;
+            }
+            Mock::given(method("POST"))
+                .and(path("/options/orders/"))
+                .respond_with(response.set_body_json(serde_json::json!({"detail": "rejected"})))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let (_dir, client) = client_for_server(&server.uri()).await;
+            let staged = client
+                .prepare_order(OrderIntent::Option(option_request(
+                    Side::Buy,
+                    OptionPositionEffect::Open,
+                )))
+                .await
+                .unwrap();
+
+            let error = client.submit_order(staged).await.unwrap_err();
+
+            assert!(matches!(error, RhoodError::Api { status: actual, .. } if actual == status));
+            server.verify().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn timed_out_option_submission_returns_client_reference() {
+        let server = MockServer::start().await;
+        mount_option_preparation(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/options/orders/"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(std::time::Duration::from_secs(2))
+                    .set_body_json(serde_json::json!({"id": "late-option-order"})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server_with_timeout(&server.uri(), 1).await;
+        let staged = client
+            .prepare_order(OrderIntent::Option(option_request(
+                Side::Buy,
+                OptionPositionEffect::Open,
+            )))
+            .await
+            .unwrap();
+        let client_ref = staged.client_reference().to_string();
+
+        let error = client.submit_order(staged).await.unwrap_err();
+
+        assert!(matches!(
+            error,
+            RhoodError::SubmissionUncertain {
+                client_ref: actual,
+                ..
+            } if actual == client_ref
+        ));
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn expired_option_order_fails_before_submission() {
+        let server = MockServer::start().await;
+        mount_option_preparation(&server).await;
+        let (_dir, client) = client_for_server(&server.uri()).await;
+        let mut staged = client
+            .prepare_order(OrderIntent::Option(option_request(
+                Side::Buy,
+                OptionPositionEffect::Open,
+            )))
+            .await
+            .unwrap();
+        staged.expires_at_unix_ms = chrono::Utc::now().timestamp_millis() - 1;
+        let request_count = server.received_requests().await.unwrap().len();
+
+        let error = client.submit_order(staged).await.unwrap_err();
+
+        assert!(matches!(error, RhoodError::StagedOrderExpired));
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            request_count
+        );
     }
 
     #[tokio::test]
