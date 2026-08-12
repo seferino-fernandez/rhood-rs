@@ -139,13 +139,7 @@ impl RhoodTools {
             .get_positions(&account)
             .await
             .map_err(|error| format_tool_error(&error))?;
-        let urls: Vec<Option<String>> = positions
-            .iter()
-            .map(|position| position.instrument.clone())
-            .collect();
-        let resolved = super::enrichment::resolve_urls_to_symbols(&client, &urls).await;
-        let enriched = super::enrichment::apply_resolved_symbols(positions, &resolved);
-        serde_json::to_string_pretty(&enriched).map_err(|error| error.to_string())
+        serde_json::to_string_pretty(&positions).map_err(|error| error.to_string())
     }
 
     #[tool(
@@ -165,13 +159,7 @@ impl RhoodTools {
             .get_all_positions(&account)
             .await
             .map_err(|error| format_tool_error(&error))?;
-        let urls: Vec<Option<String>> = positions
-            .iter()
-            .map(|position| position.instrument.clone())
-            .collect();
-        let resolved = super::enrichment::resolve_urls_to_symbols(&client, &urls).await;
-        let enriched = super::enrichment::apply_resolved_symbols(positions, &resolved);
-        serde_json::to_string_pretty(&enriched).map_err(|error| error.to_string())
+        serde_json::to_string_pretty(&positions).map_err(|error| error.to_string())
     }
 
     #[tool(
@@ -287,7 +275,7 @@ impl RhoodTools {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rhood_core::models::account::AccountSummary;
+    use rhood_core::models::account::{AccountSummary, Position};
     use rhood_core::models::dividend::MoneyAmount;
 
     fn money(a: &str) -> MoneyAmount {
@@ -313,5 +301,22 @@ mod tests {
         assert_eq!(v["total_equity"], "1234.56");
         assert_eq!(v["account_buying_power"], "100.00");
         assert_eq!(v["account_number"], "ABC");
+    }
+
+    #[test]
+    fn positions_serialize_core_owned_wire_symbols_once() {
+        let position: Position = serde_json::from_str(
+            r#"{"instrument":"https://api.robinhood.com/instruments/abc/","symbol":"RKLB"}"#,
+        )
+        .unwrap();
+
+        let json = serde_json::to_string(&[position]).unwrap();
+        assert_eq!(
+            json.matches("\"symbol\"").count(),
+            1,
+            "duplicate symbol key: {json}"
+        );
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value[0]["symbol"], "RKLB");
     }
 }

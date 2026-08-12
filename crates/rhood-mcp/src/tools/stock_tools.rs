@@ -1,9 +1,5 @@
 use rmcp::{Peer, RoleServer, handler::server::wrapper::Parameters, tool, tool_router};
 
-use crate::tools::enrichment::{
-    apply_resolved_symbols, enrich_fundamentals, resolve_urls_to_symbols,
-};
-
 use super::handler::RhoodTools;
 use super::params::*;
 use super::types::format_tool_error;
@@ -110,8 +106,7 @@ impl RhoodTools {
             .get_fundamentals(&refs)
             .await
             .map_err(|rhood_error| format_tool_error(&rhood_error))?;
-        let enriched = enrich_fundamentals(&fundamentals, &params.symbols);
-        serde_json::to_string_pretty(&enriched).map_err(|error| error.to_string())
+        serde_json::to_string_pretty(&fundamentals).map_err(|error| error.to_string())
     }
 
     #[tool(
@@ -154,13 +149,7 @@ impl RhoodTools {
             .get_open_stock_orders(&account)
             .await
             .map_err(|rhood_error| format_tool_error(&rhood_error))?;
-        let instrument_urls: Vec<Option<String>> = orders
-            .iter()
-            .map(|order| order.instrument.clone())
-            .collect();
-        let resolved = resolve_urls_to_symbols(&client, &instrument_urls).await;
-        let enriched = apply_resolved_symbols(orders, &resolved);
-        serde_json::to_string_pretty(&enriched).map_err(|error| error.to_string())
+        serde_json::to_string_pretty(&orders).map_err(|error| error.to_string())
     }
 
     #[tool(
@@ -180,20 +169,15 @@ impl RhoodTools {
             .get_all_stock_orders(&account, params.since.as_deref())
             .await
             .map_err(|rhood_error| format_tool_error(&rhood_error))?;
-        let instrument_urls: Vec<Option<String>> = orders
-            .iter()
-            .map(|order| order.instrument.clone())
-            .collect();
-        let resolved_symbols = resolve_urls_to_symbols(&client, &instrument_urls).await;
-        let enriched_orders = apply_resolved_symbols(orders, &resolved_symbols);
-        serde_json::to_string_pretty(&enriched_orders).map_err(|error| error.to_string())
+        serde_json::to_string_pretty(&orders).map_err(|error| error.to_string())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::compact_history;
-    use rhood_core::models::stock::Candle;
+    use rhood_core::models::order::StockOrder;
+    use rhood_core::models::stock::{Candle, Fundamentals};
 
     fn candle(t: &str, o: &str, c: &str) -> Candle {
         Candle {
@@ -245,5 +229,39 @@ mod tests {
         assert_eq!(value[0]["symbol"], "AAPL");
         assert_eq!(value[0]["price"], "311.35");
         assert!(value[0].is_object(), "expected object, got {value}");
+    }
+
+    #[test]
+    fn fundamentals_serialize_authoritative_core_symbols_without_backfill() {
+        let fundamentals = Fundamentals {
+            symbol: Some("TSLA".into()),
+            ..Default::default()
+        };
+
+        let json = serde_json::to_string(&[fundamentals]).unwrap();
+        assert_eq!(
+            json.matches("\"symbol\"").count(),
+            1,
+            "duplicate symbol key: {json}"
+        );
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value[0]["symbol"], "TSLA");
+    }
+
+    #[test]
+    fn stock_orders_serialize_core_owned_wire_symbols_once() {
+        let order: StockOrder = serde_json::from_str(
+            r#"{"instrument":"https://api.robinhood.com/instruments/abc/","symbol":"RKLB"}"#,
+        )
+        .unwrap();
+
+        let json = serde_json::to_string(&[order]).unwrap();
+        assert_eq!(
+            json.matches("\"symbol\"").count(),
+            1,
+            "duplicate symbol key: {json}"
+        );
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value[0]["symbol"], "RKLB");
     }
 }

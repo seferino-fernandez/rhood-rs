@@ -1,7 +1,5 @@
 use rmcp::{Peer, RoleServer, handler::server::wrapper::Parameters, tool, tool_router};
 
-use crate::tools::enrichment::{apply_resolved_symbols, resolve_urls_to_symbols};
-
 use super::handler::RhoodTools;
 use super::pagination::CollectionPager;
 use super::params::*;
@@ -57,13 +55,7 @@ impl RhoodTools {
             .get_dividends(params.since.as_deref())
             .await
             .map_err(|rhood_error| format_tool_error(&rhood_error))?;
-        let urls: Vec<Option<String>> = dividends
-            .iter()
-            .map(|dividend| dividend.instrument.clone())
-            .collect();
-        let symbols = resolve_urls_to_symbols(&client, &urls).await;
-        let enriched = apply_resolved_symbols(dividends, &symbols);
-        serde_json::to_string_pretty(&enriched).map_err(|error| error.to_string())
+        serde_json::to_string_pretty(&dividends).map_err(|error| error.to_string())
     }
 
     #[tool(
@@ -119,6 +111,7 @@ impl RhoodTools {
 #[cfg(test)]
 mod tests {
     use super::TransferView;
+    use rhood_core::models::dividend::Dividend;
     use rhood_core::models::transfer::Transfer;
 
     #[test]
@@ -139,5 +132,22 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["id"], "t1");
         assert_eq!(value["amount"], "100.00");
+    }
+
+    #[test]
+    fn dividends_serialize_core_owned_wire_symbols_once() {
+        let dividend: Dividend = serde_json::from_str(
+            r#"{"instrument":"https://api.robinhood.com/instruments/abc/","symbol":"RKLB"}"#,
+        )
+        .unwrap();
+
+        let json = serde_json::to_string(&[dividend]).unwrap();
+        assert_eq!(
+            json.matches("\"symbol\"").count(),
+            1,
+            "duplicate symbol key: {json}"
+        );
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value[0]["symbol"], "RKLB");
     }
 }
