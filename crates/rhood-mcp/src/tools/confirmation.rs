@@ -653,6 +653,121 @@ mod tests {
         }
     }
 
+    /// Compile-forcing guard: destructures `StockOrderSummary` without `..`, so adding a
+    /// field to the struct fails to compile here until someone decides whether the MCP
+    /// confirmation renderer surfaces it. `render_stock_summary` already renders the stop
+    /// price correctly; this test exists so a future change cannot silently regress that.
+    #[test]
+    fn render_stock_summary_covers_every_execution_changing_field() {
+        // Fixture values are deliberately long and mutually non-overlapping (no value is
+        // a substring of any other, or of the fixed template text) so each `contains`
+        // assertion below can only be satisfied by the renderer actually emitting that
+        // field -- a short value like "2" or "7" would let coincidental digits elsewhere
+        // in the message (e.g. inside the account label) satisfy the assertion for free.
+        let summary = StockOrderSummary {
+            account_number: "ACCT-JJ88TT".to_string(),
+            account_label: "individual-brokerage-nova".to_string(),
+            symbol: "ZZQQ".to_string(),
+            instrument: "https://api.robinhood.com/instruments/instrument-zzqq/".to_string(),
+            quantity: "137.428".to_string(),
+            side: Side::Sell,
+            order_type: OrderType::Limit,
+            time_in_force: TimeInForce::Gtc,
+            trigger: Trigger::Stop,
+            market_hours: MarketHours::RegularHours,
+            extended_hours: false,
+            price: Some("1841.11".to_string()),
+            stop_price: Some("9502.75".to_string()),
+            ask_price: Some("1842.63".to_string()),
+            bid_price: Some("1840.07".to_string()),
+            requested_dollar_amount: Some("25317.99".to_string()),
+            conversion_price: Some("1843.29".to_string()),
+            client_ref: "cli-ref-7f3a9e".to_string(),
+            order_form_version: 231,
+        };
+
+        let StockOrderSummary {
+            // The raw account number is intentionally never shown; the masked
+            // `account_label` is the safe human-facing identifier and is asserted below.
+            account_number: ref _account_number,
+            ref account_label,
+            ref symbol,
+            ref instrument,
+            ref quantity,
+            side,
+            order_type,
+            time_in_force,
+            trigger,
+            market_hours,
+            extended_hours,
+            ref price,
+            ref stop_price,
+            ref ask_price,
+            ref bid_price,
+            ref requested_dollar_amount,
+            // The conversion price is derived context for the dollar->share conversion,
+            // not an execution term of the submitted order itself; the confirmation does
+            // not currently surface it.
+            conversion_price: ref _conversion_price,
+            ref client_ref,
+            order_form_version,
+        } = summary;
+
+        let message = render_stock_summary(&summary);
+
+        assert!(message.contains(account_label), "message: {message}");
+        assert!(message.contains(symbol), "message: {message}");
+        assert!(message.contains(instrument), "message: {message}");
+        assert!(message.contains(quantity), "message: {message}");
+        assert!(message.contains(side_name(side)), "message: {message}");
+        assert!(
+            message.contains(&order_type.to_string()),
+            "message: {message}"
+        );
+        assert!(
+            message.contains(time_in_force_name(time_in_force)),
+            "message: {message}"
+        );
+        assert!(message.contains(&trigger.to_string()), "message: {message}");
+        assert!(
+            message.contains(&market_hours.to_string()),
+            "message: {message}"
+        );
+        assert!(
+            message.contains(&extended_hours.to_string()),
+            "message: {message}"
+        );
+        assert!(
+            message.contains(price.as_deref().expect("price set in fixture")),
+            "message missing price: {message}"
+        );
+        assert!(
+            message.contains(stop_price.as_deref().expect("stop_price set in fixture")),
+            "message missing stop price: {message}"
+        );
+        assert!(
+            message.contains(ask_price.as_deref().expect("ask_price set in fixture")),
+            "message missing ask price: {message}"
+        );
+        assert!(
+            message.contains(bid_price.as_deref().expect("bid_price set in fixture")),
+            "message missing bid price: {message}"
+        );
+        assert!(
+            message.contains(
+                requested_dollar_amount
+                    .as_deref()
+                    .expect("requested_dollar_amount set in fixture")
+            ),
+            "message missing requested dollar amount: {message}"
+        );
+        assert!(message.contains(client_ref), "message: {message}");
+        assert!(
+            message.contains(&order_form_version.to_string()),
+            "message: {message}"
+        );
+    }
+
     #[tokio::test]
     async fn accepted_confirmation_submits_once_and_replay_fails() {
         let confirmation = confirmation(ORDER_CONFIRMATION_TTL);
