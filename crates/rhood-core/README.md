@@ -15,6 +15,7 @@ Powers the [`rhood-cli`](https://github.com/seferino-fernandez/rhood-rs/tree/mai
 - Configuration via TOML files, environment variables, or programmatic construction.
 - Unified brokerage account discovery with fail-closed explicit selection for multi-account and IRA users.
 - Two-step stock order preparation and submission with exact confirmation data, a 60-second lifetime, no redirects, and no automatic retries.
+- Core-owned Instrument Identity Enrichment for stock positions, dividends, orders, news, tags, and splits.
 
 ## Configuration and Safety
 
@@ -64,6 +65,37 @@ Account-sensitive methods require a canonical account number. `resolve_account(N
 `get_ipo_access_list` and `get_ipo_access_cards` expose the authenticated Bonfire offering list and card view models. Their presentation fields remain tolerant and raw. Summary, order-entry, allocation, receipt, reservation, and write workflows are intentionally not implemented because populated contracts have not been verified.
 
 Interactive stock-order callers should call `prepare_stock_order`, show `PreparedStockOrder::preview`, and then consume the preparation with `submit_prepared_stock_order`. Immediate market orders require positive bid and ask quotes. Dollar buys are converted to an estimated fractional quantity and are not broker-native notional orders. If submission is uncertain, use the returned client reference to reconcile open and recent orders before deciding whether to retry.
+
+## Instrument Identity Enrichment
+
+An Instrument Reference is the source identifier or URL that names a Robinhood
+instrument. A Ticker Symbol is a display identifier such as `AAPL`. The core validates
+and resolves Instrument References once at the shared boundary. It preserves a Wire
+Symbol supplied by the response and fills only missing symbols.
+
+Normal reads for positions, dividends, stock orders, news, tags, and splits use
+best-effort enrichment. A resolution miss or enrichment failure leaves the source
+record intact rather than failing the read. Research arrays remain positionally aligned
+with their source references: `NewsArticle::related_symbols` aligns with
+`related_instruments`, and `TagResult::instrument_symbols` aligns with `instruments`.
+Each unresolved entry is `None`, which serializes as `null`.
+
+Use the strict public resolver when resolution itself is the requested operation:
+
+```rust,no_run
+# use rhood_core::RobinhoodClient;
+# async fn run(client: &RobinhoodClient) -> rhood_core::Result<()> {
+let references = vec![
+    "https://api.robinhood.com/instruments/<uuid>/".to_owned(),
+];
+let symbols: Vec<Option<String>> = client.resolve_instrument_symbols(&references).await?;
+# Ok(())
+# }
+```
+
+`resolve_instrument_symbols` validates every input before making an HTTP request.
+A valid reference absent from the upstream response yields `None`; invalid references,
+transport failures, and decoding failures return an error.
 
 See the [API documentation](https://docs.rs/rhood-core) for the full reference.
 
