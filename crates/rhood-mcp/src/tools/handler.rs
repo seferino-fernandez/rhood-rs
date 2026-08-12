@@ -246,6 +246,7 @@ impl RhoodTools {
             + Self::market_router()
             + Self::futures_router()
             + Self::index_router()
+            + Self::ipo_router()
             + Self::recurring_router()
             + Self::research_router()
             + Self::user_router()

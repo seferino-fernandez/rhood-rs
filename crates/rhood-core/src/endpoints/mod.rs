@@ -12,6 +12,8 @@ pub mod dividends;
 pub mod documents;
 /// Futures contracts, quotes, and order history.
 pub mod futures;
+/// IPO Access offering list and card queries.
+pub mod ipo;
 /// Market listings and trading hours.
 pub mod markets;
 /// Options chains, instruments, and positions.

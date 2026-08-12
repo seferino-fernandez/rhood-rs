@@ -366,6 +366,25 @@ rhood index options SPX --expiry 2025-06-20 --option-type put --strike 5500
 
 `--option-type` values: `call`, `put`
 
+### IPO Access
+
+Read the authenticated user's current IPO Access offering list and offering cards.
+
+| Subcommand | Description                                      |
+| ---------- | ------------------------------------------------ |
+| `list`     | Raw offering list or current empty state         |
+| `cards`    | Cards for one or more Robinhood instrument UUIDs |
+
+```bash
+# Show current offerings or the empty state
+rhood ipo list
+
+# Show cards for instrument UUIDs discovered from the list or an instrument lookup
+rhood ipo cards 450dfc6d-5510-4d40-abfb-f633b7d9be3e
+```
+
+The list is an offering-dependent presentation model, so table and CSV output preserve it as compact JSON in one column. Card tables show instrument ID, title, name, and subtitle. JSON output preserves every known and unknown field. IPO summary, order-entry, allocation, receipt, reservation, and write workflows are not exposed because populated contracts have not been verified.
+
 ### Recurring
 
 Recurring investment schedules.
