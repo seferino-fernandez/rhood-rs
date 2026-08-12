@@ -64,7 +64,9 @@ Account-sensitive methods require a canonical account number. `resolve_account(N
 
 `get_ipo_access_list` and `get_ipo_access_cards` expose the authenticated Bonfire offering list and card view models. Their presentation fields remain tolerant and raw. Summary, order-entry, allocation, receipt, reservation, and write workflows are intentionally not implemented because populated contracts have not been verified.
 
-Interactive stock-order callers should call `prepare_stock_order`, show `PreparedStockOrder::preview`, and then consume the preparation with `submit_prepared_stock_order`. Immediate market orders require positive bid and ask quotes. Dollar buys are converted to an estimated fractional quantity and are not broker-native notional orders. If submission is uncertain, use the returned client reference to reconcile open and recent orders before deciding whether to retry.
+Stock and option placement use one two-step interface. Build an `OrderIntent`, call `prepare_order`, show the returned `StagedOrder::summary`, and then consume it with `submit_order` only after the caller authorises the trade. Preparation resolves the selected account and exact instrument or option contract and performs no brokerage write. Stock Staged Orders expire after 60 seconds; option Staged Orders expire after 600 seconds. Both submission paths send one request, follow no redirects, and never retry automatically. If submission is uncertain, use `StagedOrder::client_reference` to reconcile open and recent orders before deciding whether to prepare another order.
+
+Immediate stock market orders require positive bid and ask quotes. Dollar buys are converted to an estimated fractional quantity and are not broker-native notional orders. The typed `OrderSummary` is derived from the same frozen execution terms as the private broker payload, so user-facing adapters do not reconstruct confirmation fields from caller input.
 
 ## Instrument Identity Enrichment
 

@@ -44,8 +44,9 @@ pub use option::{
     OptionPosition, OptionType,
 };
 pub use order::{
-    OptionOrder, OptionOrderRequest, OptionPositionEffect, OrderAmount, OrderType, Side,
-    StockOrder, StockOrderRequest, TimeInForce, Trigger,
+    OptionOrder, OptionOrderIntent, OptionOrderSummary, OptionPositionEffect, OrderAmount,
+    OrderIntent, OrderSummary, OrderType, Side, StagedOrder, StockOrder, StockOrderIntent,
+    StockOrderSummary, SubmittedOrder, TimeInForce, Trigger,
 };
 pub use recurring::{
     CreateRecurringRequest, NextInvestmentDate, RecurringFrequency, RecurringInvestment,
