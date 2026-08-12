@@ -35,8 +35,11 @@ mod tests {
     }
 
     #[test]
-    fn instrument_identity_signature_is_strict_and_aligned() {
+    fn public_instrument_identity_interfaces_are_intentional() {
         async fn _assert(client: &crate::RobinhoodClient, references: &[String]) {
+            let _: crate::Result<Option<crate::models::stock::Instrument>> =
+                client.get_instrument_by_symbol("AAPL").await;
+            let _: crate::Result<String> = client.resolve_instrument_id("AAPL").await;
             let _: crate::Result<Vec<Option<String>>> =
                 client.resolve_instrument_symbols(references).await;
         }

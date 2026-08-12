@@ -34,7 +34,7 @@ use crate::models::stock::{IndexInstrument, Instrument};
 /// Financial data such as quotes, prices, candles, positions, orders, fundamentals,
 /// news, ratings are **never** stored here.
 #[derive(Clone)]
-pub struct ResolverCache {
+pub(crate) struct ResolverCache {
     pub(crate) enabled: bool,
     pub(crate) enrichment_batch_size: usize,
     pub(crate) instruments_by_symbol: Cache<String, Arc<Instrument>>,
@@ -50,7 +50,7 @@ impl ResolverCache {
     /// The returned value is cheap to clone and share across
     /// [`RobinhoodClient`](crate::RobinhoodClient) clones: every field is
     /// internally reference-counted.
-    pub fn from_config(config: &CacheConfig) -> Self {
+    pub(crate) fn from_config(config: &CacheConfig) -> Self {
         let instruments_by_symbol = Cache::builder()
             .max_capacity(config.instrument_max_entries)
             .time_to_live(Duration::from_secs(config.instrument_ttl_secs))

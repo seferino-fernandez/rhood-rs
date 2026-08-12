@@ -47,7 +47,8 @@ pub struct RhoodConfig {
     pub log: LogConfig,
     /// HTTP transport timeouts shared by all outbound clients.
     pub http: HttpConfig,
-    /// Identity/metadata resolver caches (symbol ↔ instrument id, etc.).
+    /// Caches used by strict Instrument Identity Enrichment and automatic
+    /// best-effort domain enrichment, plus metadata lookups.
     pub cache: CacheConfig,
 }
 
@@ -168,7 +169,8 @@ impl HttpConfig {
     }
 }
 
-/// Identity/metadata caches for symbol ↔ ID resolution.
+/// Caches for strict Instrument Identity Enrichment, automatic best-effort
+/// domain enrichment, and metadata lookups.
 ///
 /// Financial data is **never** cached (quotes, prices, positions, orders,
 /// etc.). Only immutable lookups: instrument metadata, index instruments,
@@ -197,7 +199,8 @@ pub struct CacheConfig {
     pub futures_ttl_secs: u64,
     /// Maximum entries in the symbol → futures contract cache.
     pub futures_max_entries: u64,
-    /// Batch size for Instrument Identity Enrichment `?ids=` requests.
+    /// Batch size for strict and automatic best-effort Instrument Identity
+    /// Enrichment `?ids=` requests.
     pub enrichment_batch_size: usize,
 }
 
