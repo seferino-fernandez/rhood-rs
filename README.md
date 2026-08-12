@@ -77,6 +77,15 @@ rhood --output json stock quote AAPL
 
 `rhood-cli` is a terminal interface to the Robinhood API. See the [rhood-cli README](crates/rhood-cli/) for the full reference (commands, flags, output formats, config).
 
+## Instrument Identity
+
+`rhood-core` owns Instrument Identity Enrichment for stock records and research
+responses. It validates and resolves each Instrument Reference once, preserves an
+upstream Wire Symbol, and fills a missing Ticker Symbol when resolution succeeds.
+Normal reads are best-effort: they keep the source record when enrichment misses or
+cannot complete. Explicit symbol resolution is strict. Research symbol arrays remain
+aligned with their source Instrument References, using `null` for unresolved entries.
+
 ## MCP Server
 
 `rhood-mcp` exposes Robinhood operations as MCP tools for LLM clients. It serves only
