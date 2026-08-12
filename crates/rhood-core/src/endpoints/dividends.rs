@@ -48,11 +48,6 @@ impl RobinhoodClient {
         Ok(dividends)
     }
 
-    /// Temporary compatibility forward for dividend identity enrichment.
-    pub async fn enrich_dividend_symbols(&self, dividends: &mut [Dividend]) -> Result<()> {
-        self.enrich_instrument_identities_strict(dividends).await
-    }
-
     /// Computes the total dividend income received (paid + reinvested) as a
     /// decimal string that preserves the source amounts' precision. Excludes
     /// voided/pending dividends.
@@ -90,7 +85,6 @@ impl RobinhoodClient {
 mod endpoint_tests {
     use crate::client::RobinhoodClient;
     use crate::config::RhoodConfig;
-    use crate::models::dividend::Dividend;
     use secrecy::SecretString;
     use wiremock::matchers::{method, path, query_param, query_param_is_missing};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -234,83 +228,6 @@ mod endpoint_tests {
         assert_eq!(dividends.len(), 1);
         assert_eq!(dividends[0].id.as_deref(), Some("div-005"));
         assert!(dividends[0].symbol.is_none());
-    }
-
-    #[tokio::test]
-    async fn enrich_dividend_symbols_is_noop_without_unresolved_instruments() {
-        // No instrument URLs to resolve, so no `/instruments/` request is made.
-        let server = MockServer::start().await;
-        let (_dir, client) = client_for_server(&server.uri()).await;
-
-        let mut dividends = vec![Dividend {
-            id: Some("div-006".to_string()),
-            symbol: Some("EXISTING".to_string()),
-            ..Default::default()
-        }];
-        client
-            .enrich_dividend_symbols(&mut dividends)
-            .await
-            .unwrap();
-
-        assert_eq!(dividends[0].symbol.as_deref(), Some("EXISTING"));
-    }
-
-    #[tokio::test]
-    async fn enrich_dividend_symbols_resolves_via_instruments() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/instruments/"))
-            .and(query_param("ids", INSTRUMENT_UUID))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "results": [{"id": INSTRUMENT_UUID, "symbol": "AAPL"}]
-            })))
-            .mount(&server)
-            .await;
-        let (_dir, client) = client_for_server(&server.uri()).await;
-
-        let mut dividends = vec![Dividend {
-            id: Some("div-007".to_string()),
-            instrument: Some(instrument_url()),
-            symbol: None,
-            ..Default::default()
-        }];
-        client
-            .enrich_dividend_symbols(&mut dividends)
-            .await
-            .unwrap();
-
-        assert_eq!(dividends[0].symbol.as_deref(), Some("AAPL"));
-    }
-
-    #[tokio::test]
-    async fn enrich_dividend_symbols_propagates_decoding_failure() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/instruments/"))
-            .and(query_param("ids", INSTRUMENT_UUID))
-            .respond_with(ResponseTemplate::new(200).set_body_string("not-json"))
-            .expect(1)
-            .mount(&server)
-            .await;
-        let (_dir, client) = client_for_server(&server.uri()).await;
-        let mut dividends = vec![Dividend {
-            id: Some("div-008".to_string()),
-            instrument: Some(instrument_url()),
-            symbol: None,
-            ..Default::default()
-        }];
-
-        let error = client
-            .enrich_dividend_symbols(&mut dividends)
-            .await
-            .unwrap_err();
-
-        assert!(matches!(
-            error,
-            crate::RhoodError::RequestChunkFailed { .. }
-        ));
-        assert!(dividends[0].symbol.is_none());
-        server.verify().await;
     }
 
     #[tokio::test]
@@ -464,65 +381,6 @@ mod tests {
         let div: Dividend = serde_json::from_str(json).unwrap();
         assert_eq!(div.symbol.as_deref(), Some("AAPL"));
         assert_eq!(div.id.as_deref(), Some("div-003"));
-    }
-
-    #[test]
-    fn enrich_dividend_symbols_applies_map() {
-        // Unit test for the assignment loop logic, mirroring the positions test.
-        let uuid = "450dfc6d-5510-4d40-abfb-f633b7d9be3e";
-        let url = format!("https://api.robinhood.com/instruments/{uuid}/");
-        let mut div = Dividend {
-            id: Some("div-004".to_string()),
-            instrument: Some(url.clone()),
-            symbol: None,
-            ..Default::default()
-        };
-
-        // Simulate what enrich_dividend_symbols does after calling resolve_symbols
-        let mut map = std::collections::HashMap::new();
-        map.insert(uuid.to_string(), "TSLA".to_string());
-
-        let dividends: &mut [Dividend] = std::slice::from_mut(&mut div);
-        for d in dividends.iter_mut() {
-            if d.symbol.is_none()
-                && let Some(instrument_url) = d.instrument.as_deref()
-                && let Some(id) = crate::util::instrument_id_from_url(instrument_url)
-                && let Some(sym) = map.get(id)
-            {
-                d.symbol = Some(sym.clone());
-            }
-        }
-
-        assert_eq!(div.symbol.as_deref(), Some("TSLA"));
-    }
-
-    #[test]
-    fn enrich_dividend_symbols_skips_already_set() {
-        let uuid = "450dfc6d-5510-4d40-abfb-f633b7d9be3e";
-        let url = format!("https://api.robinhood.com/instruments/{uuid}/");
-        let mut div = Dividend {
-            instrument: Some(url),
-            symbol: Some("EXISTING".to_string()),
-            ..Default::default()
-        };
-
-        let mut map = std::collections::HashMap::new();
-        map.insert(uuid.to_string(), "REPLACED".to_string());
-
-        // Only apply if symbol is None (mirrors enrich logic)
-        let dividends: &mut [Dividend] = std::slice::from_mut(&mut div);
-        for d in dividends.iter_mut() {
-            if d.symbol.is_none()
-                && let Some(instrument_url) = d.instrument.as_deref()
-                && let Some(id) = crate::util::instrument_id_from_url(instrument_url)
-                && let Some(sym) = map.get(id)
-            {
-                d.symbol = Some(sym.clone());
-            }
-        }
-
-        // Should not be replaced because symbol was already set
-        assert_eq!(div.symbol.as_deref(), Some("EXISTING"));
     }
 
     #[test]
