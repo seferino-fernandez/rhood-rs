@@ -14,7 +14,7 @@ use crate::config::CacheConfig;
 use crate::models::futures::FuturesContract;
 use crate::models::stock::{IndexInstrument, Instrument};
 
-/// Per-client caches backing symbol↔id resolution.
+/// Temporary public cache container backing identity resolution.
 ///
 /// Contents are cloneable because all fields are reference-counted internally
 /// (moka caches clone by bumping an atomic, [`OnceCell`] is shared via

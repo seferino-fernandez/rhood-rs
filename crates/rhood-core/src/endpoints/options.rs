@@ -38,7 +38,7 @@ impl RobinhoodClient {
     /// Returns [`RhoodError::InvalidSymbol`] if the symbol has no tradable
     /// option chain. Also returns an error on HTTP or deserialization failures.
     pub async fn get_option_chain(&self, symbol: &str) -> Result<OptionChain> {
-        let instrument = self.cached_instrument(symbol).await?;
+        let instrument = self.instrument_for_symbol(symbol).await?;
         let chain_id = instrument
             .and_then(|instrument| instrument.tradable_chain_id.clone())
             .ok_or_else(|| RhoodError::InvalidSymbol(symbol.to_string()))?;
@@ -63,7 +63,7 @@ impl RobinhoodClient {
         option_type: &str,
         strike_price: Option<&str>,
     ) -> Result<Vec<OptionInstrument>> {
-        let instrument = self.cached_instrument(symbol).await?;
+        let instrument = self.instrument_for_symbol(symbol).await?;
         let chain_id = instrument
             .and_then(|instrument| instrument.tradable_chain_id.clone())
             .ok_or_else(|| RhoodError::InvalidSymbol(symbol.to_string()))?;

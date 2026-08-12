@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use crate::api::paths;
 use crate::client::RobinhoodClient;
 use crate::endpoints::account::validate_account_number;
@@ -8,7 +6,7 @@ use crate::models::order::{
     OptionOrderRequest, OrderAmount, OrderType, PreparedStockOrder, Side, StockOrder,
     StockOrderPayload, StockOrderRequest, TimeInForce, Trigger,
 };
-use crate::models::stock::{Instrument, StockQuote};
+use crate::models::stock::StockQuote;
 use crate::{Result, RhoodError};
 
 const STOCK_ORDER_FORM_VERSION: u8 = 7;
@@ -138,13 +136,7 @@ fn quote_for_symbol(quotes: Vec<StockQuote>, symbol: &str) -> Result<StockQuote>
 }
 
 impl RobinhoodClient {
-    /// Fetches all stock orders, including completed, cancelled, and pending.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the HTTP request fails or the response cannot be
-    /// deserialized.
-    pub async fn get_all_stock_orders(
+    async fn get_stock_orders_raw(
         &self,
         account_number: &str,
         since: Option<&str>,
@@ -158,6 +150,23 @@ impl RobinhoodClient {
             .await
     }
 
+    /// Fetches all stock orders, including completed, cancelled, and pending.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the HTTP request fails or the response cannot be
+    /// deserialized.
+    pub async fn get_all_stock_orders(
+        &self,
+        account_number: &str,
+        since: Option<&str>,
+    ) -> Result<Vec<StockOrder>> {
+        let mut orders = self.get_stock_orders_raw(account_number, since).await?;
+        self.enrich_instrument_identities("get_all_stock_orders", &mut orders)
+            .await;
+        Ok(orders)
+    }
+
     /// Fetches only open (cancellable) stock orders.
     ///
     /// Filters the full order list to those with a non-null cancel URL.
@@ -166,11 +175,11 @@ impl RobinhoodClient {
     ///
     /// Returns an error if the underlying orders request fails.
     pub async fn get_open_stock_orders(&self, account_number: &str) -> Result<Vec<StockOrder>> {
-        let orders = self.get_all_stock_orders(account_number, None).await?;
-        Ok(orders
-            .into_iter()
-            .filter(|order| order.cancel.is_some())
-            .collect())
+        let mut orders = self.get_stock_orders_raw(account_number, None).await?;
+        orders.retain(|order| order.cancel.is_some());
+        self.enrich_instrument_identities("get_open_stock_orders", &mut orders)
+            .await;
+        Ok(orders)
     }
 
     /// Cancels a pending stock order by its order ID.
@@ -204,7 +213,7 @@ impl RobinhoodClient {
         validate_stock_order(req)?;
         validate_account_number(&req.account_number)?;
         let instrument = self
-            .cached_instrument(&req.symbol)
+            .instrument_for_symbol(&req.symbol)
             .await?
             .ok_or_else(|| RhoodError::InvalidSymbol(req.symbol.clone()))?;
         let instrument_url = instrument
@@ -507,30 +516,10 @@ impl RobinhoodClient {
         Ok(outcome)
     }
 
-    /// Fills in missing `symbol` fields on stock orders by resolving their
-    /// `instrument` URLs. Caches instrument lookups so each unique URL is
-    /// fetched at most once.
-    ///
-    /// Orders that already have a symbol or lack an instrument URL are skipped.
+    /// Temporary compatibility forward for stock-order identity enrichment.
     pub async fn enrich_order_symbols(&self, orders: &mut [StockOrder]) -> Result<()> {
-        let mut cache: HashMap<String, Option<String>> = HashMap::new();
-        for order in orders.iter_mut() {
-            if order.symbol.is_some() {
-                continue;
-            }
-            let Some(instrument_url) = &order.instrument else {
-                continue;
-            };
-            let symbol = if let Some(cached) = cache.get(instrument_url) {
-                cached.clone()
-            } else {
-                let result: std::result::Result<Instrument, _> = self.get(instrument_url).await;
-                let resolved = result.ok().and_then(|inst| inst.symbol);
-                cache.insert(instrument_url.clone(), resolved.clone());
-                resolved
-            };
-            order.symbol = symbol;
-        }
+        self.enrich_instrument_identities("enrich_order_symbols", orders)
+            .await;
         Ok(())
     }
 }
@@ -1329,6 +1318,75 @@ mod endpoint_tests {
         ] {
             assert_option_order_action(side, position_effect, expected_direction).await;
         }
+    }
+
+    #[tokio::test]
+    async fn get_all_stock_orders_enriches_once_and_preserves_wire_symbol() {
+        const INSTRUMENT_ID: &str = "450dfc6d-5510-4d40-abfb-f633b7d9be3e";
+        let server = MockServer::start().await;
+        let reference = format!("https://api.robinhood.com/instruments/{INSTRUMENT_ID}/");
+        Mock::given(method("GET"))
+            .and(path("/orders/"))
+            .and(query_param("account_numbers", "ABC123"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [
+                    {"id": "missing", "instrument": reference.clone()},
+                    {"id": "wire", "instrument": reference, "symbol": "WIRE"}
+                ],
+                "next": null,
+                "previous": null
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/instruments/"))
+            .and(query_param("ids", INSTRUMENT_ID))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [{"id": INSTRUMENT_ID, "symbol": "AAPL"}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server.uri()).await;
+
+        let orders = client.get_all_stock_orders("ABC123", None).await.unwrap();
+
+        assert_eq!(orders[0].symbol.as_deref(), Some("AAPL"));
+        assert_eq!(orders[1].symbol.as_deref(), Some("WIRE"));
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn get_open_stock_orders_does_not_resolve_closed_order_only_references() {
+        const INSTRUMENT_ID: &str = "450dfc6d-5510-4d40-abfb-f633b7d9be3e";
+        let server = MockServer::start().await;
+        let reference = format!("https://api.robinhood.com/instruments/{INSTRUMENT_ID}/");
+        Mock::given(method("GET"))
+            .and(path("/orders/"))
+            .and(query_param("account_numbers", "ABC123"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [{"id": "closed", "instrument": reference, "cancel": null}],
+                "next": null,
+                "previous": null
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/instruments/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [{"id": INSTRUMENT_ID, "symbol": "AAPL"}]
+            })))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server.uri()).await;
+
+        let orders = client.get_open_stock_orders("ABC123").await.unwrap();
+
+        assert!(orders.is_empty());
+        server.verify().await;
     }
 
     #[tokio::test]

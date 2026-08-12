@@ -27,17 +27,14 @@ impl RobinhoodClient {
     /// When `since` is provided, only dividends updated on or after that date
     /// (ISO 8601 format, e.g. "2025-01-01") are returned.
     ///
-    /// Instrument URLs are resolved to ticker symbols on a best-effort basis
-    /// via [`enrich_dividend_symbols`]; any failure is silently ignored so
-    /// that the caller always receives the raw dividends even when the
-    /// symbol-resolution request fails.
+    /// Instrument References are enriched with Ticker Symbols on a best-effort,
+    /// fill-only basis. Raw dividends are retained when enrichment is incomplete.
     ///
     /// # Errors
     ///
     /// Returns an error if the HTTP request fails or the response cannot be
     /// deserialized.
     ///
-    /// [`enrich_dividend_symbols`]: RobinhoodClient::enrich_dividend_symbols
     pub async fn get_dividends(&self, since: Option<&str>) -> Result<Vec<Dividend>> {
         let mut params: Vec<(&str, &str)> = Vec::new();
         if let Some(date) = since {
@@ -46,40 +43,14 @@ impl RobinhoodClient {
         let mut dividends: Vec<Dividend> = self
             .get_paginated(&self.api_url(paths::DIVIDENDS), &params)
             .await?;
-        #[expect(
-            clippy::let_underscore_must_use,
-            reason = "the documented best-effort enrichment contract returns raw dividends when symbol resolution fails"
-        )]
-        let _ = self.enrich_dividend_symbols(&mut dividends).await;
+        self.enrich_instrument_identities("get_dividends", &mut dividends)
+            .await;
         Ok(dividends)
     }
 
-    /// Backfills `symbol` on each dividend by resolving its instrument URL to a
-    /// ticker via a single batched `/instruments/?ids=` request. Best-effort:
-    /// dividends whose URL can't be parsed or resolved are left with
-    /// `symbol = None`.
+    /// Temporary compatibility forward for dividend identity enrichment.
     pub async fn enrich_dividend_symbols(&self, dividends: &mut [Dividend]) -> Result<()> {
-        let uuids: Vec<String> = dividends
-            .iter()
-            .filter(|d| d.symbol.is_none())
-            .filter_map(|d| d.instrument.as_deref())
-            .filter_map(|url| crate::util::instrument_id_from_url(url))
-            .map(|id| id.to_string())
-            .collect();
-        if uuids.is_empty() {
-            return Ok(());
-        }
-        let map = self.resolve_symbols(&uuids).await?;
-        for d in dividends.iter_mut() {
-            if d.symbol.is_none()
-                && let Some(url) = d.instrument.as_deref()
-                && let Some(id) = crate::util::instrument_id_from_url(url)
-                && let Some(sym) = map.get(id)
-            {
-                d.symbol = Some(sym.clone());
-            }
-        }
-        Ok(())
+        self.enrich_instrument_identities_strict(dividends).await
     }
 
     /// Computes the total dividend income received (paid + reinvested) as a
@@ -90,7 +61,9 @@ impl RobinhoodClient {
     ///
     /// Returns an error if the dividend fetch fails.
     pub async fn get_total_dividends(&self) -> Result<String> {
-        let dividends = self.get_dividends(None).await?;
+        let dividends: Vec<Dividend> = self
+            .get_paginated(&self.api_url(paths::DIVIDENDS), &[])
+            .await?;
         Ok(sum_dividend_amounts(&dividends))
     }
 
@@ -310,19 +283,57 @@ mod endpoint_tests {
     }
 
     #[tokio::test]
+    async fn enrich_dividend_symbols_propagates_decoding_failure() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/instruments/"))
+            .and(query_param("ids", INSTRUMENT_UUID))
+            .respond_with(ResponseTemplate::new(200).set_body_string("not-json"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server.uri()).await;
+        let mut dividends = vec![Dividend {
+            id: Some("div-008".to_string()),
+            instrument: Some(instrument_url()),
+            symbol: None,
+            ..Default::default()
+        }];
+
+        let error = client
+            .enrich_dividend_symbols(&mut dividends)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            crate::RhoodError::RequestChunkFailed { .. }
+        ));
+        assert!(dividends[0].symbol.is_none());
+        server.verify().await;
+    }
+
+    #[tokio::test]
     async fn get_total_dividends_sums_paid_and_reinvested() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/dividends/"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "results": [
-                    {"id": "d1", "amount": "0.07", "state": "paid"},
+                    {"id": "d1", "instrument": instrument_url(), "amount": "0.07", "state": "paid"},
                     {"id": "d2", "amount": "0.12", "state": "reinvested"},
                     {"id": "d3", "amount": "5.00", "state": "pending"}
                 ],
                 "next": null,
                 "previous": null
             })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/instruments/"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
             .mount(&server)
             .await;
         let (_dir, client) = client_for_server(&server.uri()).await;
@@ -330,6 +341,7 @@ mod endpoint_tests {
         let total = client.get_total_dividends().await.unwrap();
 
         assert_eq!(total, "0.19");
+        server.verify().await;
     }
 
     #[tokio::test]

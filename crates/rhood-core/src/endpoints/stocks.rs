@@ -10,19 +10,6 @@ use crate::models::stock::*;
 use crate::pagination::ResultsResponse;
 use crate::{Result, RhoodError};
 
-/// Batch `/instruments/?ids=` response, tolerant of `null` array entries.
-///
-/// Robinhood returns a literal `null` in `results` for delisted or otherwise
-/// unresolvable ids in the requested batch. Deserializing those positions into
-/// `Vec<Instrument>` would fail the entire batch (and, via the best-effort
-/// enrichment layer, zero out symbols for *every* item in the request). Using
-/// `Vec<Option<Instrument>>` keeps the resolvable instruments and drops the
-/// nulls.
-#[derive(serde::Deserialize)]
-struct InstrumentBatchResponse {
-    results: Vec<Option<Instrument>>,
-}
-
 const MARKET_DATA_URL_LIMIT: usize = 4_096;
 const FUNDAMENTALS_ITEM_LIMIT: usize = 100;
 
@@ -313,7 +300,7 @@ impl RobinhoodClient {
         Ok(resp.results.into_iter().next())
     }
 
-    /// Cached wrapper around [`get_instrument_by_symbol`](Self::get_instrument_by_symbol).
+    /// Temporary compatibility forward for cached instrument lookup.
     ///
     /// Returns an [`Arc<Instrument>`] shared with other callers requesting the
     /// same symbol during the TTL configured on the resolver cache. When
@@ -325,28 +312,7 @@ impl RobinhoodClient {
     /// populate the reverse `uuid → symbol` map used by
     /// [`resolve_symbols`](Self::resolve_symbols).
     pub async fn cached_instrument(&self, symbol: &str) -> Result<Option<Arc<Instrument>>> {
-        let key = symbol.to_uppercase();
-        if !self.resolvers.enabled {
-            return Ok(self.get_instrument_by_symbol(&key).await?.map(Arc::new));
-        }
-        if let Some(hit) = self.resolvers.instruments_by_symbol.get(&key).await {
-            return Ok(Some(hit));
-        }
-        let Some(instrument) = self.get_instrument_by_symbol(&key).await? else {
-            return Ok(None);
-        };
-        let wrapped = Arc::new(instrument);
-        self.resolvers
-            .instruments_by_symbol
-            .insert(key.clone(), wrapped.clone())
-            .await;
-        if let Some(id) = wrapped.id.as_ref() {
-            self.resolvers
-                .instruments_by_id
-                .insert(id.clone(), key)
-                .await;
-        }
-        Ok(Some(wrapped))
+        self.instrument_for_symbol(symbol).await
     }
 
     /// Looks up a Robinhood index instrument by its symbol (e.g., "SPX").
@@ -393,63 +359,19 @@ impl RobinhoodClient {
         Ok(Some(wrapped))
     }
 
-    /// Resolves a batch of instrument UUIDs to ticker symbols.
-    ///
-    /// Consults the resolver cache's `uuid → symbol` map first; only uncached
-    /// UUIDs are sent upstream. Misses are chunked into batches of
-    /// [`CacheConfig::enrichment_batch_size`](crate::config::CacheConfig::enrichment_batch_size)
-    /// to stay under Robinhood's query-string limits, and each chunk is sent
-    /// as a single `?ids=uuid1,uuid2,...` request to `/instruments/`. Results
-    /// are written back to the cache when enabled.
-    ///
-    /// The returned map contains only UUIDs that resolve to an instrument with
-    /// both an id and a symbol; any UUID whose instrument payload lacks either
-    /// field is omitted from the map rather than producing an error.
+    /// Temporary compatibility forward for UUID-to-symbol lookup.
     ///
     /// # Errors
     ///
     /// Returns an error if any chunked upstream request fails.
     pub async fn resolve_symbols(&self, ids: &[String]) -> Result<HashMap<String, String>> {
-        let mut result: HashMap<String, String> = HashMap::with_capacity(ids.len());
-        let mut misses: Vec<&str> = Vec::new();
-        if self.resolvers.enabled {
-            for id in ids {
-                if let Some(symbol) = self.resolvers.instruments_by_id.get(id).await {
-                    result.insert(id.clone(), symbol);
-                } else {
-                    misses.push(id.as_str());
-                }
-            }
-        } else {
-            misses = ids.iter().map(String::as_str).collect();
-        }
-        if misses.is_empty() {
-            return Ok(result);
-        }
-        let batch_size = if self.resolvers.enabled {
-            self.resolvers.enrichment_batch_size.max(1)
-        } else {
-            50
-        };
-        for chunk in misses.chunks(batch_size) {
-            let joined = chunk.join(",");
-            let params = [("ids", joined.as_str())];
-            let resp: InstrumentBatchResponse = self
-                .get_with_params(&self.api_url(paths::INSTRUMENTS), &params)
-                .await?;
-            for instrument in resp.results.into_iter().flatten() {
-                if let (Some(id), Some(symbol)) = (instrument.id, instrument.symbol) {
-                    if self.resolvers.enabled {
-                        self.resolvers
-                            .instruments_by_id
-                            .insert(id.clone(), symbol.clone())
-                            .await;
-                    }
-                    result.insert(id, symbol);
-                }
-            }
-        }
-        Ok(result)
+        let resolved = self.resolve_instrument_symbols(ids).await?;
+        Ok(ids
+            .iter()
+            .cloned()
+            .zip(resolved)
+            .filter_map(|(id, symbol)| symbol.map(|symbol| (id, symbol)))
+            .collect())
     }
 
     /// Fetches real-time market data for an index symbol.
@@ -886,23 +808,25 @@ mod tests {
     #[tokio::test]
     async fn resolve_symbols_cache_only_path_skips_http() {
         use crate::RhoodConfig;
+        const ID_ONE: &str = "450dfc6d-5510-4d40-abfb-f633b7d9be3e";
+        const ID_TWO: &str = "18226051-6bfa-4c56-bd9a-d7575f0245c1";
         let client = RobinhoodClient::with_config(RhoodConfig::default()).unwrap();
         client
             .resolvers
             .instruments_by_id
-            .insert("u1".to_string(), "AAPL".to_string())
+            .insert(ID_ONE.to_string(), "AAPL".to_string())
             .await;
         client
             .resolvers
             .instruments_by_id
-            .insert("u2".to_string(), "NVDA".to_string())
+            .insert(ID_TWO.to_string(), "NVDA".to_string())
             .await;
         let resolved = client
-            .resolve_symbols(&["u1".to_string(), "u2".to_string()])
+            .resolve_symbols(&[ID_ONE.to_string(), ID_TWO.to_string()])
             .await
             .unwrap();
-        assert_eq!(resolved.get("u1").map(String::as_str), Some("AAPL"));
-        assert_eq!(resolved.get("u2").map(String::as_str), Some("NVDA"));
+        assert_eq!(resolved.get(ID_ONE).map(String::as_str), Some("AAPL"));
+        assert_eq!(resolved.get(ID_TWO).map(String::as_str), Some("NVDA"));
         assert_eq!(resolved.len(), 2);
     }
 
@@ -1090,38 +1014,6 @@ mod tests {
             Some("450dfc6d-5510-4d40-abfb-f633b7d9be3e")
         );
         assert_eq!(resp.results[0].symbol.as_deref(), Some("AAPL"));
-    }
-
-    #[test]
-    fn batch_ids_response_skips_null_entries() {
-        // Robinhood's GET /instruments/?ids=a,b returns a literal `null` in the
-        // `results` array for delisted/invalid ids (observed live for a closed
-        // zero-quantity position). A plain `Vec<Instrument>` fails the WHOLE
-        // batch parse on that null, zeroing out symbol enrichment for every
-        // position in the request. The batch response must tolerate nulls and
-        // keep the resolvable instruments.
-        let json = r#"{
-            "next": null,
-            "previous": null,
-            "results": [
-                {
-                    "id": "450dfc6d-5510-4d40-abfb-f633b7d9be3e",
-                    "symbol": "AAPL",
-                    "state": "active"
-                },
-                null,
-                {
-                    "id": "18226051-6bfa-4c56-bd9a-d7575f0245c1",
-                    "symbol": "VTI",
-                    "state": "active"
-                }
-            ]
-        }"#;
-        let resp: InstrumentBatchResponse = serde_json::from_str(json).unwrap();
-        let resolved: Vec<&Instrument> = resp.results.iter().flatten().collect();
-        assert_eq!(resolved.len(), 2);
-        assert_eq!(resolved[0].symbol.as_deref(), Some("AAPL"));
-        assert_eq!(resolved[1].symbol.as_deref(), Some("VTI"));
     }
 
     #[test]

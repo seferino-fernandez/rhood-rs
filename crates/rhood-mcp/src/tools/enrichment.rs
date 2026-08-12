@@ -12,7 +12,6 @@
 
 use rhood_core::RobinhoodClient;
 use rhood_core::models::futures::FuturesQuote;
-use rhood_core::models::research::{NewsArticle, StockSplit, TagResult};
 use rhood_core::models::stock::Fundamentals;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
@@ -68,32 +67,6 @@ pub(super) fn collect_uuids<'a>(urls: impl IntoIterator<Item = &'a Option<String
         }
     }
     ordered
-}
-
-/// Decorated `NewsArticle` with an `instrument_symbols` list mirroring the
-/// `related_instruments` URL list.
-#[derive(Serialize)]
-pub(super) struct EnrichedNewsArticle<'a> {
-    #[serde(flatten)]
-    pub(super) article: &'a NewsArticle,
-    pub(super) related_symbols: Vec<String>,
-}
-
-/// Decorated `TagResult` with an `instrument_symbols` list mirroring the
-/// `instruments` URL list.
-#[derive(Serialize)]
-pub(super) struct EnrichedTagResult<'a> {
-    #[serde(flatten)]
-    pub(super) tag: &'a TagResult,
-    pub(super) instrument_symbols: Vec<String>,
-}
-
-/// Decorated `StockSplit` with a resolved `symbol`.
-#[derive(Serialize)]
-pub(super) struct EnrichedSplit<'a> {
-    #[serde(flatten)]
-    pub(super) split: &'a StockSplit,
-    pub(super) symbol: Option<String>,
 }
 
 /// Resolves a list of instrument URLs to symbols via a single batch call.
@@ -314,21 +287,6 @@ mod tests {
         );
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value[0]["symbol"], "AAPL");
-    }
-
-    #[test]
-    fn enriched_split_carries_symbol() {
-        use rhood_core::models::research::StockSplit;
-        let split = StockSplit {
-            instrument: Some("https://api.robinhood.com/instruments/abc/".into()),
-            ..Default::default()
-        };
-        let decorated = EnrichedSplit {
-            split: &split,
-            symbol: Some("AAPL".into()),
-        };
-        let json = serde_json::to_value(&decorated).unwrap();
-        assert_eq!(json["symbol"], "AAPL");
     }
 
     #[test]

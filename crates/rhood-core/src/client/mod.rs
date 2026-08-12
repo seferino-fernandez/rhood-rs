@@ -19,6 +19,7 @@ use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use self::read_policy::{Clock, ReadTransportPolicy, TokioClock};
+use instrument_identity::InstrumentIdentityResolver;
 
 /// Maximum consecutive server errors before aborting a polling loop.
 const MAX_SERVER_ERROR_RETRIES: u32 = 5;
@@ -97,6 +98,7 @@ pub struct RobinhoodClient {
     read_policy: Arc<ReadTransportPolicy>,
     read_only: bool,
     pub(crate) resolvers: ResolverCache,
+    instrument_identity: InstrumentIdentityResolver,
 }
 
 impl RobinhoodClient {
@@ -137,6 +139,7 @@ impl RobinhoodClient {
         let write_http = build_stock_order_http_client(&config.http)?;
         let read_only = config.read_only;
         let resolvers = ResolverCache::from_config(&config.cache);
+        let instrument_identity = InstrumentIdentityResolver::new(resolvers.clone());
         let read_policy = Arc::new(ReadTransportPolicy::new(&config.http, clock));
         Ok(Self {
             http,
@@ -148,6 +151,7 @@ impl RobinhoodClient {
             config: Arc::new(config),
             read_policy,
             resolvers,
+            instrument_identity,
         })
     }
 
@@ -275,6 +279,7 @@ fn build_http_client_with_redirect_policy(
 
 mod auth;
 mod device_verification;
+pub(crate) mod instrument_identity;
 mod read_policy;
 mod transport;
 

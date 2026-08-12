@@ -164,10 +164,8 @@ impl RobinhoodClient {
     ///
     /// Excludes positions that have been fully closed (quantity of zero).
     ///
-    /// Instrument URLs are resolved to ticker symbols on a best-effort basis
-    /// via [`Self::enrich_position_symbols`]; any failure, including a failure of
-    /// the batched symbol-resolution request, is silently ignored so that the
-    /// caller always receives the raw positions.
+    /// Instrument References are enriched with Ticker Symbols on a best-effort,
+    /// fill-only basis. Raw positions are retained when enrichment is incomplete.
     ///
     /// # Errors
     ///
@@ -181,20 +179,15 @@ impl RobinhoodClient {
                 &[("account_number", account_number), ("nonzero", "true")],
             )
             .await?;
-        #[expect(
-            clippy::let_underscore_must_use,
-            reason = "the function's documented best-effort enrichment contract returns raw positions when symbol resolution fails"
-        )]
-        let _ = self.enrich_position_symbols(&mut positions).await;
+        self.enrich_instrument_identities("get_positions", &mut positions)
+            .await;
         Ok(positions)
     }
 
     /// Fetches all stock positions, including those with a zero quantity.
     ///
-    /// Instrument URLs are resolved to ticker symbols on a best-effort basis
-    /// via [`Self::enrich_position_symbols`]; any failure, including a failure of
-    /// the batched symbol-resolution request, is silently ignored so that the
-    /// caller always receives the raw positions.
+    /// Instrument References are enriched with Ticker Symbols on a best-effort,
+    /// fill-only basis. Raw positions are retained when enrichment is incomplete.
     ///
     /// # Errors
     ///
@@ -208,44 +201,14 @@ impl RobinhoodClient {
                 &[("account_number", account_number)],
             )
             .await?;
-        #[expect(
-            clippy::let_underscore_must_use,
-            reason = "the function's documented best-effort enrichment contract returns raw positions when symbol resolution fails"
-        )]
-        let _ = self.enrich_position_symbols(&mut positions).await;
+        self.enrich_instrument_identities("get_all_positions", &mut positions)
+            .await;
         Ok(positions)
     }
 
-    /// Backfills `symbol` on each position by resolving its instrument URL to a
-    /// ticker via a single batched `/instruments/?ids=` request. Best-effort:
-    /// positions whose URL can't be parsed or resolved are left with `symbol = None`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the batched instrument request fails or its response
-    /// cannot be deserialized.
+    /// Temporary compatibility forward for position identity enrichment.
     pub async fn enrich_position_symbols(&self, positions: &mut [Position]) -> Result<()> {
-        let uuids: Vec<String> = positions
-            .iter()
-            .filter(|p| p.symbol.is_none())
-            .filter_map(|p| p.instrument.as_deref())
-            .filter_map(|url| crate::util::instrument_id_from_url(url))
-            .map(|id| id.to_string())
-            .collect();
-        if uuids.is_empty() {
-            return Ok(());
-        }
-        let map = self.resolve_symbols(&uuids).await?;
-        for p in positions.iter_mut() {
-            if p.symbol.is_none()
-                && let Some(url) = p.instrument.as_deref()
-                && let Some(id) = crate::util::instrument_id_from_url(url)
-                && let Some(sym) = map.get(id)
-            {
-                p.symbol = Some(sym.clone());
-            }
-        }
-        Ok(())
+        self.enrich_instrument_identities_strict(positions).await
     }
 }
 
@@ -564,9 +527,12 @@ mod endpoint_tests {
     use crate::RhoodError;
     use crate::client::RobinhoodClient;
     use crate::config::RhoodConfig;
+    use crate::models::account::Position;
     use secrecy::SecretString;
     use wiremock::matchers::{method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const INSTRUMENT_ID: &str = "450dfc6d-5510-4d40-abfb-f633b7d9be3e";
 
     async fn client_for_server(server: &MockServer) -> (tempfile::TempDir, RobinhoodClient) {
         let dir = tempfile::tempdir().unwrap();
@@ -732,6 +698,105 @@ mod endpoint_tests {
         client.get_portfolio_performance("ABC123").await.unwrap();
         client.get_account_summary("ABC123").await.unwrap();
         assert!(client.get_positions("ABC123").await.unwrap().is_empty());
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn get_positions_enriches_duplicates_in_one_resolution_pass() {
+        let server = MockServer::start().await;
+        let reference = format!("https://api.robinhood.com/instruments/{INSTRUMENT_ID}/");
+        Mock::given(method("GET"))
+            .and(path("/positions/"))
+            .and(query_param("account_number", "ABC123"))
+            .and(query_param("nonzero", "true"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [
+                    {"instrument": reference.clone()},
+                    {"instrument": INSTRUMENT_ID},
+                    {"instrument": reference, "symbol": "WIRE"}
+                ],
+                "next": null
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/instruments/"))
+            .and(query_param("ids", INSTRUMENT_ID))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [{"id": INSTRUMENT_ID, "symbol": "AAPL"}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server).await;
+
+        let positions = client.get_positions("ABC123").await.unwrap();
+
+        assert_eq!(positions[0].symbol.as_deref(), Some("AAPL"));
+        assert_eq!(positions[1].symbol.as_deref(), Some("AAPL"));
+        assert_eq!(positions[2].symbol.as_deref(), Some("WIRE"));
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn enrich_position_symbols_rejects_invalid_missing_reference_before_http() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/instruments/"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server).await;
+        let mut positions = vec![Position {
+            instrument: Some(format!("urn:uuid:{INSTRUMENT_ID}")),
+            symbol: None,
+            ..serde_json::from_str("{}").unwrap()
+        }];
+
+        let error = client
+            .enrich_position_symbols(&mut positions)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, RhoodError::InvalidParameter(_)));
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn enrich_position_symbols_propagates_resolution_failure_and_preserves_wire_symbols() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/instruments/"))
+            .and(query_param("ids", INSTRUMENT_ID))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server).await;
+        let reference = format!("https://api.robinhood.com/instruments/{INSTRUMENT_ID}/");
+        let mut positions = vec![
+            Position {
+                instrument: Some(reference.clone()),
+                symbol: None,
+                ..serde_json::from_str("{}").unwrap()
+            },
+            Position {
+                instrument: Some(reference),
+                symbol: Some("WIRE".to_string()),
+                ..serde_json::from_str("{}").unwrap()
+            },
+        ];
+
+        let error = client
+            .enrich_position_symbols(&mut positions)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, RhoodError::RequestChunkFailed { .. }));
+        assert!(positions[0].symbol.is_none());
+        assert_eq!(positions[1].symbol.as_deref(), Some("WIRE"));
         server.verify().await;
     }
 

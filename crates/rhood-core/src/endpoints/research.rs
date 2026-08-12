@@ -7,15 +7,13 @@ use crate::{Result, RhoodError};
 impl RobinhoodClient {
     /// Resolves a ticker symbol to its Robinhood instrument ID.
     ///
-    /// Routes through the resolver cache via
-    /// [`cached_instrument`](Self::cached_instrument) so repeated resolutions
-    /// for the same symbol within the TTL are served from memory.
+    /// Routes through the private Instrument Identity resolver.
     ///
     /// # Errors
     ///
     /// Returns [`RhoodError::InvalidSymbol`] if the symbol is not found.
     pub async fn resolve_instrument_id(&self, symbol: &str) -> Result<String> {
-        self.cached_instrument(symbol)
+        self.instrument_for_symbol(symbol)
             .await?
             .and_then(|instrument| instrument.id.clone())
             .ok_or_else(|| RhoodError::InvalidSymbol(symbol.to_string()))
@@ -63,8 +61,31 @@ impl RobinhoodClient {
     pub async fn get_news(&self, symbol: &str) -> Result<Vec<NewsArticle>> {
         let uppercased = symbol.to_uppercase();
         let params = [("symbol", uppercased.as_str())];
-        self.get_paginated(&self.api_url(paths::NEWS), &params)
+        let mut articles: Vec<NewsArticle> = self
+            .get_paginated(&self.api_url(paths::NEWS), &params)
+            .await?;
+        let references = articles
+            .iter()
+            .flat_map(|article| article.related_instruments.iter().flatten())
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut symbols = self
+            .resolve_instrument_symbols_best_effort("get_news", &references)
             .await
+            .into_iter();
+        for article in &mut articles {
+            article.related_symbols = article
+                .related_instruments
+                .as_ref()
+                .map(|references| {
+                    references
+                        .iter()
+                        .map(|_| symbols.next().unwrap_or(None))
+                        .collect()
+                })
+                .unwrap_or_default();
+        }
+        Ok(articles)
     }
 
     /// Fetches stock split history for a ticker symbol.
@@ -82,14 +103,15 @@ impl RobinhoodClient {
             "{}{instrument_id}/splits/",
             self.api_url(paths::INSTRUMENTS)
         );
-        self.get_paginated(&url, &[]).await
+        let mut splits: Vec<StockSplit> = self.get_paginated(&url, &[]).await?;
+        self.enrich_instrument_identities("get_splits", &mut splits)
+            .await;
+        Ok(splits)
     }
 
     /// Fetches instruments associated with a tag (e.g., "100-most-popular").
     ///
-    /// Returns the tag metadata and a list of instrument URLs. Use
-    /// [`get_instrument_by_symbol`](Self::get_instrument_by_symbol) to resolve
-    /// individual URLs to symbols if needed.
+    /// Returns tag metadata, Instrument References, and aligned Ticker Symbols.
     ///
     /// # Errors
     ///
@@ -97,7 +119,12 @@ impl RobinhoodClient {
     /// deserialized.
     pub async fn get_tags(&self, tag: &str) -> Result<TagResult> {
         let url = format!("{}{tag}/", self.api_url(paths::TAGS));
-        self.get(&url).await
+        let mut tag: TagResult = self.get(&url).await?;
+        let references = tag.instruments.clone().unwrap_or_default();
+        tag.instrument_symbols = self
+            .resolve_instrument_symbols_best_effort("get_tags", &references)
+            .await;
+        Ok(tag)
     }
 }
 
@@ -108,6 +135,9 @@ mod endpoint_tests {
     use secrecy::SecretString;
     use wiremock::matchers::{method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const ID_A: &str = "450dfc6d-5510-4d40-abfb-f633b7d9be3e";
+    const ID_B: &str = "18226051-6bfa-4c56-bd9a-d7575f0245c1";
 
     async fn client_for_server(base_url: &str) -> (tempfile::TempDir, RobinhoodClient) {
         let dir = tempfile::tempdir().unwrap();
@@ -163,6 +193,122 @@ mod endpoint_tests {
             .filter_map(|article| article.uuid.as_deref())
             .collect();
         assert_eq!(ids, ["news-1", "news-2"]);
+    }
+
+    #[tokio::test]
+    async fn get_news_enriches_aligned_misses_in_one_resolution_pass() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/midlands/news/"))
+            .and(query_param("symbol", "AAPL"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [{
+                    "uuid": "news-1",
+                    "related_instruments": [
+                        format!("https://api.robinhood.com/instruments/{ID_A}/"),
+                        format!("https://api.robinhood.com/instruments/{ID_B}/"),
+                        format!("https://api.robinhood.com/instruments/{ID_A}/")
+                    ]
+                }],
+                "next": null,
+                "previous": null
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/instruments/"))
+            .and(query_param("ids", format!("{ID_A},{ID_B}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [{"id": ID_A, "symbol": "AAPL"}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server.uri()).await;
+
+        let articles = client.get_news("aapl").await.unwrap();
+
+        assert_eq!(
+            articles[0].related_symbols,
+            vec![Some("AAPL".to_string()), None, Some("AAPL".to_string())]
+        );
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn get_tags_preserves_reference_cardinality() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/midlands/tags/tag/technology/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "name": "Technology",
+                "instruments": [ID_A, "invalid-reference", ID_A]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/instruments/"))
+            .and(query_param("ids", ID_A))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [{"id": ID_A, "symbol": "AAPL"}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server.uri()).await;
+
+        let tag = client.get_tags("technology").await.unwrap();
+
+        assert_eq!(
+            tag.instrument_symbols,
+            vec![Some("AAPL".to_string()), None, Some("AAPL".to_string())]
+        );
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn get_splits_enriches_once_without_replacing_wire_identity() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/instruments/"))
+            .and(query_param("symbol", "AAPL"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [{"id": ID_A, "symbol": "AAPL"}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/instruments/{ID_A}/splits/")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [
+                    {"instrument": format!("https://api.robinhood.com/instruments/{ID_A}/")},
+                    {"instrument": format!("https://api.robinhood.com/instruments/{ID_B}/")}
+                ],
+                "next": null,
+                "previous": null
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/instruments/"))
+            .and(query_param("ids", ID_B))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [{"id": ID_B, "symbol": "VTI"}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server.uri()).await;
+
+        let splits = client.get_splits("AAPL").await.unwrap();
+
+        assert_eq!(splits[0].symbol.as_deref(), Some("AAPL"));
+        assert_eq!(splits[1].symbol.as_deref(), Some("VTI"));
+        server.verify().await;
     }
 }
 
@@ -246,6 +392,7 @@ mod tests {
         );
         assert_eq!(article.source.as_deref(), Some("Reuters"));
         assert!(article.related_instruments.is_some());
+        assert!(article.related_symbols.is_empty());
     }
 
     #[test]
@@ -260,6 +407,7 @@ mod tests {
         let split: StockSplit = serde_json::from_str(json).unwrap();
         assert_eq!(split.execution_date.as_deref(), Some("2022-06-06"));
         assert_eq!(split.multiplier.as_deref(), Some("4.00000000"));
+        assert!(split.symbol.is_none());
     }
 
     #[test]
@@ -277,6 +425,22 @@ mod tests {
         assert_eq!(tag.slug.as_deref(), Some("100-most-popular"));
         let instruments = tag.instruments.unwrap();
         assert_eq!(instruments.len(), 2);
+        assert!(tag.instrument_symbols.is_empty());
+    }
+
+    #[test]
+    fn derived_identity_fields_ignore_upstream_values() {
+        let article: NewsArticle =
+            serde_json::from_str(r#"{"related_symbols":["UNTRUSTED"],"related_instruments":[]}"#)
+                .unwrap();
+        let split: StockSplit = serde_json::from_str(r#"{"symbol":"UNTRUSTED"}"#).unwrap();
+        let tag: TagResult =
+            serde_json::from_str(r#"{"instrument_symbols":["UNTRUSTED"],"instruments":[]}"#)
+                .unwrap();
+
+        assert!(article.related_symbols.is_empty());
+        assert!(split.symbol.is_none());
+        assert!(tag.instrument_symbols.is_empty());
     }
 
     #[test]
