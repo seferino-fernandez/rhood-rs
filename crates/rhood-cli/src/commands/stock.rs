@@ -1,7 +1,7 @@
 use crate::output::{OutputFormat, output};
 use clap::Subcommand;
 use rhood_core::models::stock::{
-    HistoricalBounds, HistoricalInterval, HistoricalOpts, HistoricalSpan,
+    Fundamentals, HistoricalBounds, HistoricalInterval, HistoricalOpts, HistoricalSpan,
 };
 use rhood_core::{RhoodConfig, RobinhoodClient};
 
@@ -102,6 +102,43 @@ fn split_ratio(multiplier: &str, divisor: &str) -> String {
     }
 }
 
+fn fundamentals_rows(fundamentals: &[Fundamentals]) -> Vec<Vec<String>> {
+    fundamentals
+        .iter()
+        .map(|fundamental| {
+            vec![
+                fundamental.symbol.clone().unwrap_or_default(),
+                fundamental.sector.clone().unwrap_or_default(),
+                fundamental.pe_ratio.clone().unwrap_or_default(),
+                human_market_cap(fundamental.market_cap.as_deref().unwrap_or_default()),
+                format_percent(fundamental.dividend_yield.as_deref().unwrap_or_default()),
+            ]
+        })
+        .collect()
+}
+
+fn tag_rows(
+    result: &rhood_core::models::research::TagResult,
+    requested_tag: &str,
+) -> Vec<Vec<String>> {
+    let tag_name = result.name.as_deref().unwrap_or(requested_tag);
+    result
+        .instruments
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .enumerate()
+        .map(|(index, reference)| {
+            let symbol = result
+                .instrument_symbols
+                .get(index)
+                .and_then(Option::as_deref)
+                .unwrap_or(reference);
+            vec![tag_name.to_owned(), symbol.to_owned()]
+        })
+        .collect()
+}
+
 pub async fn run(
     cmd: &StockCommand,
     format: OutputFormat,
@@ -165,32 +202,8 @@ pub async fn run(
             let refs: Vec<&str> = symbols.iter().map(String::as_str).collect();
             let funds = client.get_fundamentals(&refs).await?;
             let headers = &["Symbol", "Sector", "PE Ratio", "Market Cap", "Div Yield"];
-            // The /fundamentals/?symbols=… endpoint omits the `symbol` field in
-            // each result, but results are returned in request order.  Zip the
-            // input symbols with the returned structs so both table/CSV and JSON
-            // carry the correct symbol.
-            let named_funds: Vec<rhood_core::models::stock::Fundamentals> = symbols
-                .iter()
-                .zip(funds.iter())
-                .map(|(sym, fund)| {
-                    let mut f = fund.clone();
-                    f.symbol = Some(sym.to_uppercase());
-                    f
-                })
-                .collect();
-            let rows: Vec<Vec<String>> = named_funds
-                .iter()
-                .map(|fundamental| {
-                    vec![
-                        fundamental.symbol.clone().unwrap_or_default(),
-                        fundamental.sector.clone().unwrap_or_default(),
-                        fundamental.pe_ratio.clone().unwrap_or_default(),
-                        human_market_cap(fundamental.market_cap.as_deref().unwrap_or_default()),
-                        format_percent(fundamental.dividend_yield.as_deref().unwrap_or_default()),
-                    ]
-                })
-                .collect();
-            output(format, headers, &rows, &named_funds);
+            let rows = fundamentals_rows(&funds);
+            output(format, headers, &rows, &funds);
         }
         StockCommand::LatestPrices { symbols } => {
             let refs: Vec<&str> = symbols.iter().map(String::as_str).collect();
@@ -327,51 +340,9 @@ pub async fn run(
         }
         StockCommand::Tags { tag } => {
             let result = client.get_tags(tag).await?;
-            let tag_name = result.name.clone().unwrap_or_else(|| tag.clone());
-
-            // Extract UUIDs from instrument URLs
-            let urls = result.instruments.as_deref().unwrap_or(&[]);
-            let uuids: Vec<String> = urls
-                .iter()
-                .filter_map(|url| rhood_core::util::instrument_id_from_url(url))
-                .map(|id| id.to_string())
-                .collect();
-
-            // Resolve UUIDs to ticker symbols via batched /instruments/?ids= request
-            let symbol_map = client.resolve_symbols(&uuids).await?;
-
-            // Collect resolved symbols, sorted for deterministic output
-            let mut symbols: Vec<String> = uuids
-                .iter()
-                .filter_map(|id| symbol_map.get(id).cloned())
-                .collect();
-            symbols.sort();
-
-            // Fall back to listing UUIDs if none resolved (e.g. offline / mock env)
-            let display_items: Vec<String> = if symbols.is_empty() {
-                let mut fallback = uuids.clone();
-                fallback.sort();
-                fallback
-            } else {
-                symbols.clone()
-            };
-
-            #[derive(serde::Serialize)]
-            struct TagSymbols {
-                tag: String,
-                symbols: Vec<String>,
-            }
-
             let headers = &["Tag", "Symbol"];
-            let rows: Vec<Vec<String>> = display_items
-                .iter()
-                .map(|sym| vec![tag_name.clone(), sym.clone()])
-                .collect();
-            let data = TagSymbols {
-                tag: tag_name,
-                symbols: display_items,
-            };
-            output(format, headers, &rows, &data);
+            let rows = tag_rows(&result, tag);
+            output(format, headers, &rows, &result);
         }
     }
     Ok(())
@@ -379,7 +350,10 @@ pub async fn run(
 
 #[cfg(test)]
 mod tests {
-    use super::{format_money, format_percent, human_market_cap, split_ratio};
+    use super::{
+        format_money, format_percent, fundamentals_rows, human_market_cap, split_ratio, tag_rows,
+    };
+    use rhood_core::models::{research::TagResult, stock::Fundamentals};
 
     // --- human_market_cap ---
 
@@ -488,5 +462,72 @@ mod tests {
     fn split_ratio_fallback_empty() {
         // Empty strings (missing fields) fall back to raw "/" form
         assert_eq!(split_ratio("", ""), "/");
+    }
+
+    #[test]
+    fn fundamentals_omission_does_not_relabel_later_record() {
+        let core_record = Fundamentals {
+            symbol: Some("MSFT".to_owned()),
+            sector: Some("Technology".to_owned()),
+            ..Default::default()
+        };
+
+        // Core omitted the earlier requested AAPL record. CLI presentation must
+        // retain the authoritative symbol on the returned later record.
+        let rows = fundamentals_rows(&[core_record]);
+
+        assert_eq!(rows, vec![vec!["MSFT", "Technology", "", "", ""]]);
+    }
+
+    #[test]
+    fn tag_rows_preserve_positional_misses() {
+        let result = TagResult {
+            name: Some("Technology".to_owned()),
+            slug: Some("technology".to_owned()),
+            instruments: Some(vec![
+                "https://api.robinhood.com/instruments/aapl/".to_owned(),
+                "https://api.robinhood.com/instruments/missing/".to_owned(),
+                "https://api.robinhood.com/instruments/msft/".to_owned(),
+            ]),
+            instrument_symbols: vec![Some("AAPL".to_owned()), None, Some("MSFT".to_owned())],
+        };
+
+        assert_eq!(
+            tag_rows(&result, "requested-tag"),
+            vec![
+                vec!["Technology", "AAPL"],
+                vec![
+                    "Technology",
+                    "https://api.robinhood.com/instruments/missing/"
+                ],
+                vec!["Technology", "MSFT"],
+            ]
+        );
+    }
+
+    #[test]
+    fn tag_json_preserves_core_references_and_aligned_symbols() {
+        let result = TagResult {
+            name: Some("Technology".to_owned()),
+            slug: Some("technology".to_owned()),
+            instruments: Some(vec![
+                "https://api.robinhood.com/instruments/aapl/".to_owned(),
+                "https://api.robinhood.com/instruments/missing/".to_owned(),
+            ]),
+            instrument_symbols: vec![Some("AAPL".to_owned()), None],
+        };
+
+        assert_eq!(
+            serde_json::to_value(&result).unwrap(),
+            serde_json::json!({
+                "name": "Technology",
+                "slug": "technology",
+                "instruments": [
+                    "https://api.robinhood.com/instruments/aapl/",
+                    "https://api.robinhood.com/instruments/missing/"
+                ],
+                "instrument_symbols": ["AAPL", null]
+            })
+        );
     }
 }
