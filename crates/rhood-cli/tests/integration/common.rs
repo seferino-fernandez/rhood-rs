@@ -43,6 +43,7 @@ pub const STOCK_SYMBOL: &str = "AAPL";
 pub const STOCK_SYMBOLS_MULTI: &[&str] = &["AAPL", "SPY"];
 pub const INDEX_SYMBOL: &str = "SPX";
 pub const INDEX_SYMBOLS_MULTI: &[&str] = &["SPX", "NDX"];
+pub const STOCK_INSTRUMENT_ID: &str = "450dfc6d-5510-4d40-abfb-f633b7d9be3e";
 pub const FUTURES_SYMBOL: &str = "ESM26";
 pub const WATCHLIST_NAME: &str = "My First List";
 pub const POPULAR_TAG: &str = "100-most-popular";

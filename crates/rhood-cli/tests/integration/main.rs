@@ -8,6 +8,7 @@ mod documents;
 mod futures;
 mod income;
 mod indexes;
+mod ipo;
 mod market;
 mod options;
 mod orders;

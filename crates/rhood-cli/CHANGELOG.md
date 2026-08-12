@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add `rhood futures positions` with compact raw-object table and CSV rows and raw-array JSON output.
 - Add `rhood option aggregate-positions` for account-filtered aggregate option strategies.
 - Add `rhood account performance` for the raw Bonfire returns chart model.
+- Add read-only `rhood ipo list` and `rhood ipo cards` commands.
 
 ### Changed
 

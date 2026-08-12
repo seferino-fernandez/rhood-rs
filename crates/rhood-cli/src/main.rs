@@ -1,7 +1,7 @@
 //! `rhood` - a terminal CLI for the Robinhood trading API.
 //!
 //! Wraps [`rhood_core`] with a [`clap`]-based command surface for stocks,
-//! options, futures, indices, orders, watchlists, and recurring
+//! options, futures, indices, IPO Access, orders, watchlists, and recurring
 //! investments. Output renders as a human table by default; pass
 //! `--output json` or `--output csv` for machine-readable formats.
 //!
@@ -93,6 +93,11 @@ enum Command {
         #[command(subcommand)]
         command: commands::index::IndexCommand,
     },
+    /// Read IPO Access offering lists and cards
+    Ipo {
+        #[command(subcommand)]
+        command: commands::ipo::IpoCommand,
+    },
     /// Manage recurring investment schedules
     Recurring {
         #[command(subcommand)]
@@ -149,6 +154,7 @@ async fn try_main() -> anyhow::Result<()> {
         }
         Command::Futures { command } => commands::futures::run(command, cli.output, config).await,
         Command::Index { command } => commands::index::run(command, cli.output, config).await,
+        Command::Ipo { command } => commands::ipo::run(command, cli.output, config).await,
         Command::Recurring { command } => {
             commands::recurring::run(command, cli.output, config, cli.account.as_deref()).await
         }

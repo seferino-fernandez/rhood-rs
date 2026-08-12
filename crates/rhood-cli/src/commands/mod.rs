@@ -1,6 +1,7 @@
 pub mod account;
 pub mod futures;
 pub mod index;
+pub mod ipo;
 pub mod login;
 pub mod market;
 pub mod option;

@@ -59,6 +59,9 @@ rhood account portfolio
 # Portfolio returns chart model
 rhood account performance
 
+# IPO Access offerings or current empty state
+rhood ipo list
+
 # If more than one brokerage account exists, discover and select one
 rhood account list
 rhood --account ABC123 account portfolio
@@ -97,7 +100,7 @@ transport, OAuth, environment-variable, and full CLI setup.
 
 ### Available Tools
 
-Tools are grouped by domain: **Stocks**, **Options**, **Futures**, **Indices**, **Account**, **Income** (dividends, interest, transfers), **Research**, **Recurring investments**, **Watchlists**, **User**, **Market**, **Orders**.
+Tools are grouped by domain: **Stocks**, **Options**, **Futures**, **Indices**, **IPO Access**, **Account**, **Income** (dividends, interest, transfers), **Research**, **Recurring investments**, **Watchlists**, **User**, **Market**, **Orders**.
 
 A few representative tools:
 
@@ -107,6 +110,7 @@ A few representative tools:
 | `get_accounts`      | Discover canonical brokerage account selectors               |
 | `get_portfolio`     | Portfolio summary (equity, cash, etc.)                       |
 | `get_portfolio_performance` | Raw portfolio returns chart and rendering metadata   |
+| `get_ipo_access_list` | IPO Access offerings or the authenticated user's empty state |
 | `place_stock_order` | Prepare exact wire fields, confirm, then submit once          |
 | `cancel_order`      | Cancel an open stock order                                   |
 

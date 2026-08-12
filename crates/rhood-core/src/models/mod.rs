@@ -12,6 +12,8 @@ pub mod dividend;
 pub mod document;
 /// Futures contract, quote, and order types.
 pub mod futures;
+/// IPO Access list and card view models.
+pub mod ipo;
 /// Market and trading-hours types.
 pub mod market;
 /// Options chain, instrument, and position types.
@@ -35,6 +37,7 @@ pub use account::*;
 pub use dividend::{Dividend, InterestPayment, MoneyAmount};
 pub use document::*;
 pub use futures::{FuturesContract, FuturesOrder, FuturesPosition, FuturesQuote};
+pub use ipo::{IpoAccessCard, IpoAccessList};
 pub use market::*;
 pub use option::{
     AggregateOptionPosition, OptionChain, OptionContractSpec, OptionInstrument, OptionMarketData,

@@ -10,6 +10,7 @@ mod futures_tools;
 mod handler;
 mod income_tools;
 mod index_tools;
+mod ipo_tools;
 mod market_tools;
 mod option_tools;
 mod order_tools;

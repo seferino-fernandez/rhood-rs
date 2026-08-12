@@ -35,6 +35,12 @@ pub mod paths {
     /// Bonfire portfolio performance chart view model endpoint.
     pub const PORTFOLIO_PERFORMANCE: &str = "/portfolio/performance/";
 
+    // IPO Access
+    /// Bonfire IPO Access list view model endpoint.
+    pub const IPO_ACCESS_LIST: &str = "/lists/ipo_access/view_model/";
+    /// Bonfire IPO Access card collection endpoint.
+    pub const IPO_ACCESS_CARDS: &str = "/lists/ipo_access/cards/";
+
     // Stocks
 
     /// Real-time stock quote endpoint.
@@ -154,6 +160,8 @@ mod tests {
             paths::POSITIONS,
             paths::PORTFOLIOS,
             paths::PORTFOLIO_PERFORMANCE,
+            paths::IPO_ACCESS_LIST,
+            paths::IPO_ACCESS_CARDS,
             paths::QUOTES,
             paths::FUNDAMENTALS,
             paths::HISTORICALS,
