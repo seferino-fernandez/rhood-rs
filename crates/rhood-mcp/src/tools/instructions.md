@@ -8,6 +8,8 @@ An MCP server for the Robinhood brokerage API. Tools are grouped by domain.
 
 **Indices** - `get_index_quotes` (SPX, NDX, VIX, RUT, XSP), `get_index_option_chain` for chain metadata, `find_index_options` to search contracts.
 
+**IPO Access** - `get_ipo_access_list` returns the authenticated user's raw offering list or current empty state. Use its instrument IDs with `get_ipo_access_cards` for raw offering cards. Summary, allocation, receipt, and order-entry view models are not exposed because their populated contracts are unverified.
+
 **Account** - Call `get_accounts` to discover canonical account numbers. Account-sensitive tools auto-select only when exactly one account exists; otherwise pass `account_number`. Use `get_positions`, `get_all_positions`, `get_portfolio`, `get_account_profile`, and `get_account_summary` for selected-account state. Page through `get_documents` for aggregate statements, tax forms, and trade confirmations.
 
 **Income** - `get_dividends` and `get_total_dividends` for dividend history; `get_interest_payments` for sweep/interest; page through `get_transfers` for unified ACH / wire / debit-card movement. Paginated tools return `items` and `next_cursor`; pass a non-null cursor back unchanged until it becomes null.

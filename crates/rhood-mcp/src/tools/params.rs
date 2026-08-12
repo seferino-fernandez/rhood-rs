@@ -460,6 +460,14 @@ pub struct FuturesOrderHistoryParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct IpoAccessCardsParams {
+    /// Robinhood instrument UUIDs discovered from the IPO Access list or another instrument lookup.
+    #[schemars(length(min = 1, max = 50))]
+    pub instrument_ids: Vec<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct IndexQuoteParams {
     /// Index symbols (e.g., ["SPX", "NDX", "VIX"])
     #[schemars(length(max = 50))]

@@ -10,7 +10,7 @@ Powers the [`rhood-cli`](https://github.com/seferino-fernandez/rhood-rs/tree/mai
 
 - Authenticated HTTP client (`RobinhoodClient`) with disk-backed token cache and OAuth refresh.
 - Shared authenticated-read pacing, cooldown, and bounded retries across client clones.
-- Endpoint coverage for stocks, options, futures contracts, quotes, orders, and positions, indices, account data and portfolio performance, watchlists, recurring investments, dividends, transfers, and research.
+- Endpoint coverage for stocks, options, futures contracts, quotes, orders, and positions, indices, account data and portfolio performance, IPO Access reads, watchlists, recurring investments, dividends, transfers, and research.
 - Typed error model (`RhoodError`) covering challenges, rate limits, read-only mode, and API errors.
 - Configuration via TOML files, environment variables, or programmatic construction.
 - Unified brokerage account discovery with fail-closed explicit selection for multi-account and IRA users.
@@ -60,6 +60,8 @@ println!("selected: {}", selected.selection_label());
 Account-sensitive methods require a canonical account number. `resolve_account(None)` succeeds only when discovery returns exactly one usable account; otherwise pass a number returned by `get_accounts`.
 
 `get_portfolio_performance` returns Robinhood's current Bonfire chart rendering model. Its plotted values are returns, not equity candles, and the endpoint does not accept the retired historical route's interval, span, or bounds controls. Known chart components remain raw so callers can render or inspect them without inventing financial values.
+
+`get_ipo_access_list` and `get_ipo_access_cards` expose the authenticated Bonfire offering list and card view models. Their presentation fields remain tolerant and raw. Summary, order-entry, allocation, receipt, reservation, and write workflows are intentionally not implemented because populated contracts have not been verified.
 
 Interactive stock-order callers should call `prepare_stock_order`, show `PreparedStockOrder::preview`, and then consume the preparation with `submit_prepared_stock_order`. Immediate market orders require positive bid and ask quotes. Dollar buys are converted to an estimated fractional quantity and are not broker-native notional orders. If submission is uncertain, use the returned client reference to reconcile open and recent orders before deciding whether to retry.
 

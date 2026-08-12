@@ -248,6 +248,7 @@ Tools are grouped by domain. The complete authoritative list is what `tools/list
 - **Options** - chain metadata, equity contract search, contract quotes (bid/ask, Greeks, volume), contract positions, aggregate strategy positions, and order history.
 - **Futures** - contract lookup, real-time quotes, raw positions through `get_futures_positions`, order history, and futures-account discovery.
 - **Indices** - index quotes (SPX, NDX, VIX, RUT, XSP), index option chains, and contract search.
+- **IPO Access** - authenticated offering list and card view models through `get_ipo_access_list` and `get_ipo_access_cards`.
 - **Account** - unified account discovery, positions (current and including closed), portfolio summary, raw portfolio returns chart through `get_portfolio_performance`, account profile and unified summary, account documents (statements, tax forms).
 - **Income** - dividend history (and total), interest/sweep payments, and unified transfers (ACH, wire, debit card).
 - **Research** - earnings, ratings, news, splits, and category tags.
@@ -277,6 +278,8 @@ Order placement and cancellation are write operations. The server starts in read
 Call `get_accounts` before account-sensitive operations when more than one account exists. Those tools, including `get_option_positions` and `get_aggregate_option_positions`, accept an optional `account_number`, auto-select only when discovery yields exactly one account, and otherwise fail before staging or submission. The selected account is fixed inside the sealed confirmation state. Income, transfer, and document tools remain aggregate because no reliable account filter is established for those routes.
 
 `get_portfolio_performance` returns Robinhood's raw Bonfire chart rendering model for the selected account. The plotted values are returns, not historical equity candles. The current endpoint accepts no interval, span, or bounds inputs; those controls belonged to the retired portfolio historicals route.
+
+`get_ipo_access_list` returns the authenticated user's raw offering list or current empty state. Pass 1 to 50 Robinhood instrument UUIDs from that response or another instrument lookup to `get_ipo_access_cards`. Both tools preserve offering-dependent presentation fields. IPO summary, order-entry, allocation, receipt, reservation, and write workflows are not exposed because populated contracts have not been verified.
 
 Order placement uses MCP elicitation. A stock order is fully prepared before the elicitation, including its selected account, resolved share quantity, quote collar, client reference, and form version. The accepted retry submits that exact sealed preparation once. Preparations expire after 60 seconds and must be prepared and confirmed again. Dollar buys require at least $1 and good-for-day duration; they use the ask quote and round the estimated quantity upward to six decimals. A submission timeout returns `submission_uncertain` with reconciliation guidance and is never retried automatically. Option order preparation remains separate and preserves the selected account in sealed state.
 
