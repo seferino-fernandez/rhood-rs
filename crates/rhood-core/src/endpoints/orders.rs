@@ -14,6 +14,34 @@ const STOCK_ORDER_FORM_VERSION: u8 = 7;
 const STAGED_STOCK_ORDER_TTL_MS: i64 = 60_000;
 const STAGED_OPTION_ORDER_TTL_MS: i64 = 600_000;
 
+/// Sentinel meaning "no test override is pinned". Production code never
+/// stores this value here; [`now_unix_ms`] only returns it if a test build
+/// races a load against an unset override, in which case it falls through
+/// to the real wall clock.
+#[cfg(test)]
+static TEST_CLOCK_OVERRIDE_UNIX_MS: std::sync::atomic::AtomicI64 =
+    std::sync::atomic::AtomicI64::new(i64::MIN);
+
+/// Returns the current time, in Unix milliseconds, used to stamp and expire
+/// Staged Orders.
+///
+/// This is the module's private deterministic clock seam: in test builds a
+/// value pinned through `endpoint_tests::TestClock` takes priority over the real
+/// wall clock, so tests can assert exact Staged Order lifetimes without
+/// sleeping. Outside test builds this always reads the real wall clock, and
+/// the seam is not part of the public API — [`crate::RobinhoodClient`]
+/// exposes no clock abstraction.
+fn now_unix_ms() -> i64 {
+    #[cfg(test)]
+    {
+        let pinned = TEST_CLOCK_OVERRIDE_UNIX_MS.load(std::sync::atomic::Ordering::SeqCst);
+        if pinned != i64::MIN {
+            return pinned;
+        }
+    }
+    chrono::Utc::now().timestamp_millis()
+}
+
 /// Validates a stock order request for logical consistency.
 ///
 /// Returns `Ok(())` if valid, or `Err(RhoodError::InvalidOrder)` with a
@@ -172,53 +200,90 @@ fn quote_for_symbol(quotes: Vec<StockQuote>, symbol: &str) -> Result<StockQuote>
 fn validate_staged_order(staged: &StagedOrder) -> Result<()> {
     let valid = match (&staged.payload, &staged.summary) {
         (StagedOrderPayload::Stock(payload), OrderSummary::Stock(summary)) => {
-            payload
-                .account
-                .ends_with(&format!("/{}/", summary.account_number))
-                && payload.symbol == summary.symbol
-                && payload.instrument == summary.instrument
-                && payload.quantity == summary.quantity
-                && payload.side == summary.side
-                && payload.order_type == summary.order_type
-                && payload.time_in_force == summary.time_in_force
-                && payload.trigger == summary.trigger
-                && payload.market_hours == summary.market_hours
-                && payload.extended_hours == summary.extended_hours
-                && payload.price == summary.price
-                && payload.stop_price == summary.stop_price
-                && payload.ask_price == summary.ask_price
-                && payload.bid_price == summary.bid_price
-                && payload.ref_id == summary.client_ref
-                && payload.order_form_version == summary.order_form_version
-                && payload.order_form_version == STOCK_ORDER_FORM_VERSION
-                && !payload.override_day_trade_checks
-                && !payload.override_dtbp_checks
+            // Destructured without `..` on purpose: adding a field to
+            // `StockOrderPayload` must fail to compile here until it is
+            // either compared against the summary or explicitly named as
+            // non-execution-changing, so a new execution-changing field can
+            // never silently skip this guard.
+            let StockOrderPayload {
+                account,
+                instrument,
+                symbol,
+                quantity,
+                side,
+                order_type,
+                time_in_force,
+                trigger,
+                market_hours,
+                extended_hours,
+                price,
+                stop_price,
+                ask_price,
+                bid_price,
+                override_day_trade_checks,
+                override_dtbp_checks,
+                ref_id,
+                order_form_version,
+            } = payload;
+            account.ends_with(&format!("/{}/", summary.account_number))
+                && *symbol == summary.symbol
+                && *instrument == summary.instrument
+                && *quantity == summary.quantity
+                && *side == summary.side
+                && *order_type == summary.order_type
+                && *time_in_force == summary.time_in_force
+                && *trigger == summary.trigger
+                && *market_hours == summary.market_hours
+                && *extended_hours == summary.extended_hours
+                && *price == summary.price
+                && *stop_price == summary.stop_price
+                && *ask_price == summary.ask_price
+                && *bid_price == summary.bid_price
+                && *ref_id == summary.client_ref
+                && *order_form_version == summary.order_form_version
+                && *order_form_version == STOCK_ORDER_FORM_VERSION
+                && !*override_day_trade_checks
+                && !*override_dtbp_checks
         }
         (StagedOrderPayload::Option(payload), OrderSummary::Option(summary)) => {
-            let Some(leg) = payload.legs.first() else {
+            // Destructured without `..` for the same reason as the stock
+            // arm above: a new `OptionOrderPayload` field must fail to
+            // compile here until it is classified.
+            let OptionOrderPayload {
+                account,
+                direction,
+                time_in_force,
+                legs,
+                order_type,
+                trigger,
+                price,
+                quantity,
+                override_day_trade_checks,
+                override_dtbp_checks,
+                ref_id,
+            } = payload;
+            let Some(leg) = legs.first() else {
                 return Err(RhoodError::InvalidOrder(
                     "staged option order has no leg".to_string(),
                 ));
             };
-            payload.legs.len() == 1
-                && payload
-                    .account
-                    .ends_with(&format!("/{}/", summary.account_number))
-                && payload.direction == summary.direction
-                && payload.time_in_force == summary.time_in_force
-                && payload.order_type == "limit"
-                && payload.trigger == "immediate"
-                && payload.price == summary.limit_price
-                && payload.order_type == summary.order_type
-                && payload.trigger == summary.trigger
-                && payload.quantity == summary.quantity
-                && payload.ref_id == summary.client_ref
+            legs.len() == 1
+                && account.ends_with(&format!("/{}/", summary.account_number))
+                && *direction == summary.direction
+                && *time_in_force == summary.time_in_force
+                && *order_type == "limit"
+                && *trigger == "immediate"
+                && *price == summary.limit_price
+                && *order_type == summary.order_type
+                && *trigger == summary.trigger
+                && *quantity == summary.quantity
+                && *ref_id == summary.client_ref
                 && leg.position_effect == summary.position_effect
                 && leg.side == summary.side
                 && leg.ratio_quantity == 1
                 && leg.option == summary.option_contract
-                && !payload.override_day_trade_checks
-                && !payload.override_dtbp_checks
+                && !*override_day_trade_checks
+                && !*override_dtbp_checks
         }
         _ => false,
     };
@@ -380,7 +445,7 @@ impl RobinhoodClient {
             order_form_version: STOCK_ORDER_FORM_VERSION,
         };
 
-        let prepared_at_unix_ms = chrono::Utc::now().timestamp_millis();
+        let prepared_at_unix_ms = now_unix_ms();
         let expires_at_unix_ms = prepared_at_unix_ms
             .checked_add(STAGED_STOCK_ORDER_TTL_MS)
             .ok_or_else(|| RhoodError::InvalidOrder("stock order expiry overflowed".to_string()))?;
@@ -465,7 +530,7 @@ impl RobinhoodClient {
             override_dtbp_checks: false,
             ref_id: uuid::Uuid::new_v4().to_string(),
         };
-        let prepared_at_unix_ms = chrono::Utc::now().timestamp_millis();
+        let prepared_at_unix_ms = now_unix_ms();
         let expires_at_unix_ms = prepared_at_unix_ms
             .checked_add(STAGED_OPTION_ORDER_TTL_MS)
             .ok_or_else(|| {
@@ -533,7 +598,7 @@ impl RobinhoodClient {
     pub async fn submit_order(&self, staged: StagedOrder) -> Result<SubmittedOrder> {
         self.require_writable()?;
         validate_staged_order(&staged)?;
-        let now = chrono::Utc::now().timestamp_millis();
+        let now = now_unix_ms();
         if staged.prepared_at_unix_ms > now || now > staged.expires_at_unix_ms {
             return Err(RhoodError::StagedOrderExpired);
         }
@@ -1030,11 +1095,37 @@ mod endpoint_tests {
     use crate::config::RhoodConfig;
     use crate::models::order::{
         CancelAllFailure, MarketHours, OptionOrderIntent, OptionPositionEffect, OrderAmount,
-        OrderIntent, OrderSummary, OrderType, Side, StockOrderIntent, TimeInForce, Trigger,
+        OrderIntent, OrderSummary, OrderType, Side, StagedOrder, StockOrderIntent, TimeInForce,
+        Trigger,
     };
     use secrecy::SecretString;
     use wiremock::matchers::{body_partial_json, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// RAII guard that pins [`super::now_unix_ms`] to a fixed value for the
+    /// lifetime of the guard, then restores the real wall clock on drop.
+    ///
+    /// This is the test-side half of the module's private clock seam: it
+    /// lets a test assert exact Staged Order lifetimes deterministically,
+    /// without sleeping and without any public clock abstraction.
+    struct TestClock;
+
+    impl TestClock {
+        fn pin(unix_ms: i64) -> Self {
+            super::TEST_CLOCK_OVERRIDE_UNIX_MS.store(unix_ms, std::sync::atomic::Ordering::SeqCst);
+            Self
+        }
+
+        fn set(&self, unix_ms: i64) {
+            super::TEST_CLOCK_OVERRIDE_UNIX_MS.store(unix_ms, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    impl Drop for TestClock {
+        fn drop(&mut self) {
+            super::TEST_CLOCK_OVERRIDE_UNIX_MS.store(i64::MIN, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
 
     async fn client_for_server(base_url: &str) -> (tempfile::TempDir, RobinhoodClient) {
         client_for_server_with_timeout(base_url, 30).await
@@ -1302,6 +1393,15 @@ mod endpoint_tests {
             .prepare_order(OrderIntent::Stock(stock_request()))
             .await
             .unwrap();
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .all(|request| request.method.as_str() == "GET"),
+            "stock preparation must perform reads only"
+        );
 
         let error = client.submit_order(prepared).await.unwrap_err();
 
@@ -1368,6 +1468,53 @@ mod endpoint_tests {
             server.received_requests().await.unwrap().len(),
             request_count
         );
+    }
+
+    #[tokio::test]
+    async fn stock_staged_order_expires_exactly_at_configured_ttl() {
+        let server = MockServer::start().await;
+        mount_stock_instrument(&server).await;
+        mount_stock_quote(&server, "101.25", "100.75").await;
+        Mock::given(method("POST"))
+            .and(path("/orders/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "on-time-order"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server.uri()).await;
+        const PREPARED_AT_UNIX_MS: i64 = 1_700_000_000_000;
+        // Hardcoded literal, not `STAGED_STOCK_ORDER_TTL_MS`: a stock Staged
+        // Order must expire 60 real seconds after preparation. Reading the
+        // constant here instead would make this test pass under any wrong
+        // constant value, proving nothing.
+        const EXPECTED_STOCK_TTL_MS: i64 = 60_000;
+        let clock = TestClock::pin(PREPARED_AT_UNIX_MS);
+
+        let prepared = client
+            .prepare_order(OrderIntent::Stock(stock_request()))
+            .await
+            .unwrap();
+        assert_eq!(prepared.prepared_at_unix_ms, PREPARED_AT_UNIX_MS);
+        assert_eq!(
+            prepared.expires_at_unix_ms,
+            PREPARED_AT_UNIX_MS + EXPECTED_STOCK_TTL_MS
+        );
+        let sealed = serde_json::to_string(&prepared).unwrap();
+
+        // Exactly at the TTL boundary, submission still succeeds.
+        clock.set(PREPARED_AT_UNIX_MS + EXPECTED_STOCK_TTL_MS);
+        let on_time: StagedOrder = serde_json::from_str(&sealed).unwrap();
+        client.submit_order(on_time).await.unwrap();
+
+        // One millisecond past the TTL, submission is rejected as expired.
+        clock.set(PREPARED_AT_UNIX_MS + EXPECTED_STOCK_TTL_MS + 1);
+        let late: StagedOrder = serde_json::from_str(&sealed).unwrap();
+        let error = client.submit_order(late).await.unwrap_err();
+        assert!(matches!(error, RhoodError::StagedOrderExpired));
+
+        server.verify().await;
     }
 
     #[tokio::test]
@@ -1683,6 +1830,55 @@ mod endpoint_tests {
             server.received_requests().await.unwrap().len(),
             request_count
         );
+    }
+
+    #[tokio::test]
+    async fn option_staged_order_expires_exactly_at_configured_ttl() {
+        let server = MockServer::start().await;
+        mount_option_preparation(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/options/orders/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "on-time-option-order"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server.uri()).await;
+        const PREPARED_AT_UNIX_MS: i64 = 1_700_000_000_000;
+        // Hardcoded literal, not `STAGED_OPTION_ORDER_TTL_MS`: an option
+        // Staged Order must expire 600 real seconds after preparation.
+        // Reading the constant here instead would make this test pass under
+        // any wrong constant value, proving nothing.
+        const EXPECTED_OPTION_TTL_MS: i64 = 600_000;
+        let clock = TestClock::pin(PREPARED_AT_UNIX_MS);
+
+        let staged = client
+            .prepare_order(OrderIntent::Option(option_request(
+                Side::Buy,
+                OptionPositionEffect::Open,
+            )))
+            .await
+            .unwrap();
+        assert_eq!(staged.prepared_at_unix_ms, PREPARED_AT_UNIX_MS);
+        assert_eq!(
+            staged.expires_at_unix_ms,
+            PREPARED_AT_UNIX_MS + EXPECTED_OPTION_TTL_MS
+        );
+        let sealed = serde_json::to_string(&staged).unwrap();
+
+        // Exactly at the TTL boundary, submission still succeeds.
+        clock.set(PREPARED_AT_UNIX_MS + EXPECTED_OPTION_TTL_MS);
+        let on_time: StagedOrder = serde_json::from_str(&sealed).unwrap();
+        client.submit_order(on_time).await.unwrap();
+
+        // One millisecond past the TTL, submission is rejected as expired.
+        clock.set(PREPARED_AT_UNIX_MS + EXPECTED_OPTION_TTL_MS + 1);
+        let late: StagedOrder = serde_json::from_str(&sealed).unwrap();
+        let error = client.submit_order(late).await.unwrap_err();
+        assert!(matches!(error, RhoodError::StagedOrderExpired));
+
+        server.verify().await;
     }
 
     #[tokio::test]
