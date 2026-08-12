@@ -300,21 +300,6 @@ impl RobinhoodClient {
         Ok(resp.results.into_iter().next())
     }
 
-    /// Temporary compatibility forward for cached instrument lookup.
-    ///
-    /// Returns an [`Arc<Instrument>`] shared with other callers requesting the
-    /// same symbol during the TTL configured on the resolver cache. When
-    /// caching is disabled (`CacheConfig::enabled = false`), every call hits
-    /// upstream and nothing is inserted into the cache.
-    ///
-    /// Errors are not cached: a failed lookup for one caller does not taint
-    /// concurrent callers requesting the same symbol. Successful hits also
-    /// populate the reverse `uuid → symbol` map used by
-    /// [`resolve_symbols`](Self::resolve_symbols).
-    pub async fn cached_instrument(&self, symbol: &str) -> Result<Option<Arc<Instrument>>> {
-        self.instrument_for_symbol(symbol).await
-    }
-
     /// Looks up a Robinhood index instrument by its symbol (e.g., "SPX").
     ///
     /// Returns `Ok(None)` when the symbol does not match any known index.
@@ -357,21 +342,6 @@ impl RobinhoodClient {
             .insert(key, wrapped.clone())
             .await;
         Ok(Some(wrapped))
-    }
-
-    /// Temporary compatibility forward for UUID-to-symbol lookup.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if any chunked upstream request fails.
-    pub async fn resolve_symbols(&self, ids: &[String]) -> Result<HashMap<String, String>> {
-        let resolved = self.resolve_instrument_symbols(ids).await?;
-        Ok(ids
-            .iter()
-            .cloned()
-            .zip(resolved)
-            .filter_map(|(id, symbol)| symbol.map(|symbol| (id, symbol)))
-            .collect())
     }
 
     /// Fetches real-time market data for an index symbol.
@@ -805,31 +775,6 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
-    async fn resolve_symbols_cache_only_path_skips_http() {
-        use crate::RhoodConfig;
-        const ID_ONE: &str = "450dfc6d-5510-4d40-abfb-f633b7d9be3e";
-        const ID_TWO: &str = "18226051-6bfa-4c56-bd9a-d7575f0245c1";
-        let client = RobinhoodClient::with_config(RhoodConfig::default()).unwrap();
-        client
-            .resolvers
-            .instruments_by_id
-            .insert(ID_ONE.to_string(), "AAPL".to_string())
-            .await;
-        client
-            .resolvers
-            .instruments_by_id
-            .insert(ID_TWO.to_string(), "NVDA".to_string())
-            .await;
-        let resolved = client
-            .resolve_symbols(&[ID_ONE.to_string(), ID_TWO.to_string()])
-            .await
-            .unwrap();
-        assert_eq!(resolved.get(ID_ONE).map(String::as_str), Some("AAPL"));
-        assert_eq!(resolved.get(ID_TWO).map(String::as_str), Some("NVDA"));
-        assert_eq!(resolved.len(), 2);
-    }
-
     #[test]
     fn historical_bounds_validation_trading_with_day_span() {
         let opts = HistoricalOpts {
@@ -986,7 +931,7 @@ mod tests {
         // Real shape of GET /instruments/?ids=a,b : a paginated envelope whose
         // results are FULL instrument objects with many fields beyond what
         // `Instrument` declares. This must still deserialize and expose id +
-        // symbol (the contract `resolve_symbols` relies on). Guards against a
+        // symbol required by Instrument Identity Enrichment. Guards against a
         // future `deny_unknown_fields` or type change reintroducing null
         // enrichment.
         let json = r#"{

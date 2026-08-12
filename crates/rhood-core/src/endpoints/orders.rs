@@ -515,13 +515,6 @@ impl RobinhoodClient {
         }
         Ok(outcome)
     }
-
-    /// Temporary compatibility forward for stock-order identity enrichment.
-    pub async fn enrich_order_symbols(&self, orders: &mut [StockOrder]) -> Result<()> {
-        self.enrich_instrument_identities("enrich_order_symbols", orders)
-            .await;
-        Ok(())
-    }
 }
 
 #[cfg(test)]

@@ -54,15 +54,11 @@ pub mod error;
 pub mod models;
 /// Generic paginated and results response wrappers.
 pub mod pagination;
-/// In-memory caches for identity/metadata lookups (symbol ↔ id, etc.).
-pub mod resolver_cache;
-/// Small shared helpers (e.g. URL parsing utilities).
-pub mod util;
+mod resolver_cache;
 
 pub use client::RobinhoodClient;
 pub use config::RhoodConfig;
 pub use error::{ChallengeType, RhoodError};
-pub use resolver_cache::ResolverCache;
 
 /// A specialized [`Result`](std::result::Result) type for this crate.
 ///

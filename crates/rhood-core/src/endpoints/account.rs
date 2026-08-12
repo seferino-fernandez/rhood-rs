@@ -205,11 +205,6 @@ impl RobinhoodClient {
             .await;
         Ok(positions)
     }
-
-    /// Temporary compatibility forward for position identity enrichment.
-    pub async fn enrich_position_symbols(&self, positions: &mut [Position]) -> Result<()> {
-        self.enrich_instrument_identities_strict(positions).await
-    }
 }
 
 #[cfg(test)]
@@ -313,81 +308,6 @@ mod tests {
         let json = serde_json::to_string(&pos).unwrap();
         let deserialized: Position = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.symbol.as_deref(), Some("TSLA"));
-    }
-
-    #[test]
-    fn enrich_position_symbols_applies_map() {
-        // Test the pure mapping logic: given a position with an instrument URL
-        // and a resolved map, symbol should be set after the apply step.
-        let uuid = "450dfc6d-5510-4d40-abfb-f633b7d9be3e";
-        let url = format!("https://api.robinhood.com/instruments/{uuid}/");
-        let mut pos = Position {
-            account: None,
-            instrument: Some(url.clone()),
-            symbol: None,
-            average_buy_price: Some("100.00".to_string()),
-            clearing_average_cost: None,
-            clearing_cost_basis: None,
-            quantity: Some("1.0000".to_string()),
-            shares_held_for_buys: None,
-            shares_held_for_sells: None,
-            created_at: None,
-            updated_at: None,
-        };
-
-        // Simulate what enrich_position_symbols does after calling resolve_symbols
-        let mut map = std::collections::HashMap::new();
-        map.insert(uuid.to_string(), "AAPL".to_string());
-
-        let positions: &mut [Position] = std::slice::from_mut(&mut pos);
-        for p in positions.iter_mut() {
-            if p.symbol.is_none()
-                && let Some(instrument_url) = p.instrument.as_deref()
-                && let Some(id) = crate::util::instrument_id_from_url(instrument_url)
-                && let Some(sym) = map.get(id)
-            {
-                p.symbol = Some(sym.clone());
-            }
-        }
-
-        assert_eq!(pos.symbol.as_deref(), Some("AAPL"));
-    }
-
-    #[test]
-    fn enrich_position_symbols_skips_already_set() {
-        let uuid = "450dfc6d-5510-4d40-abfb-f633b7d9be3e";
-        let url = format!("https://api.robinhood.com/instruments/{uuid}/");
-        let mut pos = Position {
-            account: None,
-            instrument: Some(url),
-            symbol: Some("EXISTING".to_string()),
-            average_buy_price: None,
-            clearing_average_cost: None,
-            clearing_cost_basis: None,
-            quantity: None,
-            shares_held_for_buys: None,
-            shares_held_for_sells: None,
-            created_at: None,
-            updated_at: None,
-        };
-
-        let mut map = std::collections::HashMap::new();
-        map.insert(uuid.to_string(), "REPLACED".to_string());
-
-        // Only apply if symbol is None (mirrors enrich logic)
-        let positions: &mut [Position] = std::slice::from_mut(&mut pos);
-        for p in positions.iter_mut() {
-            if p.symbol.is_none()
-                && let Some(instrument_url) = p.instrument.as_deref()
-                && let Some(id) = crate::util::instrument_id_from_url(instrument_url)
-                && let Some(sym) = map.get(id)
-            {
-                p.symbol = Some(sym.clone());
-            }
-        }
-
-        // Should not be replaced because symbol was already set
-        assert_eq!(pos.symbol.as_deref(), Some("EXISTING"));
     }
 
     #[test]
@@ -527,7 +447,6 @@ mod endpoint_tests {
     use crate::RhoodError;
     use crate::client::RobinhoodClient;
     use crate::config::RhoodConfig;
-    use crate::models::account::Position;
     use secrecy::SecretString;
     use wiremock::matchers::{method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -736,67 +655,6 @@ mod endpoint_tests {
         assert_eq!(positions[0].symbol.as_deref(), Some("AAPL"));
         assert_eq!(positions[1].symbol.as_deref(), Some("AAPL"));
         assert_eq!(positions[2].symbol.as_deref(), Some("WIRE"));
-        server.verify().await;
-    }
-
-    #[tokio::test]
-    async fn enrich_position_symbols_rejects_invalid_missing_reference_before_http() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/instruments/"))
-            .respond_with(ResponseTemplate::new(200))
-            .expect(0)
-            .mount(&server)
-            .await;
-        let (_dir, client) = client_for_server(&server).await;
-        let mut positions = vec![Position {
-            instrument: Some(format!("urn:uuid:{INSTRUMENT_ID}")),
-            symbol: None,
-            ..serde_json::from_str("{}").unwrap()
-        }];
-
-        let error = client
-            .enrich_position_symbols(&mut positions)
-            .await
-            .unwrap_err();
-
-        assert!(matches!(error, RhoodError::InvalidParameter(_)));
-        server.verify().await;
-    }
-
-    #[tokio::test]
-    async fn enrich_position_symbols_propagates_resolution_failure_and_preserves_wire_symbols() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/instruments/"))
-            .and(query_param("ids", INSTRUMENT_ID))
-            .respond_with(ResponseTemplate::new(500))
-            .expect(1)
-            .mount(&server)
-            .await;
-        let (_dir, client) = client_for_server(&server).await;
-        let reference = format!("https://api.robinhood.com/instruments/{INSTRUMENT_ID}/");
-        let mut positions = vec![
-            Position {
-                instrument: Some(reference.clone()),
-                symbol: None,
-                ..serde_json::from_str("{}").unwrap()
-            },
-            Position {
-                instrument: Some(reference),
-                symbol: Some("WIRE".to_string()),
-                ..serde_json::from_str("{}").unwrap()
-            },
-        ];
-
-        let error = client
-            .enrich_position_symbols(&mut positions)
-            .await
-            .unwrap_err();
-
-        assert!(matches!(error, RhoodError::RequestChunkFailed { .. }));
-        assert!(positions[0].symbol.is_none());
-        assert_eq!(positions[1].symbol.as_deref(), Some("WIRE"));
         server.verify().await;
     }
 

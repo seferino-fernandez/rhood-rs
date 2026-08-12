@@ -195,37 +195,6 @@ impl InstrumentIdentityResolver {
         }
     }
 
-    pub(super) async fn enrich_records_strict<T: InstrumentIdentityRecord>(
-        &self,
-        client: &RobinhoodClient,
-        records: &mut [T],
-    ) -> Result<()> {
-        let requested = records
-            .iter()
-            .enumerate()
-            .filter(|(_, record)| !record.has_wire_symbol())
-            .filter_map(|(index, record)| {
-                record
-                    .instrument_reference()
-                    .map(|reference| (index, reference.to_owned()))
-            })
-            .collect::<Vec<_>>();
-        if requested.is_empty() {
-            return Ok(());
-        }
-        let references = requested
-            .iter()
-            .map(|(_, reference)| reference.clone())
-            .collect::<Vec<_>>();
-        let symbols = self.resolve_strict(client, &references).await?;
-        for ((index, _), symbol) in requested.into_iter().zip(symbols) {
-            if let (Some(record), Some(symbol)) = (records.get_mut(index), symbol) {
-                record.fill_symbol(symbol);
-            }
-        }
-        Ok(())
-    }
-
     pub(super) async fn instrument_for_symbol(
         &self,
         client: &RobinhoodClient,
@@ -460,15 +429,6 @@ impl RobinhoodClient {
         self.instrument_identity
             .enrich_records(self, operation, records)
             .await;
-    }
-
-    pub(crate) async fn enrich_instrument_identities_strict<T: InstrumentIdentityRecord>(
-        &self,
-        records: &mut [T],
-    ) -> Result<()> {
-        self.instrument_identity
-            .enrich_records_strict(self, records)
-            .await
     }
 
     pub(crate) async fn instrument_for_symbol(
