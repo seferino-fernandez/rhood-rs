@@ -210,13 +210,13 @@ pub enum RhoodError {
     #[error("Invalid order: {0}")]
     InvalidOrder(String),
 
-    /// A prepared order exceeded its short confirmation lifetime.
-    #[error("Prepared order expired; prepare and confirm the order again")]
-    PreparedOrderExpired,
+    /// A staged order exceeded its confirmation lifetime.
+    #[error("Staged order expired; prepare and confirm the order again")]
+    StagedOrderExpired,
 
     /// Submission may have reached the broker, but no authoritative response arrived.
     #[error(
-        "Stock order submission is uncertain for client reference {client_ref}: {message}. Reconcile open and recent orders before retrying"
+        "Order submission is uncertain for client reference {client_ref}: {message}. Reconcile open and recent orders before retrying"
     )]
     SubmissionUncertain {
         /// Per-attempt client reference sent in the broker payload.

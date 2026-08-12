@@ -1,8 +1,8 @@
 use crate::output::{OutputFormat, output};
 use clap::Subcommand;
 use rhood_core::models::order::{
-    MarketHours, OrderAmount, OrderType, PreparedStockOrderPreview, Side, StockOrderRequest,
-    TimeInForce, Trigger,
+    MarketHours, OrderAmount, OrderIntent, OrderSummary, OrderType, Side, StockOrderIntent,
+    StockOrderSummary, TimeInForce, Trigger,
 };
 use rhood_core::{RhoodConfig, RobinhoodClient};
 
@@ -101,34 +101,36 @@ fn placed_order_message(id: &str, state: Option<&str>) -> String {
     }
 }
 
-fn prepared_order_message(preview: &PreparedStockOrderPreview, account_label: &str) -> String {
-    let side = match preview.side {
+fn staged_order_message(summary: &StockOrderSummary) -> String {
+    let side = match summary.side {
         Side::Buy => "buy",
         Side::Sell => "sell",
     };
-    let amount = preview.requested_dollar_amount.as_ref().map_or_else(
-        || format!("{} shares", preview.quantity),
-        |dollars| format!("${dollars}, resolved to {} shares", preview.quantity),
+    let amount = summary.requested_dollar_amount.as_ref().map_or_else(
+        || format!("{} shares", summary.quantity),
+        |dollars| format!("${dollars}, resolved to {} shares", summary.quantity),
     );
-    let price = preview
+    let price = summary
         .price
         .as_deref()
         .map_or_else(|| "n/a".to_string(), |price| format!("${price}"));
-    let quote = match (&preview.bid_price, &preview.ask_price) {
+    let quote = match (&summary.bid_price, &summary.ask_price) {
         (Some(bid), Some(ask)) => format!("bid ${bid}, ask ${ask}"),
         _ => "n/a".to_string(),
     };
     format!(
-        "Prepared stock order\n  Account: {account_label}\n  Trade: {} {amount} {}\n  Type: {}, trigger {}, price {price}\n  Session: {}, extended hours {}, time in force {}\n  Quote: {quote}\n  Client ref: {}\n  Form version: {}",
+        "Staged stock order\n  Account: {}\n  Trade: {} {amount} {}\n  Instrument: {}\n  Type: {}, trigger {}, price {price}\n  Session: {}, extended hours {}, time in force {}\n  Quote: {quote}\n  Client ref: {}\n  Form version: {}",
+        summary.account_label,
         side,
-        preview.symbol,
-        preview.order_type,
-        preview.trigger,
-        preview.market_hours,
-        preview.extended_hours,
-        preview.time_in_force,
-        preview.client_ref,
-        preview.order_form_version,
+        summary.symbol,
+        summary.instrument,
+        summary.order_type,
+        summary.trigger,
+        summary.market_hours,
+        summary.extended_hours,
+        summary.time_in_force,
+        summary.client_ref,
+        summary.order_form_version,
     )
 }
 
@@ -156,9 +158,6 @@ pub async fn run(
             if read_only {
                 anyhow::bail!("read-only mode: pass --read-write to place orders");
             }
-            if *r#type == OrderType::Limit && limit.is_none() {
-                anyhow::bail!("Limit price required for limit orders (--limit)");
-            }
             let amount = match (quantity, dollar_amount) {
                 (Some(q), None) => OrderAmount::Quantity(*q),
                 (None, Some(d)) => OrderAmount::DollarAmount(*d),
@@ -174,8 +173,8 @@ pub async fn run(
             } else {
                 TimeInForce::Gtc
             };
-            let mut req = StockOrderRequest {
-                account_number: "PENDING".to_string(),
+            let intent = StockOrderIntent {
+                account_number: requested_account.map(str::to_owned),
                 symbol: symbol.clone(),
                 amount,
                 side: Side::Buy,
@@ -186,24 +185,18 @@ pub async fn run(
                 time_in_force,
                 market_hours: *market_hours,
             };
-            rhood_core::endpoints::orders::validate_stock_order(&req)?;
-            let account = super::resolve_account(&client, requested_account).await?;
-            req.account_number = account
-                .canonical_account_number()
-                .ok_or_else(|| anyhow::anyhow!("resolved account has no canonical number"))?
-                .to_string();
-            let prepared = client.prepare_stock_order(&req).await?;
-            println!(
-                "{}",
-                prepared_order_message(&prepared.preview(), &account.selection_label())
-            );
+            let staged = client.prepare_order(OrderIntent::Stock(intent)).await?;
+            let OrderSummary::Stock(summary) = staged.summary() else {
+                anyhow::bail!("core returned an option summary for a stock order");
+            };
+            println!("{}", staged_order_message(summary));
             if !confirm_order(*yes)? {
                 println!("Order cancelled.");
                 return Ok(());
             }
-            let order = client.submit_prepared_stock_order(prepared).await?;
-            let id = order.id.clone().unwrap_or_else(|| "unknown".into());
-            println!("{}", placed_order_message(&id, order.state.as_deref()));
+            let order = client.submit_order(staged).await?;
+            let id = order.id().unwrap_or("unknown");
+            println!("{}", placed_order_message(id, order.state()));
         }
         OrderCommand::Sell {
             symbol,
@@ -218,11 +211,8 @@ pub async fn run(
             if read_only {
                 anyhow::bail!("read-only mode: pass --read-write to place orders");
             }
-            if *r#type == OrderType::Limit && limit.is_none() {
-                anyhow::bail!("Limit price required for limit orders (--limit)");
-            }
-            let mut req = StockOrderRequest {
-                account_number: "PENDING".to_string(),
+            let intent = StockOrderIntent {
+                account_number: requested_account.map(str::to_owned),
                 symbol: symbol.clone(),
                 amount: OrderAmount::Quantity(*quantity),
                 side: Side::Sell,
@@ -233,24 +223,18 @@ pub async fn run(
                 time_in_force: TimeInForce::Gtc,
                 market_hours: *market_hours,
             };
-            rhood_core::endpoints::orders::validate_stock_order(&req)?;
-            let account = super::resolve_account(&client, requested_account).await?;
-            req.account_number = account
-                .canonical_account_number()
-                .ok_or_else(|| anyhow::anyhow!("resolved account has no canonical number"))?
-                .to_string();
-            let prepared = client.prepare_stock_order(&req).await?;
-            println!(
-                "{}",
-                prepared_order_message(&prepared.preview(), &account.selection_label())
-            );
+            let staged = client.prepare_order(OrderIntent::Stock(intent)).await?;
+            let OrderSummary::Stock(summary) = staged.summary() else {
+                anyhow::bail!("core returned an option summary for a stock order");
+            };
+            println!("{}", staged_order_message(summary));
             if !confirm_order(*yes)? {
                 println!("Order cancelled.");
                 return Ok(());
             }
-            let order = client.submit_prepared_stock_order(prepared).await?;
-            let id = order.id.clone().unwrap_or_else(|| "unknown".into());
-            println!("{}", placed_order_message(&id, order.state.as_deref()));
+            let order = client.submit_order(staged).await?;
+            let id = order.id().unwrap_or("unknown");
+            println!("{}", placed_order_message(id, order.state()));
         }
         OrderCommand::List { status, since } => {
             let account = super::resolve_account_number(&client, requested_account).await?;
@@ -289,7 +273,51 @@ pub async fn run(
 
 #[cfg(test)]
 mod tests {
-    use super::placed_order_message;
+    use rhood_core::models::order::{
+        MarketHours, OrderType, Side, StockOrderSummary, TimeInForce, Trigger,
+    };
+
+    use super::{placed_order_message, staged_order_message};
+
+    #[test]
+    fn staged_stock_message_renders_core_summary() {
+        let message = staged_order_message(&StockOrderSummary {
+            account_number: "ABC123".to_string(),
+            account_label: "individual ****C123".to_string(),
+            symbol: "AAPL".to_string(),
+            instrument: "https://api.robinhood.com/instruments/instrument-aapl/".to_string(),
+            quantity: "2".to_string(),
+            side: Side::Buy,
+            order_type: OrderType::Limit,
+            time_in_force: TimeInForce::Gtc,
+            trigger: Trigger::Immediate,
+            market_hours: MarketHours::RegularHours,
+            extended_hours: false,
+            price: Some("187.25".to_string()),
+            stop_price: None,
+            ask_price: None,
+            bid_price: None,
+            requested_dollar_amount: None,
+            conversion_price: None,
+            client_ref: "client-ref".to_string(),
+            order_form_version: 7,
+        });
+        for expected in [
+            "Staged stock order",
+            "Account: individual ****C123",
+            "Trade: buy 2 shares AAPL",
+            "Instrument: https://api.robinhood.com/instruments/instrument-aapl/",
+            "Type: limit, trigger immediate, price $187.25",
+            "Session: regular, extended hours false, time in force gtc",
+            "Client ref: client-ref",
+            "Form version: 7",
+        ] {
+            assert!(
+                message.contains(expected),
+                "missing {expected:?}: {message}"
+            );
+        }
+    }
 
     #[test]
     fn rejected_state_warns() {

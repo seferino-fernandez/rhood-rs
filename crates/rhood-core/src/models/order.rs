@@ -129,7 +129,8 @@ impl fmt::Display for MarketHours {
 }
 
 /// Specifies the quantity semantics for a stock order.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum OrderAmount {
     /// Whole or fractional share quantity (e.g., 10.0 shares, 0.5 shares).
     Quantity(f64),
@@ -233,11 +234,13 @@ pub struct OptionOrder {
     pub cancel_url: Option<String>,
 }
 
-/// Represents a request to place a stock order.
-#[derive(Debug, Clone)]
-pub struct StockOrderRequest {
-    /// Canonical brokerage account number selected through account discovery.
-    pub account_number: String,
+/// Caller intent for a stock order before brokerage identities are resolved.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StockOrderIntent {
+    /// Canonical brokerage account number from account discovery.
+    ///
+    /// May be omitted only when exactly one eligible account exists.
+    pub account_number: Option<String>,
     /// Ticker symbol of the stock to trade.
     pub symbol: String,
     /// Order amount - either a share quantity or a dollar amount.
@@ -258,11 +261,13 @@ pub struct StockOrderRequest {
     pub market_hours: MarketHours,
 }
 
-/// Represents a request to place an option order.
-#[derive(Debug, Clone)]
-pub struct OptionOrderRequest {
-    /// Canonical brokerage account number selected through account discovery.
-    pub account_number: String,
+/// Caller intent for a single-leg option order before contract resolution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OptionOrderIntent {
+    /// Canonical brokerage account number from account discovery.
+    ///
+    /// May be omitted only when exactly one eligible account exists.
+    pub account_number: Option<String>,
     /// Ticker symbol of the underlying stock.
     pub symbol: String,
     /// Expiration date of the option contract (YYYY-MM-DD).
@@ -283,7 +288,17 @@ pub struct OptionOrderRequest {
     pub time_in_force: TimeInForce,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+/// Caller intent for an order that core can prepare without submitting.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "intent")]
+pub enum OrderIntent {
+    /// Stock order intent.
+    Stock(StockOrderIntent),
+    /// Single-leg option order intent.
+    Option(OptionOrderIntent),
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct StockOrderPayload {
     pub account: String,
     pub instrument: String,
@@ -310,28 +325,17 @@ pub(crate) struct StockOrderPayload {
     pub order_form_version: u8,
 }
 
-/// A validated stock order with every broker-facing field fixed.
-///
-/// Prepare immediately before human confirmation, then consume the value with
-/// [`RobinhoodClient::submit_prepared_stock_order`](crate::RobinhoodClient::submit_prepared_stock_order).
-/// Prepared orders expire after 60 seconds so quote-derived collar data cannot
-/// be submitted after it becomes stale.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct PreparedStockOrder {
-    pub(crate) payload: StockOrderPayload,
-    pub(crate) account_number: String,
-    pub(crate) prepared_at_unix_ms: i64,
-    pub(crate) requested_dollar_amount: Option<String>,
-    pub(crate) conversion_price: Option<String>,
-}
-
-/// Human-readable fields fixed by stock-order preparation.
+/// Human-review fields fixed by stock-order preparation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PreparedStockOrderPreview {
+pub struct StockOrderSummary {
     /// Canonical account number placed in the broker account URL.
     pub account_number: String,
+    /// Safe masked account label for human presentation.
+    pub account_label: String,
     /// Uppercase ticker symbol.
     pub symbol: String,
+    /// Exact broker instrument URL selected during preparation.
+    pub instrument: String,
     /// Exact share quantity submitted to the broker.
     pub quantity: String,
     /// Buy or sell side.
@@ -364,41 +368,62 @@ pub struct PreparedStockOrderPreview {
     pub order_form_version: u8,
 }
 
-impl PreparedStockOrder {
-    /// Returns an owned preview suitable for confirmation and audit output.
-    #[must_use]
-    pub fn preview(&self) -> PreparedStockOrderPreview {
-        PreparedStockOrderPreview {
-            account_number: self.account_number.clone(),
-            symbol: self.payload.symbol.clone(),
-            quantity: self.payload.quantity.clone(),
-            side: self.payload.side,
-            order_type: self.payload.order_type,
-            time_in_force: self.payload.time_in_force,
-            trigger: self.payload.trigger,
-            market_hours: self.payload.market_hours,
-            extended_hours: self.payload.extended_hours,
-            price: self.payload.price.clone(),
-            stop_price: self.payload.stop_price.clone(),
-            ask_price: self.payload.ask_price.clone(),
-            bid_price: self.payload.bid_price.clone(),
-            requested_dollar_amount: self.requested_dollar_amount.clone(),
-            conversion_price: self.conversion_price.clone(),
-            client_ref: self.payload.ref_id.clone(),
-            order_form_version: self.payload.order_form_version,
-        }
-    }
+/// Human-review fields fixed by option-order preparation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OptionOrderSummary {
+    /// Canonical account number placed in the broker account URL.
+    pub account_number: String,
+    /// Safe masked account label for human presentation.
+    pub account_label: String,
+    /// Uppercase underlying ticker symbol.
+    pub symbol: String,
+    /// Exact broker option-contract URL selected during preparation.
+    pub option_contract: String,
+    /// Expiration date of the selected contract.
+    pub expiration_date: String,
+    /// Strike price of the selected contract.
+    pub strike_price: String,
+    /// Call or put contract type.
+    pub option_type: String,
+    /// Buy or sell side.
+    pub side: Side,
+    /// Open or close position effect.
+    pub position_effect: OptionPositionEffect,
+    /// Debit for buys and credit for sells.
+    pub direction: String,
+    /// Exact contract quantity sent to the broker.
+    pub quantity: String,
+    /// Limit price per contract sent to the broker.
+    pub limit_price: String,
+    /// Broker order type fixed during preparation.
+    pub order_type: String,
+    /// Broker trigger fixed during preparation.
+    pub trigger: String,
+    /// Duration policy.
+    pub time_in_force: TimeInForce,
+    /// Per-attempt client reference sent to the broker.
+    pub client_ref: String,
 }
 
-#[derive(Debug, Serialize)]
+/// Typed human-review projection of an immutable staged order.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", content = "summary")]
+pub enum OrderSummary {
+    /// Stock-order execution terms.
+    Stock(StockOrderSummary),
+    /// Option-order execution terms.
+    Option(OptionOrderSummary),
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct OptionOrderPayload {
     pub account: String,
     pub direction: String,
     pub time_in_force: TimeInForce,
     pub legs: Vec<OptionLeg>,
     #[serde(rename = "type")]
-    pub order_type: &'static str,
-    pub trigger: &'static str,
+    pub order_type: String,
+    pub trigger: String,
     pub price: String,
     pub quantity: String,
     pub override_day_trade_checks: bool,
@@ -406,12 +431,86 @@ pub(crate) struct OptionOrderPayload {
     pub ref_id: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct OptionLeg {
     pub position_effect: OptionPositionEffect,
     pub side: Side,
     pub ratio_quantity: u32,
     pub option: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "payload")]
+pub(crate) enum StagedOrderPayload {
+    Stock(StockOrderPayload),
+    Option(OptionOrderPayload),
+}
+
+/// Immutable, broker-ready order that has not been submitted.
+///
+/// Values are created by [`RobinhoodClient::prepare_order`](crate::RobinhoodClient::prepare_order)
+/// and consumed by [`RobinhoodClient::submit_order`](crate::RobinhoodClient::submit_order).
+/// The exact wire payload is private. Callers should present [`Self::summary`]
+/// before authorising submission.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct StagedOrder {
+    pub(crate) payload: StagedOrderPayload,
+    pub(crate) summary: OrderSummary,
+    pub(crate) prepared_at_unix_ms: i64,
+    pub(crate) expires_at_unix_ms: i64,
+}
+
+impl StagedOrder {
+    /// Returns the typed execution terms that a user-facing adapter must show.
+    #[must_use]
+    pub fn summary(&self) -> &OrderSummary {
+        &self.summary
+    }
+
+    /// Returns the Unix timestamp in milliseconds after which submission fails.
+    #[must_use]
+    pub fn expires_at_unix_ms(&self) -> i64 {
+        self.expires_at_unix_ms
+    }
+
+    /// Returns the frozen client reference used to reconcile uncertain writes.
+    #[must_use]
+    pub fn client_reference(&self) -> &str {
+        match &self.payload {
+            StagedOrderPayload::Stock(payload) => &payload.ref_id,
+            StagedOrderPayload::Option(payload) => &payload.ref_id,
+        }
+    }
+}
+
+/// Brokerage response from submitting a [`StagedOrder`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "order")]
+pub enum SubmittedOrder {
+    /// Submitted stock order.
+    Stock(StockOrder),
+    /// Submitted option order.
+    Option(OptionOrder),
+}
+
+impl SubmittedOrder {
+    /// Returns the brokerage-assigned order ID when present.
+    #[must_use]
+    pub fn id(&self) -> Option<&str> {
+        match self {
+            Self::Stock(order) => order.id.as_deref(),
+            Self::Option(order) => order.id.as_deref(),
+        }
+    }
+
+    /// Returns the brokerage order state when present.
+    #[must_use]
+    pub fn state(&self) -> Option<&str> {
+        match self {
+            Self::Stock(order) => order.state.as_deref(),
+            Self::Option(order) => order.state.as_deref(),
+        }
+    }
 }
 
 #[cfg(test)]

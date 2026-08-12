@@ -5,6 +5,7 @@
 //! every tool call to the appropriate domain handler.
 
 mod account_tools;
+mod confirmation;
 mod futures_tools;
 mod handler;
 mod income_tools;

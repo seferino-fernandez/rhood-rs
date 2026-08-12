@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Stock orders are fully prepared before confirmation and display their resolved quantity, collar quote, client reference, and form version.
+- Stock orders use core's unified Staged Order interface and render its typed summary, including resolved quantity, collar quote, client reference, and form version.
 - Dollar buys require at least $1 and use a good-for-day fractional-share estimate.
 - Tag JSON now preserves Instrument References and the core-provided, positionally aligned optional Ticker Symbol array. Human tag output falls back to the original Instrument Reference for an unresolved symbol.
 

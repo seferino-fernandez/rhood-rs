@@ -77,7 +77,7 @@ The CLI defaults to read-only mode (`read_only = true` in config). Mutating comm
 
 Account-sensitive commands automatically select an account only when unified discovery returns exactly one usable account. Run `rhood account list`, then pass global `--account <NUMBER>` when multiple accounts exist. The selector covers individual and IRA accounts. Aggregate income, transfer, and document commands remain unfiltered because Robinhood's account filter contract is not established for those routes.
 
-Stock order placement resolves the account, instrument, quote collar, share quantity, client reference, and private form version before prompting. The preparation expires after 60 seconds. Pass `--yes` to skip the prompt when running non-interactively. A dollar buy requires at least $1, uses good-for-day duration, and converts the requested dollars to a six-decimal share estimate from the current ask price.
+Stock order placement asks core to create an immutable Staged Order before prompting. Core resolves the account, instrument, quote collar, share quantity, client reference, and private form version, then the CLI renders core's typed Order Summary. The Staged Order expires after 60 seconds. Pass `--yes` to skip the prompt when running non-interactively. A dollar buy requires at least $1, uses good-for-day duration, and converts the requested dollars to a six-decimal share estimate from the current ask price.
 
 ## Command Reference
 
