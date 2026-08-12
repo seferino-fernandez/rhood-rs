@@ -1,4 +1,6 @@
+use rhood_core::models::futures::FuturesQuote;
 use rmcp::{Peer, RoleServer, handler::server::wrapper::Parameters, tool, tool_router};
+use serde::Serialize;
 
 use super::handler::RhoodTools;
 use super::params::*;
@@ -8,6 +10,38 @@ fn serialize_futures_positions(
     positions: &[rhood_core::models::futures::FuturesPosition],
 ) -> Result<String, String> {
     serde_json::to_string_pretty(positions).map_err(|error| error.to_string())
+}
+
+/// A futures quote with the caller's requested alias echoed under a distinct
+/// `requested_symbol` key.
+///
+/// The flattened `FuturesQuote` keeps its authoritative wire `symbol` (e.g.
+/// `"/ESM26:XCME"`); `requested_symbol` is the alias the caller passed (e.g.
+/// `"ESM26"`). Because the added key is `requested_symbol`, never `symbol`,
+/// there is no duplicate-key collision.
+#[derive(Serialize)]
+struct FuturesQuoteView {
+    #[serde(flatten)]
+    quote: FuturesQuote,
+    requested_symbol: String,
+}
+
+/// Wraps each owned `FuturesQuote` with its requested alias, backfilling the
+/// wire `symbol` from the alias only when the upstream payload omitted it.
+fn enrich_futures_quotes(quotes: Vec<FuturesQuote>, requested: &[String]) -> Vec<FuturesQuoteView> {
+    quotes
+        .into_iter()
+        .zip(requested.iter())
+        .map(|(mut quote, req)| {
+            if quote.symbol.is_none() {
+                quote.symbol = Some(req.clone());
+            }
+            FuturesQuoteView {
+                quote,
+                requested_symbol: req.clone(),
+            }
+        })
+        .collect()
 }
 
 #[tool_router(router = futures_router, vis = "pub(super)")]
@@ -51,7 +85,7 @@ impl RhoodTools {
         // "/ESM26:XCME"). Positional zip relies on the upstream `?ids=` batch
         // returning quotes in request order; `get_futures_quotes` errors if any
         // symbol fails to resolve, so a short/reordered batch is not expected.
-        let enriched = super::enrichment::enrich_futures_quotes(quotes, &params.symbols);
+        let enriched = enrich_futures_quotes(quotes, &params.symbols);
         serde_json::to_string_pretty(&enriched).map_err(|error| error.to_string())
     }
 
@@ -107,7 +141,8 @@ impl RhoodTools {
 
 #[cfg(test)]
 mod tests {
-    use super::{RhoodTools, serialize_futures_positions};
+    use super::{RhoodTools, enrich_futures_quotes, serialize_futures_positions};
+    use rhood_core::models::futures::FuturesQuote;
 
     #[test]
     fn futures_positions_tool_is_registered_without_parameters_and_read_only() {
@@ -157,5 +192,29 @@ mod tests {
   }
 ]"#
         );
+    }
+
+    #[test]
+    fn futures_view_has_single_symbol_and_requested_symbol() {
+        let quote: FuturesQuote = serde_json::from_str(r#"{"symbol":"/ESM26:XCME"}"#).unwrap();
+        let out = enrich_futures_quotes(vec![quote], &["ESM26".to_string()]);
+        let json = serde_json::to_string(&out).unwrap();
+        assert_eq!(
+            json.matches("\"symbol\"").count(),
+            1,
+            "dup symbol key: {json}"
+        );
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value[0]["symbol"], "/ESM26:XCME");
+        assert_eq!(value[0]["requested_symbol"], "ESM26");
+    }
+
+    #[test]
+    fn futures_view_backfills_symbol_when_wire_missing() {
+        let quote: FuturesQuote = serde_json::from_str(r#"{"symbol":null}"#).unwrap();
+        let out = enrich_futures_quotes(vec![quote], &["ESM26".to_string()]);
+        let value: serde_json::Value = serde_json::to_value(&out).unwrap();
+        assert_eq!(value[0]["symbol"], "ESM26");
+        assert_eq!(value[0]["requested_symbol"], "ESM26");
     }
 }
