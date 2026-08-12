@@ -1,10 +1,5 @@
 use rmcp::{Peer, RoleServer, handler::server::wrapper::Parameters, tool, tool_router};
 
-use crate::tools::enrichment::{
-    EnrichedNewsArticle, EnrichedSplit, collect_uuids, extract_uuid_from_url,
-    resolve_urls_to_symbols, safe_resolve_symbols,
-};
-
 use super::handler::RhoodTools;
 use super::params::*;
 use super::types::format_tool_error;
@@ -63,42 +58,7 @@ impl RhoodTools {
             .await
             .map_err(|rhood_error| format_tool_error(&rhood_error))?;
 
-        let all_urls: Vec<Option<String>> = articles
-            .iter()
-            .flat_map(|article| {
-                article
-                    .related_instruments
-                    .iter()
-                    .flatten()
-                    .map(|url| Some(url.clone()))
-            })
-            .collect();
-        let uuids = collect_uuids(all_urls.iter());
-        let resolved = safe_resolve_symbols(&client, &uuids).await;
-
-        let enriched: Vec<EnrichedNewsArticle> = articles
-            .iter()
-            .map(|article| {
-                let related_symbols = article
-                    .related_instruments
-                    .as_ref()
-                    .map(|urls| {
-                        urls.iter()
-                            .filter_map(|url| {
-                                extract_uuid_from_url(url)
-                                    .and_then(|uuid| resolved.get(&uuid).cloned())
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                EnrichedNewsArticle {
-                    article,
-                    related_symbols,
-                }
-            })
-            .collect();
-
-        serde_json::to_string_pretty(&enriched).map_err(|error| error.to_string())
+        serde_json::to_string_pretty(&articles).map_err(|error| error.to_string())
     }
 
     #[tool(
@@ -116,20 +76,7 @@ impl RhoodTools {
             .get_splits(&params.symbol)
             .await
             .map_err(|rhood_error| format_tool_error(&rhood_error))?;
-        let urls: Vec<Option<String>> = splits
-            .iter()
-            .map(|stock_split| stock_split.instrument.clone())
-            .collect();
-        let symbols = resolve_urls_to_symbols(&client, &urls).await;
-        let enriched: Vec<EnrichedSplit> = splits
-            .iter()
-            .zip(symbols.iter())
-            .map(|(split, symbol)| EnrichedSplit {
-                split,
-                symbol: symbol.clone(),
-            })
-            .collect();
-        serde_json::to_string_pretty(&enriched).map_err(|error| error.to_string())
+        serde_json::to_string_pretty(&splits).map_err(|error| error.to_string())
     }
 
     #[tool(
@@ -148,19 +95,36 @@ impl RhoodTools {
             .await
             .map_err(|rhood_error| format_tool_error(&rhood_error))?;
 
-        let instrument_urls: Vec<Option<String>> = tag
-            .instruments
-            .iter()
-            .flatten()
-            .map(|url| Some(url.clone()))
-            .collect();
-        let resolved = super::enrichment::resolve_urls_to_symbols(&client, &instrument_urls).await;
-        let instrument_symbols: Vec<String> = resolved.into_iter().flatten().collect();
+        serde_json::to_string_pretty(&tag).map_err(|error| error.to_string())
+    }
+}
 
-        let enriched = super::enrichment::EnrichedTagResult {
-            tag: &tag,
-            instrument_symbols,
-        };
-        serde_json::to_string_pretty(&enriched).map_err(|error| error.to_string())
+#[cfg(test)]
+mod tests {
+    use rhood_core::models::research::{NewsArticle, StockSplit, TagResult};
+
+    #[test]
+    fn research_tools_serialize_core_identity_fields_without_duplicates() {
+        let mut article: NewsArticle = serde_json::from_str(
+            r#"{"related_instruments":["instrument-ref"],"related_symbols":["WIRE"]}"#,
+        )
+        .unwrap();
+        article.related_symbols = vec![Some("AAPL".to_string())];
+        let mut split: StockSplit =
+            serde_json::from_str(r#"{"instrument":"instrument-ref","symbol":"WIRE"}"#).unwrap();
+        split.symbol = Some("AAPL".to_string());
+        let mut tag: TagResult = serde_json::from_str(
+            r#"{"instruments":["instrument-ref"],"instrument_symbols":["WIRE"]}"#,
+        )
+        .unwrap();
+        tag.instrument_symbols = vec![Some("AAPL".to_string())];
+
+        for (value, field) in [
+            (serde_json::to_string(&article).unwrap(), "related_symbols"),
+            (serde_json::to_string(&split).unwrap(), "symbol"),
+            (serde_json::to_string(&tag).unwrap(), "instrument_symbols"),
+        ] {
+            assert_eq!(value.matches(&format!("\"{field}\"")).count(), 1);
+        }
     }
 }

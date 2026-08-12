@@ -102,7 +102,7 @@ impl RobinhoodClient {
         let mut object_ids = Vec::with_capacity(symbols.len());
         for symbol in symbols {
             let instrument = self
-                .cached_instrument(symbol)
+                .instrument_for_symbol(symbol)
                 .await?
                 .ok_or_else(|| RhoodError::InvalidSymbol((*symbol).to_string()))?;
             let instrument_id = instrument

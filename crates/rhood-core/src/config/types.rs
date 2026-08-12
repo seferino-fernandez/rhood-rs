@@ -197,7 +197,7 @@ pub struct CacheConfig {
     pub futures_ttl_secs: u64,
     /// Maximum entries in the symbol → futures contract cache.
     pub futures_max_entries: u64,
-    /// Batch size for `resolve_symbols` chunked `?ids=` query-string requests.
+    /// Batch size for Instrument Identity Enrichment `?ids=` requests.
     pub enrichment_batch_size: usize,
 }
 

@@ -33,4 +33,12 @@ mod tests {
                 client.cancel_all_option_orders("ABC123").await;
         }
     }
+
+    #[test]
+    fn instrument_identity_signature_is_strict_and_aligned() {
+        async fn _assert(client: &crate::RobinhoodClient, references: &[String]) {
+            let _: crate::Result<Vec<Option<String>>> =
+                client.resolve_instrument_symbols(references).await;
+        }
+    }
 }
