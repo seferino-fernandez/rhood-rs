@@ -19,6 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Stock orders are fully prepared before confirmation and display their resolved quantity, collar quote, client reference, and form version.
 - Dollar buys require at least $1 and use a good-for-day fractional-share estimate.
+- Tag JSON now preserves Instrument References and the core-provided, positionally aligned optional Ticker Symbol array. Human tag output falls back to the original Instrument Reference for an unresolved symbol.
+
+### Fixed
+
+- Fundamentals table output now uses each returned record's Ticker Symbol, preventing an omitted earlier result from mislabeling a later record.
 
 ## [0.2.0](https://github.com/seferino-fernandez/rhood-rs/compare/v0.1.4...v0.2.0) - 2026-08-11
 

@@ -258,6 +258,14 @@ Tools are grouped by domain. The complete authoritative list is what `tools/list
 - **Market** - exchange listings, trading hours (any date or today), and daily movers.
 - **Orders** - human-confirmed placement (`place_stock_order`, `place_option_order`) and cancellation (`cancel_order`, `cancel_option_order`).
 
+Instrument Identity Enrichment is performed by `rhood-core`, not by the MCP adapters.
+`get_positions`, `get_all_positions`, `get_dividends`, stock-order tools, `get_news`,
+`get_tags`, and `get_splits` serialize the core-enriched output. The core preserves a
+Wire Symbol, fills a missing Ticker Symbol from an Instrument Reference when possible,
+and retains the source record when a normal read cannot enrich it. News and tag symbol
+arrays stay aligned with their source reference arrays, with `null` for misses. Futures
+positions remain raw; requested futures aliases are a separate presentation concern.
+
 For the live list, page through MCP `tools/list` against the running server. Pass a
 non-null `nextCursor` back as `cursor` unchanged. Read-only and read-write surfaces use
 different cursor scopes, so restart without a cursor after changing server mode.

@@ -132,6 +132,12 @@ rhood stock tags 100-most-popular
 
 `--bounds` values: `regular` (default), `extended`, `trading`
 
+`stock tags --output json` preserves the complete tag result, including source
+`instruments` and the positionally aligned `instrument_symbols` array. An unresolved
+symbol is `null`. Table and CSV output display the resolved Ticker Symbol when present;
+otherwise they display the original Instrument Reference. This fallback keeps human
+output identifiable without changing the source data.
+
 ### Option
 
 Option contract quotes, open positions, aggregate strategy positions, and order history. Both
