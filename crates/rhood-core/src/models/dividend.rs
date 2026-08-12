@@ -13,8 +13,7 @@ pub struct Dividend {
     pub account: Option<String>,
     /// API URL for the instrument that issued the dividend.
     pub instrument: Option<String>,
-    /// Resolved ticker symbol for the instrument (e.g., "AAPL"). Populated
-    /// by `enrich_dividend_symbols`; not present in the raw API response.
+    /// Ticker Symbol supplied by the wire or filled by Instrument Identity Enrichment.
     pub symbol: Option<String>,
     /// Dividend amount in dollars.
     pub amount: Option<String>,

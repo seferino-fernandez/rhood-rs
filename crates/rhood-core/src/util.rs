@@ -1,9 +1,12 @@
 //! Small shared helpers.
 
-/// Extracts the trailing instrument UUID from a Robinhood instrument URL such
-/// as `https://api.robinhood.com/instruments/<uuid>/`. Returns `None` if the
-/// URL is empty or has no path segment.
+/// Temporary compatibility helper that borrows the UUID from a validated
+/// Instrument Reference.
 pub fn instrument_id_from_url(url: &str) -> Option<&str> {
+    crate::client::instrument_identity::canonical_instrument_id(url).ok()?;
+    if uuid::Uuid::parse_str(url).is_ok() {
+        return Some(url);
+    }
     let trimmed = url.trim_end_matches('/');
     let id = trimmed.rsplit('/').next()?;
     if id.is_empty() { None } else { Some(id) }
@@ -40,5 +43,19 @@ mod tests {
     fn bare_uuid_no_slashes_returns_that_uuid() {
         let uuid = "450dfc6d-5510-4d40-abfb-f633b7d9be3e";
         assert_eq!(instrument_id_from_url(uuid), Some(uuid));
+    }
+
+    #[test]
+    fn rejects_noncanonical_instrument_paths() {
+        assert_eq!(
+            instrument_id_from_url("https://api.robinhood.com/instruments/"),
+            None
+        );
+        assert_eq!(
+            instrument_id_from_url(
+                "https://api.robinhood.com/instruments/450dfc6d-5510-4d40-abfb-f633b7d9be3e/history/"
+            ),
+            None
+        );
     }
 }

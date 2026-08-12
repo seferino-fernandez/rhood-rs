@@ -117,6 +117,9 @@ pub struct NewsArticle {
     pub published_at: Option<String>,
     /// Instrument URLs related to this article.
     pub related_instruments: Option<Vec<String>>,
+    /// Ticker Symbols aligned with `related_instruments`.
+    #[serde(default, skip_deserializing)]
+    pub related_symbols: Vec<Option<String>>,
     /// Preview image URL.
     pub preview_image_url: Option<String>,
 }
@@ -128,6 +131,9 @@ pub struct StockSplit {
     pub url: Option<String>,
     /// Instrument URL.
     pub instrument: Option<String>,
+    /// Ticker Symbol derived from the Instrument Reference.
+    #[serde(default, skip_deserializing)]
+    pub symbol: Option<String>,
     /// Date the split was executed (YYYY-MM-DD).
     pub execution_date: Option<String>,
     /// Split multiplier (shares received per original share).
@@ -145,4 +151,7 @@ pub struct TagResult {
     pub slug: Option<String>,
     /// Instrument URLs matching this tag.
     pub instruments: Option<Vec<String>>,
+    /// Ticker Symbols aligned with `instruments`.
+    #[serde(default, skip_deserializing)]
+    pub instrument_symbols: Vec<Option<String>>,
 }

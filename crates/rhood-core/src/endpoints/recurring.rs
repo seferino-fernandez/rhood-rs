@@ -45,7 +45,7 @@ impl RobinhoodClient {
         validate_account_number(&create_recurring_request.account_number)?;
 
         let instrument = self
-            .cached_instrument(&create_recurring_request.symbol)
+            .instrument_for_symbol(&create_recurring_request.symbol)
             .await?
             .ok_or_else(|| RhoodError::InvalidSymbol(create_recurring_request.symbol.clone()))?;
         let instrument_id = instrument
