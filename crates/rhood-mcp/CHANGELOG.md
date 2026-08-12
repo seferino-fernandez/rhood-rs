@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - One Confirmation module owns Principal binding, effective TTL, MRTR response handling, and atomic terminal redemption. Accept, decline, and cancel consume state; malformed responses remain correctable until expiry.
 - Multi-account requests fail before staging unless `account_number` is supplied. Stock state expires after 60 seconds, option state after 600 seconds, and submission timeouts return `submission_uncertain`.
 - Position, dividend, stock-order, news, tag, and split outputs now serialize core-owned Instrument Identity Enrichment. The MCP adapters do not resolve Instrument References, and aligned research symbol arrays use `null` for misses.
+- The order-expiry error code changed from `prepared_order_expired` to `staged_order_expired`; this is a breaking change for clients matching on the code.
 
 ## [0.2.0](https://github.com/seferino-fernandez/rhood-rs/compare/rhood-mcp-v0.1.4...rhood-mcp-v0.2.0) - 2026-08-11
 
