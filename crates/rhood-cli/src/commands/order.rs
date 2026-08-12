@@ -254,7 +254,7 @@ pub async fn run(
         }
         OrderCommand::List { status, since } => {
             let account = super::resolve_account_number(&client, requested_account).await?;
-            let mut orders = match status.as_deref() {
+            let orders = match status.as_deref() {
                 Some("open") => client.get_open_stock_orders(&account).await?,
                 _ => {
                     client
@@ -262,13 +262,6 @@ pub async fn run(
                         .await?
                 }
             };
-            // Best-effort symbol resolution: don't fail the listing if a
-            // per-instrument lookup errors out.
-            #[expect(
-                clippy::let_underscore_must_use,
-                reason = "symbol enrichment is optional and must not make an order listing fail"
-            )]
-            let _ = client.enrich_order_symbols(&mut orders).await;
             let headers = &["ID", "Symbol", "Side", "Qty", "State", "Type", "Created"];
             let rows: Vec<Vec<String>> = orders
                 .iter()
