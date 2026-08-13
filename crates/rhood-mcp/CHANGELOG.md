@@ -23,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Position, dividend, stock-order, news, tag, and split outputs now serialize core-owned Instrument Identity Enrichment. The MCP adapters do not resolve Instrument References, and aligned research symbol arrays use `null` for misses.
 - The order-expiry error code changed from `prepared_order_expired` to `staged_order_expired`; this is a breaking change for clients matching on the code.
 
+### Fixed
+
+- `get_futures_quotes` no longer attaches `requested_symbol` by response position. Each quote now carries the alias core correlated it to by instrument ID, so a reordered or partial upstream batch can no longer label a quote with another contract's symbol and shift every alias after it. A requested symbol the batch does not answer is simply absent from the results.
+
 ## [0.2.0](https://github.com/seferino-fernandez/rhood-rs/compare/rhood-mcp-v0.1.4...rhood-mcp-v0.2.0) - 2026-08-11
 
 ### Added

@@ -48,19 +48,24 @@ struct FuturesQuoteView {
     requested_symbol: String,
 }
 
-/// Wraps each owned `FuturesQuote` with its requested alias, backfilling the
-/// wire `symbol` from the alias only when the upstream payload omitted it.
-fn enrich_futures_quotes(quotes: Vec<FuturesQuote>, requested: &[String]) -> Vec<FuturesQuoteView> {
+/// Wraps each owned `FuturesQuote` with the alias core correlated it to,
+/// backfilling the wire `symbol` from that alias only when the upstream payload
+/// omitted it.
+///
+/// The pairing is core's, established through the resolved instrument ID. This
+/// function must never re-derive it from position: a reordered or short upstream
+/// batch would then attach the wrong `requested_symbol` and shift every alias
+/// after it.
+fn enrich_futures_quotes(quotes: Vec<(String, FuturesQuote)>) -> Vec<FuturesQuoteView> {
     quotes
         .into_iter()
-        .zip(requested.iter())
-        .map(|(mut quote, req)| {
+        .map(|(requested_symbol, mut quote)| {
             if quote.symbol.is_none() {
-                quote.symbol = Some(req.clone());
+                quote.symbol = Some(requested_symbol.clone());
             }
             FuturesQuoteView {
                 quote,
-                requested_symbol: req.clone(),
+                requested_symbol,
             }
         })
         .collect()
@@ -104,10 +109,10 @@ impl RhoodTools {
             .map_err(|rhood_error| format_tool_error(&rhood_error))?;
         // Echo each requested alias under `requested_symbol`, distinct from the
         // authoritative wire `symbol` (e.g. requested "ESM26" vs wire
-        // "/ESM26:XCME"). Positional zip relies on the upstream `?ids=` batch
-        // returning quotes in request order; `get_futures_quotes` errors if any
-        // symbol fails to resolve, so a short/reordered batch is not expected.
-        let enriched = enrich_futures_quotes(quotes, &params.symbols);
+        // "/ESM26:XCME"). Core pairs every quote with the symbol it answers by
+        // resolved instrument ID, so this holds regardless of the order the
+        // upstream batch returns.
+        let enriched = enrich_futures_quotes(quotes);
         serde_json::to_string_pretty(&enriched).map_err(|error| error.to_string())
     }
 
@@ -219,7 +224,7 @@ mod tests {
     #[test]
     fn futures_view_has_single_symbol_and_requested_symbol() {
         let quote: FuturesQuote = serde_json::from_str(r#"{"symbol":"/ESM26:XCME"}"#).unwrap();
-        let out = enrich_futures_quotes(vec![quote], &["ESM26".to_string()]);
+        let out = enrich_futures_quotes(vec![("ESM26".to_string(), quote)]);
         let json = serde_json::to_string(&out).unwrap();
         assert_eq!(
             json.matches("\"symbol\"").count(),
@@ -234,9 +239,43 @@ mod tests {
     #[test]
     fn futures_view_backfills_symbol_when_wire_missing() {
         let quote: FuturesQuote = serde_json::from_str(r#"{"symbol":null}"#).unwrap();
-        let out = enrich_futures_quotes(vec![quote], &["ESM26".to_string()]);
+        let out = enrich_futures_quotes(vec![("ESM26".to_string(), quote)]);
         let value: serde_json::Value = serde_json::to_value(&out).unwrap();
         assert_eq!(value[0]["symbol"], "ESM26");
         assert_eq!(value[0]["requested_symbol"], "ESM26");
+    }
+
+    /// The regression BL-57 was filed for. The view must label each quote with
+    /// the alias core paired it to, never with the alias sitting at the same
+    /// index in the original request. Here the pairs arrive in an order that
+    /// disagrees with any plausible request order, and every quote carries a
+    /// wire symbol that identifies which alias it belongs to.
+    #[test]
+    fn futures_view_labels_quotes_by_core_pairing_not_position() {
+        let pair = |requested: &str, wire: &str| {
+            let quote: FuturesQuote =
+                serde_json::from_str(&format!(r#"{{"symbol":"{wire}"}}"#)).unwrap();
+            (requested.to_string(), quote)
+        };
+        let out = enrich_futures_quotes(vec![
+            pair("NQM26", "/NQM26:XCME"),
+            pair("ESM26", "/ESM26:XCME"),
+            pair("CLM26", "/CLM26:XNYM"),
+        ]);
+        let value: serde_json::Value = serde_json::to_value(&out).unwrap();
+        for (index, (requested, wire)) in [
+            ("NQM26", "/NQM26:XCME"),
+            ("ESM26", "/ESM26:XCME"),
+            ("CLM26", "/CLM26:XNYM"),
+        ]
+        .iter()
+        .enumerate()
+        {
+            assert_eq!(value[index]["requested_symbol"], *requested);
+            assert_eq!(
+                value[index]["symbol"], *wire,
+                "quote {index} was attached to the wrong alias"
+            );
+        }
     }
 }
