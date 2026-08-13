@@ -1,8 +1,38 @@
+use rhood_core::models::option::OptionType;
 use rmcp::{Peer, RoleServer, handler::server::wrapper::Parameters, tool, tool_router};
+use schemars::JsonSchema;
+use serde::Deserialize;
 
 use super::handler::RhoodTools;
-use super::params::*;
 use super::types::format_tool_error;
+
+#[derive(Deserialize, JsonSchema)]
+struct IndexQuoteParams {
+    /// Index symbols (e.g., ["SPX", "NDX", "VIX"])
+    #[schemars(length(max = 50))]
+    symbols: Vec<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct IndexOptionChainParams {
+    /// Index symbol (e.g., "SPX")
+    #[schemars(length(max = 12), regex(pattern = r"^[A-Za-z0-9.]{1,12}$"))]
+    symbol: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct FindIndexOptionsParams {
+    /// Index symbol (e.g., "SPX")
+    #[schemars(length(max = 12), regex(pattern = r"^[A-Za-z0-9.]{1,12}$"))]
+    symbol: String,
+    /// Expiration date in YYYY-MM-DD format
+    #[schemars(regex(pattern = r"^\d{4}-\d{2}-\d{2}$"))]
+    expiration_date: String,
+    /// "call" or "put"
+    option_type: OptionType,
+    /// Strike price (optional filter)
+    strike_price: Option<f64>,
+}
 
 #[tool_router(router = index_router, vis = "pub(super)")]
 impl RhoodTools {

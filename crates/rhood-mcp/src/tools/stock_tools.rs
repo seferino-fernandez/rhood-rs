@@ -1,8 +1,61 @@
+use rhood_core::models::stock::{HistoricalInterval, HistoricalSpan};
 use rmcp::{Peer, RoleServer, handler::server::wrapper::Parameters, tool, tool_router};
+use schemars::JsonSchema;
+use serde::Deserialize;
 
-use super::handler::RhoodTools;
-use super::params::*;
+use super::handler::{AccountSelectorParams, RhoodTools};
 use super::types::format_tool_error;
+
+#[derive(Deserialize, JsonSchema)]
+struct StockQuoteParams {
+    /// Stock ticker symbols, e.g. `["AAPL", "TSLA"]`
+    #[schemars(length(max = 50))]
+    symbols: Vec<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct StockHistoryParams {
+    /// Stock ticker symbol
+    #[schemars(length(max = 12), regex(pattern = r"^[A-Za-z0-9.]{1,12}$"))]
+    symbol: String,
+    /// Candle interval
+    #[serde(default = "default_interval")]
+    interval: HistoricalInterval,
+    /// Time span
+    #[serde(default = "default_span")]
+    span: HistoricalSpan,
+}
+
+fn default_interval() -> HistoricalInterval {
+    HistoricalInterval::Hour
+}
+
+fn default_span() -> HistoricalSpan {
+    HistoricalSpan::Week
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct FundamentalsParams {
+    /// Stock ticker symbols, e.g. `["AAPL", "TSLA"]`
+    #[schemars(length(max = 50))]
+    symbols: Vec<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct LatestPricesParams {
+    /// Stock ticker symbols, e.g. `["AAPL", "TSLA"]`
+    #[schemars(length(max = 50))]
+    symbols: Vec<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct StockOrderHistoryParams {
+    /// Canonical brokerage account number from get_accounts. May be omitted only when exactly one account exists.
+    account_number: Option<String>,
+    /// Filter orders updated since this date (ISO 8601, e.g. "2025-01-01")
+    #[schemars(regex(pattern = r"^\d{4}-\d{2}-\d{2}$"))]
+    since: Option<String>,
+}
 
 /// Object projection for `get_latest_prices` so each entry is
 /// `{"symbol": "...", "price": "..."}` instead of a positional `[sym, price]`
@@ -175,9 +228,9 @@ impl RhoodTools {
 
 #[cfg(test)]
 mod tests {
-    use super::compact_history;
+    use super::{RhoodTools, StockHistoryParams, compact_history};
     use rhood_core::models::order::StockOrder;
-    use rhood_core::models::stock::{Candle, Fundamentals};
+    use rhood_core::models::stock::{Candle, Fundamentals, HistoricalInterval, HistoricalSpan};
 
     fn candle(t: &str, o: &str, c: &str) -> Candle {
         Candle {
@@ -263,5 +316,51 @@ mod tests {
         );
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value[0]["symbol"], "RKLB");
+    }
+
+    #[test]
+    fn stock_history_rejects_unknown_interval() {
+        let err = serde_json::from_str::<StockHistoryParams>(
+            r#"{"symbol":"AAPL","interval":"bogus","span":"week"}"#,
+        );
+        assert!(err.is_err(), "unknown interval must be rejected");
+    }
+
+    #[test]
+    fn stock_history_accepts_known_enum_values() {
+        let params: StockHistoryParams =
+            serde_json::from_str(r#"{"symbol":"AAPL","interval":"5minute","span":"5year"}"#)
+                .unwrap();
+        assert!(matches!(params.interval, HistoricalInterval::FiveMinute));
+        assert!(matches!(params.span, HistoricalSpan::FiveYear));
+    }
+
+    #[test]
+    fn stock_price_tools_advertise_reciprocal_selection_guidance() {
+        let tools = RhoodTools::stock_router().list_all();
+        let description = |name: &str| {
+            tools
+                .iter()
+                .find(|tool| tool.name == name)
+                .and_then(|tool| tool.description.clone())
+                .unwrap_or_else(|| panic!("tool {name} must advertise a description"))
+        };
+
+        let latest_prices = description("get_latest_prices");
+        assert!(
+            latest_prices.contains("compact") && latest_prices.contains("get_stock_quotes"),
+            "get_latest_prices must recommend itself for compact price-only queries and point to get_stock_quotes for full detail: {latest_prices}"
+        );
+
+        let stock_quotes = description("get_stock_quotes");
+        assert!(
+            stock_quotes.contains("bid/ask")
+                && stock_quotes.contains("sizes")
+                && stock_quotes.contains("timestamps")
+                && stock_quotes.contains("previous close")
+                && stock_quotes.contains("trading state")
+                && stock_quotes.contains("get_latest_prices"),
+            "get_stock_quotes must describe full quote detail and point to get_latest_prices for price-only queries: {stock_quotes}"
+        );
     }
 }

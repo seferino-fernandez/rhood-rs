@@ -1,8 +1,17 @@
 use rmcp::{Peer, RoleServer, handler::server::wrapper::Parameters, tool, tool_router};
+use schemars::JsonSchema;
+use serde::Deserialize;
 
 use super::handler::RhoodTools;
-use super::params::IpoAccessCardsParams;
 use super::types::format_tool_error;
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct IpoAccessCardsParams {
+    /// Robinhood instrument UUIDs discovered from the IPO Access list or another instrument lookup.
+    #[schemars(length(min = 1, max = 50))]
+    instrument_ids: Vec<String>,
+}
 
 #[tool_router(router = ipo_router, vis = "pub(super)")]
 impl RhoodTools {

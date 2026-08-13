@@ -1,8 +1,44 @@
 use rmcp::{Peer, RoleServer, handler::server::wrapper::Parameters, tool, tool_router};
+use schemars::JsonSchema;
+use serde::Deserialize;
 
 use super::handler::RhoodTools;
-use super::params::*;
 use super::types::format_tool_error;
+
+#[derive(Deserialize, JsonSchema)]
+struct EarningsParams {
+    /// Stock ticker symbol (e.g. "AAPL")
+    #[schemars(length(max = 12), regex(pattern = r"^[A-Za-z0-9.]{1,12}$"))]
+    symbol: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct RatingsParams {
+    /// Stock ticker symbol (e.g. "AAPL")
+    #[schemars(length(max = 12), regex(pattern = r"^[A-Za-z0-9.]{1,12}$"))]
+    symbol: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct NewsParams {
+    /// Stock ticker symbol (e.g. "AAPL")
+    #[schemars(length(max = 12), regex(pattern = r"^[A-Za-z0-9.]{1,12}$"))]
+    symbol: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct SplitsParams {
+    /// Stock ticker symbol (e.g. "AAPL")
+    #[schemars(length(max = 12), regex(pattern = r"^[A-Za-z0-9.]{1,12}$"))]
+    symbol: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct TagsParams {
+    /// Tag slug (e.g. "100-most-popular")
+    #[schemars(length(max = 100))]
+    tag: String,
+}
 
 #[tool_router(router = research_router, vis = "pub(super)")]
 impl RhoodTools {
@@ -101,6 +137,7 @@ impl RhoodTools {
 
 #[cfg(test)]
 mod tests {
+    use super::EarningsParams;
     use rhood_core::models::research::{NewsArticle, StockSplit, TagResult};
 
     #[test]
@@ -126,5 +163,16 @@ mod tests {
         ] {
             assert_eq!(value.matches(&format!("\"{field}\"")).count(), 1);
         }
+    }
+
+    #[test]
+    fn symbol_schema_is_bounded() {
+        let schema = schemars::schema_for!(EarningsParams);
+        let json = serde_json::to_value(&schema).unwrap();
+        let symbol = &json["properties"]["symbol"];
+        assert!(
+            symbol.get("maxLength").is_some() || symbol.get("pattern").is_some(),
+            "symbol must carry a length/pattern bound: {symbol}"
+        );
     }
 }

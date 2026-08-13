@@ -1,5 +1,7 @@
 use rhood_core::RobinhoodClient;
 use rmcp::{Peer, RoleServer, handler::server::tool::ToolRouter};
+use schemars::JsonSchema;
+use serde::Deserialize;
 
 use crate::config::McpConfig;
 use std::future::Future;
@@ -10,6 +12,14 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use super::confirmation::{OrderConfirmation, process_order_confirmation};
 use super::rate_limit::{FallbackPrincipal, ToolRateLimiter};
+
+/// Optional account selector shared by account-sensitive tools.
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct AccountSelectorParams {
+    /// Canonical brokerage account number from get_accounts. May be omitted only when exactly one account exists.
+    pub(super) account_number: Option<String>,
+}
 
 /// Boxed future returned by a [`LazyAuthHook`].
 ///
