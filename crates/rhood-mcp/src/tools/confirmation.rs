@@ -4,11 +4,11 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use axum::http::request::Parts;
-use rhood_core::RobinhoodClient;
 use rhood_core::models::order::{
     OptionOrderSummary, OrderIntent, OrderSummary, Side, StagedOrder, StockOrderSummary,
     SubmittedOrder, TimeInForce,
 };
+use rhood_core::{RhoodError, RobinhoodClient};
 use rmcp::model::{
     CallToolResponse, CallToolResult, ContentBlock, ElicitRequest, ElicitRequestParams,
     ElicitResult, ElicitationAction, ElicitationSchema, Extensions, InputRequest,
@@ -17,7 +17,6 @@ use rmcp::model::{
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use super::types::format_tool_error;
 use crate::middleware::oauth::{OAuthAuthenticated, OAuthPrincipal};
 
 const CONFIRMATION_REQUEST_ID: &str = "trade_confirmation";
@@ -30,6 +29,22 @@ pub(super) const ORDER_REDEMPTION_RETENTION: Duration = Duration::from_secs(1_20
 pub(super) struct ConfirmationRound {
     pub(super) request_state: Option<String>,
     pub(super) input_responses: Option<InputResponses>,
+}
+
+#[derive(Debug)]
+pub(super) enum ConfirmationError {
+    MissingRoundData,
+    MalformedResponse,
+    Declined,
+    Cancelled,
+    Expired,
+    InvalidState,
+    AlreadyConsumed,
+    StateUnavailable,
+    PrincipalUnavailable,
+    PreparationFailure(RhoodError),
+    SubmissionFailure(RhoodError),
+    InternalFailure(String),
 }
 
 /// Owns the complete MCP trade Confirmation state machine.
@@ -57,28 +72,19 @@ impl OrderConfirmation {
     pub(super) async fn advance(
         &self,
         client: &RobinhoodClient,
-        principal: &str,
+        extensions: &Extensions,
         tool_name: &str,
         intent: OrderIntent,
         round: ConfirmationRound,
-    ) -> Result<CallToolResponse, String> {
+    ) -> Result<CallToolResponse, ConfirmationError> {
+        let principal = request_principal(extensions)?;
         self.advance_with(
-            principal,
+            &principal,
             tool_name,
             intent,
             round,
-            |intent| async move {
-                client
-                    .prepare_order(intent)
-                    .await
-                    .map_err(|error| format_tool_error(&error))
-            },
-            |staged| async move {
-                client
-                    .submit_order(staged)
-                    .await
-                    .map_err(|error| format_tool_error(&error))
-            },
+            |intent| async move { client.prepare_order(intent).await },
+            |staged| async move { client.submit_order(staged).await },
         )
         .await
     }
@@ -91,22 +97,21 @@ impl OrderConfirmation {
         round: ConfirmationRound,
         prepare: P,
         submit: S,
-    ) -> Result<CallToolResponse, String>
+    ) -> Result<CallToolResponse, ConfirmationError>
     where
         P: FnOnce(OrderIntent) -> PFut,
-        PFut: Future<Output = Result<StagedOrder, String>>,
+        PFut: Future<Output = Result<StagedOrder, RhoodError>>,
         S: FnOnce(StagedOrder) -> SFut,
-        SFut: Future<Output = Result<SubmittedOrder, String>>,
+        SFut: Future<Output = Result<SubmittedOrder, RhoodError>>,
     {
         let binding = associated_data(principal, tool_name, &intent)?;
         let Some(request_state) = round.request_state else {
             if round.input_responses.is_some() {
-                return Err(
-                    "Confirmation request state is missing; stage the order again before submitting"
-                        .to_string(),
-                );
+                return Err(ConfirmationError::MissingRoundData);
             }
-            let staged = prepare(intent).await?;
+            let staged = prepare(intent)
+                .await
+                .map_err(ConfirmationError::PreparationFailure)?;
             let summary = render_summary(staged.summary());
             let ttl = effective_ttl(&staged, self.ttl)?;
             return self.stage(&binding, &staged, summary, ttl);
@@ -116,12 +121,7 @@ impl OrderConfirmation {
             action @ (ElicitationAction::Accept
             | ElicitationAction::Decline
             | ElicitationAction::Cancel) => action,
-            _ => {
-                return Err(
-                    "Trade Confirmation response is invalid; correct the response and retry"
-                        .to_string(),
-                );
-            }
+            _ => return Err(ConfirmationError::MalformedResponse),
         };
         let staged: StagedOrder = self
             .codec
@@ -130,32 +130,23 @@ impl OrderConfirmation {
         self.redemptions.consume(&request_state)?;
         match action {
             ElicitationAction::Accept => {}
-            ElicitationAction::Decline => {
-                return Err(
-                    "Trade Confirmation was declined; the order was not submitted".to_string(),
-                );
-            }
-            ElicitationAction::Cancel => {
-                return Err(
-                    "Trade Confirmation was cancelled; the order was not submitted".to_string(),
-                );
-            }
-            _ => {
-                return Err(
-                    "Trade Confirmation was not accepted; the order was not submitted".to_string(),
-                );
-            }
+            ElicitationAction::Decline => return Err(ConfirmationError::Declined),
+            ElicitationAction::Cancel => return Err(ConfirmationError::Cancelled),
+            _ => return Err(ConfirmationError::MalformedResponse),
         }
 
         let summary = render_summary(staged.summary());
-        let order = submit(staged).await?;
+        let order = submit(staged)
+            .await
+            .map_err(ConfirmationError::SubmissionFailure)?;
         let result = serde_json::json!({
             "order_id": order.id(),
             "state": order.state(),
             "status": "submitted",
             "summary": summary,
         });
-        let content = serde_json::to_string_pretty(&result).map_err(|error| error.to_string())?;
+        let content = serde_json::to_string_pretty(&result)
+            .map_err(|error| ConfirmationError::InternalFailure(error.to_string()))?;
         Ok(CallToolResult::success(vec![ContentBlock::text(content)]).into())
     }
 
@@ -165,17 +156,17 @@ impl OrderConfirmation {
         staged: &StagedOrder,
         summary: String,
         ttl: Duration,
-    ) -> Result<CallToolResponse, String> {
+    ) -> Result<CallToolResponse, ConfirmationError> {
         let request_state = self
             .codec
             .seal_json_with(
                 staged,
                 &SealOptions::new().associated_data(associated_data).ttl(ttl),
             )
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| ConfirmationError::InternalFailure(error.to_string()))?;
         let requested_schema = ElicitationSchema::builder()
             .build()
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| ConfirmationError::InternalFailure(error.to_string()))?;
         let elicitation = ElicitRequest::new(ElicitRequestParams::FormElicitationParams {
             meta: None,
             message: summary,
@@ -190,7 +181,7 @@ impl OrderConfirmation {
     }
 }
 
-pub(super) fn request_principal(extensions: &Extensions) -> Result<String, String> {
+fn request_principal(extensions: &Extensions) -> Result<String, ConfirmationError> {
     let Some(parts) = extensions.get::<Parts>() else {
         return Ok(STDIO_PRINCIPAL.to_string());
     };
@@ -200,10 +191,7 @@ pub(super) fn request_principal(extensions: &Extensions) -> Result<String, Strin
         return Ok(authorization.principal.clone());
     }
     if parts.extensions.get::<OAuthAuthenticated>().is_some() {
-        return Err(
-            "Authenticated OAuth request has no Principal; authenticate again before staging the order"
-                .to_string(),
-        );
+        return Err(ConfirmationError::PrincipalUnavailable);
     }
     Ok(NON_OAUTH_HTTP_PRINCIPAL.to_string())
 }
@@ -212,13 +200,14 @@ fn associated_data(
     principal: &str,
     tool_name: &str,
     intent: &OrderIntent,
-) -> Result<Vec<u8>, String> {
-    let request = serde_json::to_vec(intent).map_err(|error| error.to_string())?;
+) -> Result<Vec<u8>, ConfirmationError> {
+    let request = serde_json::to_vec(intent)
+        .map_err(|error| ConfirmationError::InternalFailure(error.to_string()))?;
     let request_digest = Sha256::digest(request);
     let principal_len = u64::try_from(principal.len())
-        .map_err(|_error| "Principal is too long to bind to request state".to_string())?;
+        .map_err(|error| ConfirmationError::InternalFailure(error.to_string()))?;
     let tool_name_len = u64::try_from(tool_name.len())
-        .map_err(|_error| "Tool name is too long to bind to request state".to_string())?;
+        .map_err(|error| ConfirmationError::InternalFailure(error.to_string()))?;
     let mut binding = Vec::new();
     binding.extend_from_slice(&principal_len.to_be_bytes());
     binding.extend_from_slice(principal.as_bytes());
@@ -228,27 +217,31 @@ fn associated_data(
     Ok(binding)
 }
 
-fn effective_ttl(staged: &StagedOrder, configured_ttl: Duration) -> Result<Duration, String> {
+fn effective_ttl(
+    staged: &StagedOrder,
+    configured_ttl: Duration,
+) -> Result<Duration, ConfirmationError> {
     let remaining_ms = staged
         .expires_at_unix_ms()
         .checked_sub(chrono::Utc::now().timestamp_millis())
-        .ok_or_else(|| "Staged order expiry exceeds the server clock range".to_string())?;
-    let remaining_ms = u64::try_from(remaining_ms)
-        .map_err(|_error| "Staged order expired before Confirmation could begin".to_string())?;
+        .ok_or_else(|| {
+            ConfirmationError::InternalFailure(
+                "Staged order expiry exceeds the server clock range".to_string(),
+            )
+        })?;
+    let remaining_ms = u64::try_from(remaining_ms).map_err(|_error| ConfirmationError::Expired)?;
     Ok(configured_ttl.min(Duration::from_millis(remaining_ms)))
 }
 
-fn parse_action(input_responses: Option<InputResponses>) -> Result<ElicitationAction, String> {
-    let responses = input_responses.ok_or_else(|| {
-        "Confirmation response is missing; stage the order again and answer the elicitation"
-            .to_string()
-    })?;
-    let response = responses.get(CONFIRMATION_REQUEST_ID).ok_or_else(|| {
-        "Trade Confirmation response is missing; answer the outstanding elicitation".to_string()
-    })?;
-    let elicitation: ElicitResult = serde_json::from_value(response.clone()).map_err(|error| {
-        format!("Trade Confirmation response is invalid; correct the response and retry: {error}")
-    })?;
+fn parse_action(
+    input_responses: Option<InputResponses>,
+) -> Result<ElicitationAction, ConfirmationError> {
+    let responses = input_responses.ok_or(ConfirmationError::MissingRoundData)?;
+    let response = responses
+        .get(CONFIRMATION_REQUEST_ID)
+        .ok_or(ConfirmationError::MissingRoundData)?;
+    let elicitation: ElicitResult = serde_json::from_value(response.clone())
+        .map_err(|_error| ConfirmationError::MalformedResponse)?;
     Ok(elicitation.action)
 }
 
@@ -324,12 +317,10 @@ fn time_in_force_name(time_in_force: TimeInForce) -> &'static str {
     }
 }
 
-fn request_state_error(error: &RequestStateError) -> String {
+fn request_state_error(error: &RequestStateError) -> ConfirmationError {
     match error {
-        RequestStateError::Expired => {
-            "Confirmation expired; stage the order again before submitting".to_string()
-        }
-        _ => "Confirmation is no longer valid; stage the order again (the state may have been altered or belongs to a different Principal)".to_string(),
+        RequestStateError::Expired => ConfirmationError::Expired,
+        _ => ConfirmationError::InvalidState,
     }
 }
 
@@ -346,25 +337,22 @@ impl OrderRedemptionStore {
         }
     }
 
-    fn consume(&self, request_state: &str) -> Result<(), String> {
+    fn consume(&self, request_state: &str) -> Result<(), ConfirmationError> {
         self.consume_at(request_state, Instant::now())
     }
 
-    fn consume_at(&self, request_state: &str, now: Instant) -> Result<(), String> {
+    fn consume_at(&self, request_state: &str, now: Instant) -> Result<(), ConfirmationError> {
         let digest: [u8; 32] = Sha256::digest(request_state.as_bytes()).into();
-        let mut redeemed = self
-            .redeemed
-            .lock()
-            .map_err(|error| format!("Confirmation redemption store is unavailable: {error}"))?;
-        let expires_at = now.checked_add(self.retention).ok_or_else(|| {
-            "Confirmation redemption retention exceeds the server clock range".to_string()
+        let mut redeemed = self.redeemed.lock().map_err(|error| {
+            tracing::error!(%error, "Confirmation redemption store lock is unavailable");
+            ConfirmationError::StateUnavailable
         })?;
+        let expires_at = now
+            .checked_add(self.retention)
+            .ok_or(ConfirmationError::StateUnavailable)?;
         redeemed.retain(|_digest, recorded_expiry| *recorded_expiry > now);
         match redeemed.entry(digest) {
-            Entry::Occupied(_) => Err(
-                "Confirmation was already used; stage a fresh order before submitting again"
-                    .to_string(),
-            ),
+            Entry::Occupied(_) => Err(ConfirmationError::AlreadyConsumed),
             Entry::Vacant(entry) => {
                 entry.insert(expires_at);
                 Ok(())
@@ -374,10 +362,6 @@ impl OrderRedemptionStore {
 }
 
 #[cfg(test)]
-#[expect(
-    clippy::assertions_on_result_states,
-    reason = "these Confirmation tests intentionally assert accepted and rejected Result states"
-)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -602,12 +586,19 @@ mod tests {
         store.consume_at("live", live_at).unwrap();
         store.consume_at("trigger", prune_at).unwrap();
         store.consume_at("expired", prune_at).unwrap();
-        assert!(
-            store
-                .consume_at("live", prune_at)
-                .unwrap_err()
-                .contains("already used")
-        );
+        assert!(matches!(
+            store.consume_at("live", prune_at).unwrap_err(),
+            ConfirmationError::AlreadyConsumed
+        ));
+    }
+
+    #[test]
+    fn redemption_retention_clock_overflow_is_state_unavailable() {
+        let store = OrderRedemptionStore::new(Duration::MAX);
+        assert!(matches!(
+            store.consume_at("state", Instant::now()),
+            Err(ConfirmationError::StateUnavailable)
+        ));
     }
 
     #[test]
@@ -807,8 +798,89 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(error.contains("already used"));
+        assert!(matches!(error, ConfirmationError::AlreadyConsumed));
         assert_eq!(submissions.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn missing_round_state_or_response_is_typed_and_does_not_submit() {
+        let confirmation = confirmation(ORDER_CONFIRMATION_TTL);
+        let missing_state = confirmation
+            .advance_with(
+                "principal-a",
+                "place_stock_order",
+                stock_intent(),
+                ConfirmationRound {
+                    request_state: None,
+                    input_responses: Some(response(ElicitationAction::Accept)),
+                },
+                |_| async { panic!("response without state must not prepare") },
+                |_| async { panic!("response without state must not submit") },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(missing_state, ConfirmationError::MissingRoundData));
+
+        let request_state = stage_stock(&confirmation).await;
+        for input_responses in [None, Some(InputResponses::new())] {
+            let missing_response = confirmation
+                .advance_with(
+                    "principal-a",
+                    "place_stock_order",
+                    stock_intent(),
+                    ConfirmationRound {
+                        request_state: Some(request_state.clone()),
+                        input_responses,
+                    },
+                    |_| async { panic!("resumed round must not prepare") },
+                    |_| async { panic!("missing response must not submit") },
+                )
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                missing_response,
+                ConfirmationError::MissingRoundData
+            ));
+        }
+
+        confirmation
+            .advance_with(
+                "principal-a",
+                "place_stock_order",
+                stock_intent(),
+                ConfirmationRound {
+                    request_state: Some(request_state),
+                    input_responses: Some(response(ElicitationAction::Accept)),
+                },
+                |_| async { panic!("resumed round must not prepare") },
+                |_| async { Ok(submitted_stock()) },
+            )
+            .await
+            .expect("corrected response submits");
+    }
+
+    #[tokio::test]
+    async fn preparation_failure_preserves_typed_core_source() {
+        let error = confirmation(ORDER_CONFIRMATION_TTL)
+            .advance_with(
+                "principal-a",
+                "place_stock_order",
+                stock_intent(),
+                ConfirmationRound {
+                    request_state: None,
+                    input_responses: None,
+                },
+                |_| async { Err(RhoodError::InvalidOrder("quantity is invalid".to_string())) },
+                |_| async { panic!("failed preparation must not submit") },
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ConfirmationError::PreparationFailure(RhoodError::InvalidOrder(ref message))
+                if message == "quantity is invalid"
+        ));
     }
 
     #[tokio::test]
@@ -825,11 +897,22 @@ mod tests {
                     input_responses: Some(response(ElicitationAction::Accept)),
                 },
                 |_| async { panic!("resumed round must not prepare") },
-                |_| async { Err("submission uncertain".to_string()) },
+                |_| async {
+                    Err(RhoodError::SubmissionUncertain {
+                        client_ref: "stock-client-ref".to_string(),
+                        message: "connection closed".to_string(),
+                    })
+                },
             )
             .await
             .unwrap_err();
-        assert_eq!(error, "submission uncertain");
+        assert!(matches!(
+            error,
+            ConfirmationError::SubmissionFailure(RhoodError::SubmissionUncertain {
+                ref client_ref,
+                ..
+            }) if client_ref == "stock-client-ref"
+        ));
 
         let replay = confirmation
             .advance_with(
@@ -845,7 +928,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(replay.contains("already used"));
+        assert!(matches!(replay, ConfirmationError::AlreadyConsumed));
     }
 
     #[tokio::test]
@@ -860,14 +943,18 @@ mod tests {
                     stock_intent(),
                     ConfirmationRound {
                         request_state: Some(request_state.clone()),
-                        input_responses: Some(response(action)),
+                        input_responses: Some(response(action.clone())),
                     },
                     |_| async { panic!("terminal round must not prepare") },
                     |_| async { panic!("decline or cancel must not submit") },
                 )
                 .await
                 .unwrap_err();
-            assert!(error.contains("was not submitted"));
+            assert!(matches!(
+                (action, error),
+                (ElicitationAction::Decline, ConfirmationError::Declined)
+                    | (ElicitationAction::Cancel, ConfirmationError::Cancelled)
+            ));
 
             let replay = confirmation
                 .advance_with(
@@ -883,7 +970,7 @@ mod tests {
                 )
                 .await
                 .unwrap_err();
-            assert!(replay.contains("already used"));
+            assert!(matches!(replay, ConfirmationError::AlreadyConsumed));
         }
     }
 
@@ -910,7 +997,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(error.contains("correct the response"));
+        assert!(matches!(error, ConfirmationError::MalformedResponse));
 
         confirmation
             .advance_with(
@@ -955,7 +1042,7 @@ mod tests {
                 )
                 .await
                 .unwrap_err();
-            assert!(error.contains("no longer valid"));
+            assert!(matches!(error, ConfirmationError::InvalidState));
         }
     }
 
@@ -978,7 +1065,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(error.contains("expired"));
+        assert!(matches!(error, ConfirmationError::Expired));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1106,6 +1193,9 @@ mod tests {
         let (parts, _) = request.into_parts();
         let mut extensions = Extensions::new();
         extensions.insert(parts);
-        assert!(request_principal(&extensions).is_err());
+        assert!(matches!(
+            request_principal(&extensions),
+            Err(ConfirmationError::PrincipalUnavailable)
+        ));
     }
 }
