@@ -31,6 +31,3 @@ pub(crate) use rate_limit::{FallbackPrincipal, ToolRateLimiter};
 
 #[cfg(test)]
 pub(crate) use server::TOOLS_LIST_PAGE_SIZE;
-/// Tools gated off when the server runs in read-only mode.
-#[cfg(test)]
-pub(crate) use types::WRITE_TOOLS;

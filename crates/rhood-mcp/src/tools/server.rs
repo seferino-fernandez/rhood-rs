@@ -19,7 +19,6 @@ use crate::tools::schema::{close_object_map, enforce_response_budget};
 
 use super::handler::RhoodTools;
 use super::rate_limit::{FallbackPrincipal, ToolClass};
-use super::types::WRITE_TOOLS;
 
 const SERVER_INFO_META_KEY: &str = "io.modelcontextprotocol/serverInfo";
 // Tool definitions carry full JSON schemas, so 20 materially bounds each
@@ -27,6 +26,38 @@ const SERVER_INFO_META_KEY: &str = "io.modelcontextprotocol/serverInfo";
 pub(crate) const TOOLS_LIST_PAGE_SIZE: usize = 20;
 const TOOLS_LIST_READ_ONLY_SCOPE: &str = "tools/list:read-only";
 const TOOLS_LIST_WRITABLE_SCOPE: &str = "tools/list:writable";
+
+/// The authorization and rate-limit class derived from a registered tool's
+/// generated MCP annotations. Missing metadata fails closed as a write.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ToolPolicy {
+    Read,
+    Write,
+}
+
+impl ToolPolicy {
+    fn from_tool(tool: &Tool) -> Self {
+        match tool
+            .annotations
+            .as_ref()
+            .and_then(|annotations| annotations.read_only_hint)
+        {
+            Some(true) => Self::Read,
+            Some(false) | None => Self::Write,
+        }
+    }
+
+    fn is_write(self) -> bool {
+        self == Self::Write
+    }
+
+    fn rate_class(self) -> ToolClass {
+        match self {
+            Self::Read => ToolClass::Read,
+            Self::Write => ToolClass::Write,
+        }
+    }
+}
 
 /// Adds the authoritative rhood-mcp identity to a tool result's existing metadata.
 fn insert_server_info(meta: &mut Option<MetaObject>, server_info: &Implementation) {
@@ -62,13 +93,18 @@ fn close_tool_schemas(tool: &mut Tool) {
 /// marker is present, a missing or malformed carrier denies the write tool.
 fn oauth_write_scope_error(
     tool_name: &str,
+    policy: Option<ToolPolicy>,
     context: &RequestContext<RoleServer>,
 ) -> Option<McpError> {
-    oauth_write_scope_error_for_parts(tool_name, context.extensions.get::<Parts>())
+    oauth_write_scope_error_for_parts(tool_name, policy, context.extensions.get::<Parts>())
 }
 
-fn oauth_write_scope_error_for_parts(tool_name: &str, parts: Option<&Parts>) -> Option<McpError> {
-    if !WRITE_TOOLS.contains(&tool_name) {
+fn oauth_write_scope_error_for_parts(
+    tool_name: &str,
+    policy: Option<ToolPolicy>,
+    parts: Option<&Parts>,
+) -> Option<McpError> {
+    if !policy.is_some_and(ToolPolicy::is_write) {
         return None;
     }
 
@@ -183,7 +219,7 @@ impl ServerHandler for RhoodTools {
             self.tool_router
                 .list_all()
                 .into_iter()
-                .filter(|tool| !WRITE_TOOLS.contains(&tool.name.as_ref()))
+                .filter(|tool| !ToolPolicy::from_tool(tool).is_write())
                 .collect()
         } else {
             self.tool_router.list_all()
@@ -228,23 +264,25 @@ impl ServerHandler for RhoodTools {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
         tracing::info!(tool = %request.name, "call_tool");
-        if self.read_only && WRITE_TOOLS.contains(&request.name.as_ref()) {
+        let policy = self
+            .tool_router
+            .get(request.name.as_ref())
+            .map(ToolPolicy::from_tool);
+        if self.read_only && policy.is_some_and(ToolPolicy::is_write) {
             return Err(McpError::new(
                 ErrorCode::INVALID_PARAMS,
                 format!("Tool '{}' is disabled in read-only mode", request.name),
                 None,
             ));
         }
-        if let Some(error) = oauth_write_scope_error(&request.name, &context) {
+        if let Some(error) = oauth_write_scope_error(&request.name, policy, &context) {
             return Err(error);
         }
         let tool_name = request.name.to_string();
         let server_info = self.get_info().server_info;
-        let class = if WRITE_TOOLS.contains(&request.name.as_ref()) {
-            ToolClass::Write
-        } else {
-            ToolClass::Read
-        };
+        // Unknown names still reach rmcp's dispatcher, but never receive the
+        // more permissive read budget before it rejects them.
+        let class = policy.unwrap_or(ToolPolicy::Write).rate_class();
         let principal = rate_limit_principal(&context, self.fallback_principal)?;
         match self.rate_limiter.check(&principal, class) {
             Ok(None) => {}
@@ -307,10 +345,10 @@ impl ServerHandler for RhoodTools {
     }
 
     fn get_tool(&self, name: &str) -> Option<Tool> {
-        if self.read_only && WRITE_TOOLS.contains(&name) {
+        let mut tool = self.tool_router.get(name).cloned()?;
+        if self.read_only && ToolPolicy::from_tool(&tool).is_write() {
             return None;
         }
-        let mut tool = self.tool_router.get(name).cloned()?;
         close_tool_schemas(&mut tool);
         Some(tool)
     }
@@ -329,7 +367,7 @@ mod tests {
         model::{
             CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock,
             CreateTaskResult, InputRequiredResult, ListToolsResult, MetaObject, NumberOrString,
-            PaginatedRequestParams, Task, TaskStatus, Tool,
+            PaginatedRequestParams, Task, TaskStatus, Tool, ToolAnnotations,
         },
         service::{RequestContext, RunningService, serve_directly},
     };
@@ -337,7 +375,7 @@ mod tests {
 
     use super::{
         FallbackPrincipal, Implementation, McpError, OAuthAuthenticated, OAuthPrincipal, Parts,
-        RhoodTools, SERVER_INFO_META_KEY, TOOLS_LIST_PAGE_SIZE, insert_server_info,
+        RhoodTools, SERVER_INFO_META_KEY, TOOLS_LIST_PAGE_SIZE, ToolPolicy, insert_server_info,
         oauth_write_scope_error_for_parts, rate_limit_principal_for_parts,
     };
     use crate::config::McpConfig;
@@ -377,6 +415,14 @@ mod tests {
             parts.extensions.insert(principal);
         }
         parts
+    }
+
+    fn policy_for_registered_tool(tools: &RhoodTools, name: &str) -> ToolPolicy {
+        tools
+            .tool_router
+            .get(name)
+            .map(ToolPolicy::from_tool)
+            .unwrap_or_else(|| panic!("{name} must be registered"))
     }
 
     fn meta_with_marker(marker: &str) -> Option<MetaObject> {
@@ -490,12 +536,14 @@ mod tests {
     fn read_scope_rejects_write_tool() {
         let tools = tools_with(false);
         assert!(tools.get_tool("place_stock_order").is_some());
+        let policy = policy_for_registered_tool(&tools, "place_stock_order");
         let parts = oauth_parts(Some(OAuthPrincipal {
             principal: "rhood_cid_read_only".to_string(),
             scopes: vec!["read".to_string()],
         }));
 
-        let error = oauth_write_scope_error_for_parts("place_stock_order", Some(&parts));
+        let error =
+            oauth_write_scope_error_for_parts("place_stock_order", Some(policy), Some(&parts));
         assert!(error.is_some(), "read scope must reject place_stock_order");
         let Some(error) = error else {
             return;
@@ -507,29 +555,65 @@ mod tests {
 
     #[test]
     fn read_scope_allows_non_write_tool() {
+        let tools = tools_with(false);
+        let policy = policy_for_registered_tool(&tools, "get_account_profile");
         let parts = oauth_parts(Some(OAuthPrincipal {
             principal: "rhood_cid_read_only".to_string(),
             scopes: vec!["read".to_string()],
         }));
 
-        assert!(oauth_write_scope_error_for_parts("get_account_profile", Some(&parts)).is_none());
+        assert!(
+            oauth_write_scope_error_for_parts("get_account_profile", Some(policy), Some(&parts))
+                .is_none()
+        );
     }
 
     #[test]
     fn write_scope_allows_write_tool() {
+        let tools = tools_with(false);
+        let policy = policy_for_registered_tool(&tools, "place_stock_order");
         let parts = oauth_parts(Some(OAuthPrincipal {
             principal: "rhood_cid_read_write".to_string(),
             scopes: vec!["read".to_string(), "write".to_string()],
         }));
 
-        assert!(oauth_write_scope_error_for_parts("place_stock_order", Some(&parts)).is_none());
+        assert!(
+            oauth_write_scope_error_for_parts("place_stock_order", Some(policy), Some(&parts))
+                .is_none()
+        );
     }
 
     #[test]
     fn oauth_request_without_principal_fails_closed_for_write_tool() {
+        let tools = tools_with(false);
+        let policy = policy_for_registered_tool(&tools, "place_stock_order");
         let parts = oauth_parts(None);
 
-        assert!(oauth_write_scope_error_for_parts("place_stock_order", Some(&parts)).is_some());
+        assert!(
+            oauth_write_scope_error_for_parts("place_stock_order", Some(policy), Some(&parts))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn missing_policy_metadata_fails_closed_as_write() {
+        let without_annotations = Tool::new(
+            "missing_annotations",
+            "Test tool with no annotations",
+            Arc::new(Default::default()),
+        );
+        let without_hint = Tool::new(
+            "missing_hint",
+            "Test tool with no read-only hint",
+            Arc::new(Default::default()),
+        )
+        .with_annotations(ToolAnnotations::new());
+
+        assert_eq!(
+            ToolPolicy::from_tool(&without_annotations),
+            ToolPolicy::Write
+        );
+        assert_eq!(ToolPolicy::from_tool(&without_hint), ToolPolicy::Write);
     }
 
     #[tokio::test]
@@ -542,7 +626,8 @@ mod tests {
                 "place_stock_order",
                 "Count direct stdio dispatches",
                 Arc::new(Default::default()),
-            ),
+            )
+            .with_annotations(ToolAnnotations::new().read_only(false)),
             move |_context| {
                 counted_dispatches.fetch_add(1, Ordering::SeqCst);
                 Box::pin(async move {
