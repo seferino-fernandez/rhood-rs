@@ -162,7 +162,6 @@ mod router_tests {
     use super::close_object_schemas;
     use crate::config::McpConfig;
     use crate::tools::ToolRateLimiter;
-    use crate::tools::WRITE_TOOLS;
     use crate::tools::handler::RhoodTools;
     use rhood_core::{RhoodConfig, RobinhoodClient};
     use serde_json::Value;
@@ -242,13 +241,29 @@ mod router_tests {
 
         let read_only = tools_with(true);
         let read_write = tools_with(false);
-        for write_tool in WRITE_TOOLS {
+        let write_tools: Vec<_> = read_write
+            .tool_router
+            .list_all()
+            .into_iter()
+            .filter(|tool| {
+                tool.annotations
+                    .as_ref()
+                    .and_then(|annotations| annotations.read_only_hint)
+                    == Some(false)
+            })
+            .map(|tool| tool.name.to_string())
+            .collect();
+        assert!(
+            !write_tools.is_empty(),
+            "the live router must declare at least one write tool"
+        );
+        for write_tool in write_tools {
             assert!(
-                read_only.get_tool(write_tool).is_none(),
+                read_only.get_tool(&write_tool).is_none(),
                 "read-only mode must not resolve `{write_tool}`"
             );
             assert!(
-                read_write.get_tool(write_tool).is_some(),
+                read_write.get_tool(&write_tool).is_some(),
                 "read-write mode must resolve `{write_tool}`"
             );
         }
@@ -258,6 +273,33 @@ mod router_tests {
                 .is_some(),
             "read-only mode must resolve read-only aggregate option positions"
         );
+    }
+
+    #[test]
+    fn every_registered_tool_has_policy_metadata_and_a_description() {
+        let tools = tools_with(false);
+        let router_tools = tools.tool_router.list_all();
+        assert!(
+            !router_tools.is_empty(),
+            "the live router must register at least one tool"
+        );
+        for tool in router_tools {
+            assert!(
+                tool.annotations
+                    .as_ref()
+                    .and_then(|annotations| annotations.read_only_hint)
+                    .is_some(),
+                "{} must declare annotations.read_only_hint",
+                tool.name
+            );
+            assert!(
+                tool.description
+                    .as_deref()
+                    .is_some_and(|description| !description.is_empty()),
+                "{} must have a nonempty description",
+                tool.name
+            );
+        }
     }
 
     /// `get_tool` and `list_tools` must return the same document because they share
