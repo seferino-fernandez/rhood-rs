@@ -107,10 +107,9 @@ mod tests {
     use super::{MfaSource, mfa_source};
     use secrecy::SecretString;
 
-    /// BL-87. The old rule skipped the prompt whenever username and password
-    /// were preloaded, so this configuration — the common one, with the two
-    /// long-lived secrets in a password manager and the one-time code typed —
-    /// silently logged in without MFA.
+    /// Skipping the prompt whenever username and password were preloaded meant
+    /// the common configuration - the two long-lived secrets in a password
+    /// manager and the one-time code typed - silently logged in without MFA.
     #[test]
     fn an_unconfigured_secret_is_prompted_for_when_a_terminal_exists() {
         assert!(matches!(mfa_source(None, true), MfaSource::Prompt));

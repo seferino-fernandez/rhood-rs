@@ -245,8 +245,8 @@ mod tests {
         assert_eq!(value[0]["requested_symbol"], "ESM26");
     }
 
-    /// The regression BL-57 was filed for. The view must label each quote with
-    /// the alias core paired it to, never with the alias sitting at the same
+    /// The view must label each quote with the alias core paired it to, never
+    /// with the alias sitting at the same
     /// index in the original request. Here the pairs arrive in an order that
     /// disagrees with any plausible request order, and every quote carries a
     /// wire symbol that identifies which alias it belongs to.

@@ -46,7 +46,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(options)* Expose equity contract search
 - *(core)* Harden the OAuth token cache file permissions
 - *(config)* Refuse secret-bearing config files with loose permissions
-- created BACKLOG.md, enabled lints
+- Enable the workspace lint policy
 
 ### Fixed
 
@@ -57,7 +57,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(core)* reject malformed numeric environment overrides
 - Extract API error diagnostics once, render them per surface
 - *(core)* Check HTTP status before trusting the login payload
-- *(core)* Repair main after a cross-order interaction between BL-25 and BL-9
+- *(core)* Repair main after an interaction between two concurrent changes
 - *(core)* Keep credentials out of logs and errors without losing diagnostics
 - *(core)* Report per-order results from the cancel-all methods
 

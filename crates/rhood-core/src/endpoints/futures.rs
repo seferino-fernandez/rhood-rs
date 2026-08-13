@@ -79,9 +79,10 @@ impl RobinhoodClient {
         let wrapper: FuturesQuoteDataWrapper = self
             .get_futures_with_params(&self.api_url(paths::FUTURES_QUOTES), &params)
             .await?;
-        // ADR-0004 rule 1 applies to single-item requests too. "We only asked
-        // for one" is exactly the reasoning that left this method trusting
-        // response position while the batch method below correlates by ID.
+        // Correlating by an identifier both sides carry applies to single-item
+        // requests too. "We only asked for one" is exactly the reasoning that
+        // left this method trusting response position while the batch method
+        // below correlates by ID.
         let quote = wrapper
             .data
             .into_iter()
@@ -340,9 +341,9 @@ mod tests {
         client.get_futures_quote(symbol).await
     }
 
-    /// ADR-0004 rule 1 covers single-item requests. This is the sibling the
-    /// BL-57 fix left behind: the batch method below correlates by instrument
-    /// ID, and for a day this one three lines above still took the first row.
+    /// A single-item request is still a correlation. The batch method below
+    /// correlates by instrument ID, and this sibling three lines above it was
+    /// left taking the first row on trust when that fix landed.
     #[tokio::test]
     async fn single_futures_quote_rejects_an_instrument_it_did_not_request() {
         let error = single_quote_against(
@@ -398,10 +399,9 @@ mod tests {
         assert_eq!(quote.last_trade_price.as_deref(), Some("5182.75"));
     }
 
-    /// The defect BL-57 was filed for. The upstream batch answers in an order
-    /// that disagrees with the request, which the previous positional pairing
-    /// would have silently mislabelled -- attaching NQ's prices to ES, and
-    /// shifting every alias after it.
+    /// The upstream batch answers in an order that disagrees with the request,
+    /// which the previous positional pairing would have silently mislabelled --
+    /// attaching NQ's prices to ES, and shifting every alias after it.
     #[tokio::test]
     async fn futures_quotes_pair_by_instrument_id_not_response_order() {
         let quotes = quotes_against(

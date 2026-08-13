@@ -26,9 +26,9 @@ const MAX_PAGES_FOLLOWED: usize = 1_000;
 
 /// Records the pagination links already followed in one call.
 ///
-/// ADR-0004 rule 3: a loop whose continuation is decided by response content
-/// carries its own bound. A peer returning a `next` that points at a page
-/// already fetched must produce an error rather than an unbounded accumulation.
+/// A loop whose continuation is decided by response content carries its own
+/// bound. A peer returning a `next` that points at a page already fetched must
+/// produce an error rather than an unbounded accumulation.
 struct PageTrail {
     seen: HashSet<String>,
 }
@@ -243,7 +243,7 @@ impl RobinhoodClient {
     /// Refuses a pagination link whose host is not one this client is
     /// configured to talk to.
     ///
-    /// ADR-0004 rule 2: a URL taken from a response body is untrusted, and
+    /// A URL taken from a response body is untrusted, and
     /// [`Self::send_authenticated_get`] attaches the live bearer token to
     /// whatever it is given. The test is deliberately against this client's own
     /// configured hosts rather than the vendor's topology — a same-origin check
@@ -701,8 +701,8 @@ mod tests {
         (dir, client)
     }
 
-    /// ADR-0004 rule 2. The bearer token must never reach a host this client is
-    /// not configured to talk to, and the proof is that the foreign server
+    /// The bearer token must never reach a host this client is not configured
+    /// to talk to, and the proof is that the foreign server
     /// receives no request at all rather than one without a header.
     #[tokio::test]
     async fn pagination_refuses_a_next_link_outside_the_configured_hosts() {
@@ -780,7 +780,7 @@ mod tests {
         assert_eq!(values, vec![1, 2]);
     }
 
-    /// ADR-0004 rule 3: the peer does not get to decide when the loop ends.
+    /// The peer does not get to decide when the loop ends.
     #[tokio::test]
     async fn pagination_refuses_a_repeated_page_link() {
         let server = MockServer::start().await;

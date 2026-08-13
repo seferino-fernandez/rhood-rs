@@ -342,8 +342,8 @@ impl RobinhoodClient {
         let resp: ResultsResponse<Instrument> = self
             .get_with_params(&self.api_url(paths::INSTRUMENTS), &params)
             .await?;
-        // ADR-0004 rule 1: the query is a server-side filter, but a record is
-        // attributed to this request only by an identifier both sides carry.
+        // The query is a server-side filter, but a record is attributed to this
+        // request only by an identifier both sides carry.
         // Taking the first row on trust is how an order gets staged against one
         // instrument while its Order Summary names another.
         let Some(instrument) = resp.results.into_iter().next() else {
@@ -1259,8 +1259,8 @@ mod tests {
         client.get_instrument_by_symbol("AAPL").await
     }
 
-    /// ADR-0004 rule 1. The query is a server-side filter, and this is the test
-    /// that says we do not take its word for it: a mismatched first row must
+    /// The query is a server-side filter, and this is the test that says we do
+    /// not take its word for it: a mismatched first row must
     /// fail rather than reach order preparation, where its URL would go into
     /// the broker payload under the requested symbol's name.
     #[tokio::test]
