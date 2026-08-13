@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Account-sensitive methods now require a canonical account number instead of selecting the first standard account.
 - Replace immediate stock and option placement methods and stock-only preparation types with `OrderIntent`, `StagedOrder`, typed `OrderSummary`, and `SubmittedOrder`.
+- Order symbol validation now accepts 1 to 12 ASCII letters, numbers, or periods, where the retired MCP adapter accepted at most 6 characters. The bound is a pre-flight sanity check, not a brokerage invariant: unknown symbols are still rejected by instrument resolution. Seven-character symbols such as warrant tickers are now accepted before dispatch.
 - Stock orders now send form version 7, a call-scoped client reference, derived session flags, and strict quote collars. Dollar buys convert to good-for-day fractional shares using the current ask.
 - Authenticated GET requests now share paced starts and 429 cooldowns across client clones, retry connection errors, timeouts, and bounded rate limits up to three total attempts by default, and expose strict TOML/environment controls under `HttpConfig`.
 - Replace the prior instrument-identity source and output contract with core-owned enrichment. Positions, dividends, stock orders, news, tags, and splits retain Instrument References, preserve Wire Symbols, and expose aligned optional Ticker Symbols. Use strict `resolve_instrument_symbols` for explicit resolution; normal reads enrich best-effort.

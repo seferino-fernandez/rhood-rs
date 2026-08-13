@@ -358,7 +358,7 @@ impl RhoodTools {
 #[expect(
     clippy::assertions_on_result_states,
     clippy::float_cmp,
-    reason = "these adapter tests intentionally assert accepted and rejected Result states"
+    reason = "these adapter tests assert rejected Result states without unwrapping, and compare exactly parsed decimal parameter values"
 )]
 mod tests {
     use rhood_core::RhoodError;

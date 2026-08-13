@@ -741,8 +741,8 @@ mod tests {
     use super::*;
     use crate::RhoodError;
     use crate::models::order::{
-        MarketHours as OrderMarketHours, OrderAmount, OrderType, Side, StockOrder,
-        StockOrderIntent, TimeInForce, Trigger,
+        MarketHours as OrderMarketHours, OptionOrderIntent, OptionPositionEffect, OrderAmount,
+        OrderType, Side, StockOrder, StockOrderIntent, TimeInForce, Trigger,
     };
 
     #[test]
@@ -974,6 +974,87 @@ mod tests {
             market_hours: OrderMarketHours::RegularHours,
         };
         assert!(validate_stock_order(&req).is_ok());
+    }
+
+    // Symbol validation lives in core because adapters must not own brokerage
+    // invariants, but the bound is a pre-flight sanity check rather than a
+    // brokerage rule: unknown symbols are rejected by instrument resolution
+    // regardless. The literals below are deliberately spelled out instead of
+    // derived from the production limit, so a change to that limit turns these
+    // red rather than following it.
+    fn intent_for_symbol(symbol: &str) -> StockOrderIntent {
+        StockOrderIntent {
+            account_number: Some("ABC123".to_string()),
+            symbol: symbol.to_string(),
+            amount: OrderAmount::Quantity(10.0),
+            side: Side::Buy,
+            order_type: OrderType::Market,
+            limit_price: None,
+            trigger: Trigger::Immediate,
+            stop_price: None,
+            time_in_force: TimeInForce::Gtc,
+            market_hours: OrderMarketHours::RegularHours,
+        }
+    }
+
+    #[test]
+    fn valid_symbols_accepted() {
+        // `SPAQ.WS` is the case the retired six-character adapter limit would
+        // have wrongly rejected: a real seven-character warrant ticker.
+        for symbol in ["F", "AAPL", "GOOGL", "BRK.A", "SPAQ.WS"] {
+            assert!(
+                validate_stock_order(&intent_for_symbol(symbol)).is_ok(),
+                "{symbol} must be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_symbol_rejected() {
+        let err = validate_stock_order(&intent_for_symbol(""));
+        assert!(err.is_err());
+        assert!(err.unwrap_err().to_string().contains("symbol"));
+    }
+
+    #[test]
+    fn twelve_character_symbol_accepted() {
+        assert!(validate_stock_order(&intent_for_symbol("ABCDEFGHIJKL")).is_ok());
+    }
+
+    #[test]
+    fn thirteen_character_symbol_rejected() {
+        let err = validate_stock_order(&intent_for_symbol("ABCDEFGHIJKLM"));
+        assert!(err.is_err());
+        assert!(err.unwrap_err().to_string().contains("1 to 12"));
+    }
+
+    #[test]
+    fn symbol_with_special_chars_rejected() {
+        for symbol in ["AA PL", "AA-PL", "AA$PL", "AA/PL", "AAPL\n"] {
+            assert!(
+                validate_stock_order(&intent_for_symbol(symbol)).is_err(),
+                "{symbol:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn option_orders_share_the_stock_symbol_rule() {
+        let intent = |symbol: &str| OptionOrderIntent {
+            account_number: Some("ABC123".to_string()),
+            symbol: symbol.to_string(),
+            expiration_date: "2026-12-18".to_string(),
+            strike_price: 150.0,
+            option_type: "call".to_string(),
+            side: Side::Buy,
+            quantity: 1.0,
+            limit_price: 2.5,
+            position_effect: OptionPositionEffect::Open,
+            time_in_force: TimeInForce::Gtc,
+        };
+        assert!(validate_option_order(&intent("ABCDEFGHIJKL")).is_ok());
+        assert!(validate_option_order(&intent("ABCDEFGHIJKLM")).is_err());
+        assert!(validate_option_order(&intent("AA PL")).is_err());
     }
 
     #[test]
