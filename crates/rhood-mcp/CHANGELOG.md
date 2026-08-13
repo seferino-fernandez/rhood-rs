@@ -7,27 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-
-- Add `get_accounts` and optional canonical account selectors to account-sensitive tools.
-- Add the read-only, no-parameter `get_futures_positions` tool with full raw-object preservation.
-- Add the read-only, account-filtered `get_aggregate_option_positions` tool with bounded paging.
-- Add read-only `get_portfolio_performance` for the raw Bonfire returns chart model.
-- Add read-only IPO Access list and card tools with tolerant raw output.
-
-### Changed
-
-- Stock and option elicitation now seal the exact core Staged Order, including the selected account, resolved instrument or contract, broker payload, client reference, typed summary, and expiry.
-- One Confirmation module owns Principal binding, effective TTL, MRTR response handling, and atomic terminal redemption. Accept, decline, and cancel consume state; malformed responses remain correctable until expiry.
-- Multi-account requests fail before staging unless `account_number` is supplied. Stock state expires after 60 seconds, option state after 600 seconds, and submission timeouts return `submission_uncertain`.
-- Position, dividend, stock-order, news, tag, and split outputs now serialize core-owned Instrument Identity Enrichment. The MCP adapters do not resolve Instrument References, and aligned research symbol arrays use `null` for misses.
-- The order-expiry error code changed from `prepared_order_expired` to `staged_order_expired`; this is a breaking change for clients matching on the code.
-
-### Fixed
-
-- `get_futures_quotes` no longer attaches `requested_symbol` by response position. Each quote now carries the alias core correlated it to by instrument ID, so a reordered or partial upstream batch can no longer label a quote with another contract's symbol and shift every alias after it. A requested symbol the batch does not answer is simply absent from the results.
-- Tool errors no longer collapse unmapped core failures into the generic code `error`. Order validation now reports `invalid_order`, and challenge, token-expiry, device-verification, network, and timeout failures each report their own code. Serialization and filesystem failures report `internal_error` and no longer echo their source.
-
 ## [0.2.0](https://github.com/seferino-fernandez/rhood-rs/compare/rhood-mcp-v0.1.4...rhood-mcp-v0.2.0) - 2026-08-11
 
 ### Added

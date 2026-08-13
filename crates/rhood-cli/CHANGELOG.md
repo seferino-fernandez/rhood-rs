@@ -7,24 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-
-- Add global `--account` selection and `account list` discovery for individual and IRA accounts.
-- Add `rhood futures positions` with compact raw-object table and CSV rows and raw-array JSON output.
-- Add `rhood option aggregate-positions` for account-filtered aggregate option strategies.
-- Add `rhood account performance` for the raw Bonfire returns chart model.
-- Add read-only `rhood ipo list` and `rhood ipo cards` commands.
-
-### Changed
-
-- Stock orders use core's unified Staged Order interface and render its typed summary, including resolved quantity, collar quote, client reference, and form version.
-- Dollar buys require at least $1 and use a good-for-day fractional-share estimate.
-- Tag JSON now preserves Instrument References and the core-provided, positionally aligned optional Ticker Symbol array. Human tag output falls back to the original Instrument Reference for an unresolved symbol.
-
-### Fixed
-
-- Fundamentals table output now uses each returned record's Ticker Symbol, preventing an omitted earlier result from mislabeling a later record.
-
 ## [0.2.0](https://github.com/seferino-fernandez/rhood-rs/compare/v0.1.4...v0.2.0) - 2026-08-11
 
 ### Added

@@ -80,6 +80,15 @@ mutually non-overlapping values remove that whole class.
 - Use [Conventional Commits](https://www.conventionalcommits.org/) for commit
   messages and PR titles (e.g. `feat:`, `fix:`, `docs:`, `refactor:`). Releases
   are automated with [release-plz](https://release-plz.dev/) and rely on this.
+- Do not edit `CHANGELOG.md` or any `version` field by hand. release-plz owns
+  both and derives them from commit messages; a hand-written entry is published
+  twice, once as written and once as generated from the same commit.
+- A change that removes or alters a public item needs a `BREAKING CHANGE:`
+  footer on its commit. That footer is the only thing that moves the version,
+  so without it a removed API ships as a patch release.
+- Write commit messages for someone who has only this repository. Internal
+  issue or decision-record numbers do not resolve for anyone else, and
+  release-plz copies commit subjects verbatim into the public changelog.
 - Ensure `fmt`, `clippy`, and the test suite all pass locally.
 - Never commit real credentials, tokens, MFA secrets, or account identifiers
   in code, fixtures, or examples. Use synthetic values (the existing tests use
