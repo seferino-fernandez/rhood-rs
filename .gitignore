@@ -17,18 +17,3 @@ target/
 .env.development
 .env.production
 config.toml
-
-# Local planning documents
-/CONTEXT.md
-/HANDOFF.md
-/docs/BACKLOG.md
-/docs/adr/
-/docs/HANDOFF.md
-/docs/plans/
-/docs/specs/
-/docs/superpowers/plans/
-/docs/superpowers/specs/
-
-# Private research and temporary research inputs
-/docs/research/
-/docs/references/
