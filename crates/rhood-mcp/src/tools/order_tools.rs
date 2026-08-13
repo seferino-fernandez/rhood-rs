@@ -5,13 +5,64 @@ use rmcp::handler::server::tool::{InputResponses as ToolInputResponses, RequestS
 use rmcp::model::{CallToolResponse, Extensions};
 use rmcp::{Peer, RoleServer, handler::server::wrapper::Parameters, tool, tool_router};
 
-use super::confirmation::{ConfirmationRound, request_principal};
+use super::confirmation::{ConfirmationError, ConfirmationRound};
 use super::handler::RhoodTools;
 use super::params::*;
 use super::types::format_tool_error;
 
 const STOCK_ORDER_TOOL: &str = "place_stock_order";
 const OPTION_ORDER_TOOL: &str = "place_option_order";
+
+fn format_confirmation_error(error: &ConfirmationError) -> String {
+    let (code, message) = match error {
+        ConfirmationError::MissingRoundData => (
+            "confirmation_missing_round_data",
+            "Confirmation request state or response is missing; stage the order again and answer the elicitation",
+        ),
+        ConfirmationError::MalformedResponse => (
+            "confirmation_malformed_response",
+            "Trade Confirmation response is invalid; correct the response and retry",
+        ),
+        ConfirmationError::Declined => (
+            "confirmation_declined",
+            "Trade Confirmation was declined; the order was not submitted",
+        ),
+        ConfirmationError::Cancelled => (
+            "confirmation_cancelled",
+            "Trade Confirmation was cancelled; the order was not submitted",
+        ),
+        ConfirmationError::Expired => (
+            "confirmation_expired",
+            "Confirmation expired; stage the order again before submitting",
+        ),
+        ConfirmationError::InvalidState => (
+            "confirmation_invalid_state",
+            "Confirmation is no longer valid; stage the order again",
+        ),
+        ConfirmationError::AlreadyConsumed => (
+            "confirmation_already_consumed",
+            "Confirmation was already used; stage a fresh order before submitting again",
+        ),
+        ConfirmationError::StateUnavailable => (
+            "confirmation_state_unavailable",
+            "Confirmation state is unavailable; stage the order again later",
+        ),
+        ConfirmationError::PrincipalUnavailable => (
+            "confirmation_principal_unavailable",
+            "Authenticated OAuth request has no Principal; authenticate again before staging the order",
+        ),
+        ConfirmationError::PreparationFailure(source)
+        | ConfirmationError::SubmissionFailure(source) => return format_tool_error(source),
+        ConfirmationError::InternalFailure(detail) => {
+            tracing::error!(%detail, "MCP order Confirmation failed internally");
+            (
+                "confirmation_internal_failure",
+                "Confirmation could not be completed because of an internal server error",
+            )
+        }
+    };
+    serde_json::json!({ "error": code, "message": message }).to_string()
+}
 
 fn stock_order_intent(params: PlaceStockOrderParams) -> Result<OrderIntent, String> {
     let amount = match (params.quantity, params.dollar_amount) {
@@ -69,13 +120,12 @@ impl RhoodTools {
         ToolInputResponses(input_responses): ToolInputResponses,
         Parameters(params): Parameters<PlaceStockOrderParams>,
     ) -> Result<CallToolResponse, String> {
-        let principal = request_principal(&extensions)?;
         let intent = stock_order_intent(params)?;
         let client = self.ensure_client(&peer).await?;
         self.order_confirmation
             .advance(
                 &client,
-                &principal,
+                &extensions,
                 STOCK_ORDER_TOOL,
                 intent,
                 ConfirmationRound {
@@ -84,6 +134,7 @@ impl RhoodTools {
                 },
             )
             .await
+            .map_err(|error| format_confirmation_error(&error))
     }
 
     #[tool(
@@ -104,13 +155,12 @@ impl RhoodTools {
         ToolInputResponses(input_responses): ToolInputResponses,
         Parameters(params): Parameters<PlaceOptionOrderParams>,
     ) -> Result<CallToolResponse, String> {
-        let principal = request_principal(&extensions)?;
         let intent = option_order_intent(params);
         let client = self.ensure_client(&peer).await?;
         self.order_confirmation
             .advance(
                 &client,
-                &principal,
+                &extensions,
                 OPTION_ORDER_TOOL,
                 intent,
                 ConfirmationRound {
@@ -119,6 +169,7 @@ impl RhoodTools {
                 },
             )
             .await
+            .map_err(|error| format_confirmation_error(&error))
     }
 
     #[tool(
@@ -176,13 +227,137 @@ impl RhoodTools {
     reason = "these adapter tests intentionally assert accepted and rejected Result states"
 )]
 mod tests {
+    use rhood_core::RhoodError;
     use rhood_core::models::option::OptionType;
     use rhood_core::models::order::{
         OptionPositionEffect, OrderIntent, OrderType, Side, TimeInForce,
     };
 
-    use super::{option_order_intent, stock_order_intent};
+    use super::{format_confirmation_error, option_order_intent, stock_order_intent};
+    use crate::tools::confirmation::ConfirmationError;
     use crate::tools::params::{PlaceOptionOrderParams, PlaceStockOrderParams};
+
+    fn rendered_error(error: &ConfirmationError) -> serde_json::Value {
+        serde_json::from_str(&format_confirmation_error(error)).unwrap()
+    }
+
+    #[test]
+    fn confirmation_errors_have_stable_structured_codes_and_messages() {
+        let cases = [
+            (
+                ConfirmationError::MissingRoundData,
+                "confirmation_missing_round_data",
+                "Confirmation request state or response is missing; stage the order again and answer the elicitation",
+            ),
+            (
+                ConfirmationError::MalformedResponse,
+                "confirmation_malformed_response",
+                "Trade Confirmation response is invalid; correct the response and retry",
+            ),
+            (
+                ConfirmationError::Declined,
+                "confirmation_declined",
+                "Trade Confirmation was declined; the order was not submitted",
+            ),
+            (
+                ConfirmationError::Cancelled,
+                "confirmation_cancelled",
+                "Trade Confirmation was cancelled; the order was not submitted",
+            ),
+            (
+                ConfirmationError::Expired,
+                "confirmation_expired",
+                "Confirmation expired; stage the order again before submitting",
+            ),
+            (
+                ConfirmationError::AlreadyConsumed,
+                "confirmation_already_consumed",
+                "Confirmation was already used; stage a fresh order before submitting again",
+            ),
+            (
+                ConfirmationError::StateUnavailable,
+                "confirmation_state_unavailable",
+                "Confirmation state is unavailable; stage the order again later",
+            ),
+            (
+                ConfirmationError::PrincipalUnavailable,
+                "confirmation_principal_unavailable",
+                "Authenticated OAuth request has no Principal; authenticate again before staging the order",
+            ),
+        ];
+
+        for (error, code, message) in cases {
+            assert_eq!(
+                rendered_error(&error),
+                serde_json::json!({ "error": code, "message": message })
+            );
+        }
+    }
+
+    #[test]
+    fn preparation_and_submission_sources_keep_core_rendering() {
+        let preparation = rendered_error(&ConfirmationError::PreparationFailure(
+            RhoodError::InvalidSymbol("NOTREAL".to_string()),
+        ));
+        let submission = rendered_error(&ConfirmationError::SubmissionFailure(
+            RhoodError::ReadOnlyMode,
+        ));
+
+        assert_eq!(preparation["error"], "invalid_symbol");
+        assert_eq!(preparation["message"], "Symbol not found: NOTREAL");
+        assert_eq!(submission["error"], "read_only");
+        assert_eq!(
+            submission["message"],
+            "Operation blocked, client is in read-only mode"
+        );
+    }
+
+    #[test]
+    fn submission_uncertainty_preserves_frozen_client_reference() {
+        let rendered = rendered_error(&ConfirmationError::SubmissionFailure(
+            RhoodError::SubmissionUncertain {
+                client_ref: "frozen-client-ref-123".to_string(),
+                message: "connection closed before an authoritative response".to_string(),
+            },
+        ));
+
+        assert_eq!(rendered["error"], "submission_uncertain");
+        assert_eq!(
+            rendered["message"],
+            "Order submission is uncertain for client reference frozen-client-ref-123: connection closed before an authoritative response. Reconcile open and recent orders before retrying"
+        );
+    }
+
+    #[test]
+    fn invalid_state_rendering_collapses_security_sensitive_causes() {
+        let rendered = rendered_error(&ConfirmationError::InvalidState);
+
+        assert_eq!(
+            rendered,
+            serde_json::json!({
+                "error": "confirmation_invalid_state",
+                "message": "Confirmation is no longer valid; stage the order again",
+            })
+        );
+        let public = rendered.to_string();
+        assert!(!public.contains("tamper"));
+        assert!(!public.contains("Principal"));
+        assert!(!public.contains("binding"));
+    }
+
+    #[test]
+    fn internal_failure_rendering_redacts_private_detail() {
+        let rendered = rendered_error(&ConfirmationError::InternalFailure(
+            "secret codec key material and schema diagnostic".to_string(),
+        ));
+
+        assert_eq!(rendered["error"], "confirmation_internal_failure");
+        assert_eq!(
+            rendered["message"],
+            "Confirmation could not be completed because of an internal server error"
+        );
+        assert!(!rendered.to_string().contains("secret codec key material"));
+    }
 
     #[test]
     fn stock_params_require_exactly_one_amount() {
