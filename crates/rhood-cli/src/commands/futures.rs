@@ -59,7 +59,15 @@ pub async fn run(
         }
         FuturesCommand::Quote { symbols } => {
             let symbol_refs: Vec<&str> = symbols.iter().map(String::as_str).collect();
-            let quotes = client.get_futures_quotes(&symbol_refs).await?;
+            // Core pairs each quote with the symbol it answers; the CLI renders
+            // the authoritative wire symbol from the quote itself, so it drops
+            // the alias here rather than changing its output shape.
+            let quotes: Vec<_> = client
+                .get_futures_quotes(&symbol_refs)
+                .await?
+                .into_iter()
+                .map(|(_requested_symbol, quote)| quote)
+                .collect();
             let headers = &["Symbol", "Bid", "Ask", "Last", "State", "Updated"];
             let rows: Vec<Vec<String>> = quotes
                 .iter()

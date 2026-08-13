@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::api::paths;
@@ -5,6 +6,24 @@ use crate::client::RobinhoodClient;
 use crate::models::futures::*;
 use crate::pagination::ResultsResponse;
 use crate::{Result, RhoodError};
+
+/// Returns the instrument ID a quote must carry to be attributable to a
+/// requested symbol.
+///
+/// Mirrors the stock market-data contract: a response item that cannot
+/// identify itself fails the call rather than being matched by position, which
+/// is the only other thing available and is wrong whenever the batch is
+/// reordered or short.
+fn quote_instrument_id(instrument_id: Option<&str>) -> Result<String> {
+    instrument_id
+        .map(str::trim)
+        .filter(|instrument_id| !instrument_id.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| RhoodError::InvalidMarketDataResponse {
+            endpoint: "futures quotes".to_string(),
+            message: "response item omitted its instrument identifier".into(),
+        })
+}
 
 impl RobinhoodClient {
     /// Fetches a futures contract by its symbol (e.g., "/ESH26" or "ESH26").
@@ -75,10 +94,22 @@ impl RobinhoodClient {
     /// misses fan out via [`futures::future::try_join_all`] so N upstream
     /// contract lookups run in parallel rather than sequentially.
     ///
+    /// Each returned quote is paired with the exact caller-supplied symbol it
+    /// answers, correlated through the instrument ID this call resolved rather
+    /// than through response position. Pairs follow caller order, and a symbol
+    /// the upstream batch did not answer is absent rather than shifting the
+    /// symbols after it. Callers must not re-correlate results positionally.
+    ///
     /// # Errors
     ///
     /// Returns an error if any symbol cannot be resolved or on HTTP failures.
-    pub async fn get_futures_quotes(&self, symbols: &[&str]) -> Result<Vec<FuturesQuote>> {
+    /// Returns [`RhoodError::InvalidMarketDataResponse`] if a returned quote
+    /// carries no instrument ID, or one outside this request, since neither can
+    /// be attributed to a requested symbol without guessing.
+    pub async fn get_futures_quotes(
+        &self,
+        symbols: &[&str],
+    ) -> Result<Vec<(String, FuturesQuote)>> {
         let resolved_ids: Vec<String> =
             ::futures::future::try_join_all(symbols.iter().map(|symbol| async move {
                 let contract = self.cached_futures_contract(symbol).await?;
@@ -93,7 +124,29 @@ impl RobinhoodClient {
         let wrapper: FuturesQuoteDataWrapper = self
             .get_futures_with_params(&self.api_url(paths::FUTURES_QUOTES), &params)
             .await?;
-        Ok(wrapper.data.into_iter().map(|item| item.data).collect())
+
+        let mut by_instrument: HashMap<String, FuturesQuote> =
+            HashMap::with_capacity(resolved_ids.len());
+        for item in wrapper.data {
+            let instrument_id = quote_instrument_id(item.data.instrument_id.as_deref())?;
+            if !resolved_ids.contains(&instrument_id) {
+                return Err(RhoodError::InvalidMarketDataResponse {
+                    endpoint: "futures quotes".to_string(),
+                    message: "response item named an instrument outside its request".into(),
+                });
+            }
+            by_instrument.entry(instrument_id).or_insert(item.data);
+        }
+
+        Ok(symbols
+            .iter()
+            .zip(resolved_ids.iter())
+            .filter_map(|(symbol, instrument_id)| {
+                by_instrument
+                    .get(instrument_id)
+                    .map(|quote| ((*symbol).to_string(), quote.clone()))
+            })
+            .collect())
     }
 
     /// Discovers the Robinhood futures account ID.
@@ -188,10 +241,12 @@ impl RobinhoodClient {
 
 #[cfg(test)]
 mod tests {
+    use crate::RhoodError;
     use crate::client::RobinhoodClient;
     use crate::config::RhoodConfig;
     use crate::models::futures::{
-        FuturesContract, FuturesContractWrapper, FuturesOrder, FuturesQuoteDataWrapper,
+        FuturesContract, FuturesContractWrapper, FuturesOrder, FuturesQuote,
+        FuturesQuoteDataWrapper,
     };
     use secrecy::SecretString;
     use wiremock::matchers::{header, method, path};
@@ -215,6 +270,153 @@ mod tests {
             )
             .await;
         (dir, client)
+    }
+
+    /// Mounts contract lookups for each alias and one quote batch returning
+    /// `quote_body`, then asks for `symbols`.
+    async fn quotes_against(
+        symbols: &[&str],
+        contracts: &[(&str, &str)],
+        quote_body: serde_json::Value,
+    ) -> crate::Result<Vec<(String, FuturesQuote)>> {
+        let server = MockServer::start().await;
+        for (symbol, instrument_id) in contracts {
+            Mock::given(method("GET"))
+                .and(path(format!(
+                    "/arsenal/v1/futures/contracts/symbol/{symbol}/"
+                )))
+                .and(header("authorization", "Bearer access-token"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "result": {"id": instrument_id, "symbol": symbol}
+                })))
+                .mount(&server)
+                .await;
+        }
+        Mock::given(method("GET"))
+            .and(path("/marketdata/futures/quotes/v1/"))
+            .and(header("authorization", "Bearer access-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(quote_body))
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server).await;
+        client.get_futures_quotes(symbols).await
+    }
+
+    /// The defect BL-57 was filed for. The upstream batch answers in an order
+    /// that disagrees with the request, which the previous positional pairing
+    /// would have silently mislabelled -- attaching NQ's prices to ES, and
+    /// shifting every alias after it.
+    #[tokio::test]
+    async fn futures_quotes_pair_by_instrument_id_not_response_order() {
+        let quotes = quotes_against(
+            &["ESM26", "NQM26", "CLM26"],
+            &[
+                ("ESM26", "id-es"),
+                ("NQM26", "id-nq"),
+                ("CLM26", "id-cl"),
+            ],
+            serde_json::json!({"data": [
+                {"data": {"symbol": "/CLM26:XNYM", "instrument_id": "id-cl", "last_trade_price": "61.10"}},
+                {"data": {"symbol": "/NQM26:XCME", "instrument_id": "id-nq", "last_trade_price": "18250.25"}},
+                {"data": {"symbol": "/ESM26:XCME", "instrument_id": "id-es", "last_trade_price": "5182.75"}}
+            ]}),
+        )
+        .await
+        .unwrap();
+
+        let paired: Vec<(String, String, String)> = quotes
+            .into_iter()
+            .map(|(requested, quote)| {
+                (
+                    requested,
+                    quote.symbol.unwrap_or_default(),
+                    quote.last_trade_price.unwrap_or_default(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            paired,
+            vec![
+                (
+                    "ESM26".to_string(),
+                    "/ESM26:XCME".to_string(),
+                    "5182.75".to_string()
+                ),
+                (
+                    "NQM26".to_string(),
+                    "/NQM26:XCME".to_string(),
+                    "18250.25".to_string()
+                ),
+                (
+                    "CLM26".to_string(),
+                    "/CLM26:XNYM".to_string(),
+                    "61.10".to_string()
+                ),
+            ]
+        );
+    }
+
+    /// A short batch must lose only the symbol it omitted. Under positional
+    /// pairing the absent first quote shifted every later alias by one, so this
+    /// is the half of the defect that corrupts data the caller does receive.
+    #[tokio::test]
+    async fn futures_quotes_drop_only_the_unanswered_symbol() {
+        let quotes = quotes_against(
+            &["ESM26", "NQM26"],
+            &[("ESM26", "id-es"), ("NQM26", "id-nq")],
+            serde_json::json!({"data": [
+                {"data": {"symbol": "/NQM26:XCME", "instrument_id": "id-nq", "last_trade_price": "18250.25"}}
+            ]}),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(quotes.len(), 1);
+        let (requested, quote) = quotes.into_iter().next().unwrap();
+        assert_eq!(requested, "NQM26");
+        assert_eq!(quote.symbol.as_deref(), Some("/NQM26:XCME"));
+    }
+
+    #[tokio::test]
+    async fn futures_quotes_reject_a_response_item_without_an_instrument_id() {
+        let error = quotes_against(
+            &["ESM26"],
+            &[("ESM26", "id-es")],
+            serde_json::json!({"data": [
+                {"data": {"symbol": "/ESM26:XCME", "instrument_id": null}}
+            ]}),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(
+                &error,
+                RhoodError::InvalidMarketDataResponse { endpoint, .. } if endpoint == "futures quotes"
+            ),
+            "expected a fail-closed market-data error, got {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn futures_quotes_reject_an_instrument_outside_the_request() {
+        let error = quotes_against(
+            &["ESM26"],
+            &[("ESM26", "id-es")],
+            serde_json::json!({"data": [
+                {"data": {"symbol": "/NQM26:XCME", "instrument_id": "id-nq"}}
+            ]}),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(
+                &error,
+                RhoodError::InvalidMarketDataResponse { endpoint, .. } if endpoint == "futures quotes"
+            ),
+            "expected a fail-closed market-data error, got {error}"
+        );
     }
 
     #[tokio::test]
