@@ -5,7 +5,7 @@ use crate::models::order::{
     CancelAllFailure, CancelAllOutcome, MarketHours, OptionLeg, OptionOrder, OptionOrderIntent,
     OptionOrderPayload, OptionOrderSummary, OrderAmount, OrderIntent, OrderSummary, OrderType,
     Side, StagedOrder, StagedOrderPayload, StockOrder, StockOrderIntent, StockOrderPayload,
-    StockOrderSummary, SubmittedOrder, TimeInForce, Trigger,
+    StockOrderSummary, SubmittedOrder, Trigger,
 };
 use crate::models::stock::StockQuote;
 use crate::{Result, RhoodError};
@@ -104,7 +104,9 @@ fn validate_stock_order(req: &StockOrderIntent) -> Result<()> {
                 "Dollar-based orders require immediate trigger".into(),
             ));
         }
-        if req.time_in_force != TimeInForce::Gfd {
+        // Validated against the same function adapters call, so the rule has
+        // one definition and a caller that honours it cannot be rejected here.
+        if req.amount.required_time_in_force() != Some(req.time_in_force) {
             return Err(RhoodError::InvalidOrder(
                 "Dollar-based orders require good-for-day time in force".into(),
             ));
@@ -995,6 +997,51 @@ mod tests {
             time_in_force: TimeInForce::Gtc,
             market_hours: OrderMarketHours::RegularHours,
         }
+    }
+
+    /// The duration rule for dollar orders has one definition, and validation
+    /// consults it rather than restating it. An adapter that asks
+    /// `required_time_in_force` and honours the answer must always pass.
+    #[test]
+    fn dollar_orders_accept_exactly_the_duration_core_requires() {
+        let intent = |time_in_force| StockOrderIntent {
+            account_number: Some("ABC123".to_string()),
+            symbol: "AAPL".to_string(),
+            amount: OrderAmount::DollarAmount(50.0),
+            side: Side::Buy,
+            order_type: OrderType::Market,
+            limit_price: None,
+            trigger: Trigger::Immediate,
+            stop_price: None,
+            time_in_force,
+            market_hours: OrderMarketHours::RegularHours,
+        };
+
+        // Asserted against a literal, never against `required_time_in_force`
+        // itself: a test that reads the function it exists to guard agrees with
+        // it instead of constraining it, and would survive the rule being
+        // flipped.
+        assert_eq!(
+            OrderAmount::DollarAmount(50.0).required_time_in_force(),
+            Some(TimeInForce::Gfd)
+        );
+        assert!(validate_stock_order(&intent(TimeInForce::Gfd)).is_ok());
+
+        // `TimeInForce` has exactly two variants, so good-till-cancelled is the
+        // whole of the rejected set. A new duration fails to compile here until
+        // it is classified.
+        match TimeInForce::Gfd {
+            TimeInForce::Gfd | TimeInForce::Gtc => {}
+        }
+        assert!(
+            validate_stock_order(&intent(TimeInForce::Gtc)).is_err(),
+            "good-till-cancelled must be rejected for a dollar order"
+        );
+    }
+
+    #[test]
+    fn share_quantities_leave_the_duration_to_the_caller() {
+        assert_eq!(OrderAmount::Quantity(10.0).required_time_in_force(), None);
     }
 
     #[test]

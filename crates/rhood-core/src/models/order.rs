@@ -138,6 +138,27 @@ pub enum OrderAmount {
     DollarAmount(f64),
 }
 
+impl OrderAmount {
+    /// Returns the [`TimeInForce`] the brokerage requires for this amount, if
+    /// it constrains the choice at all.
+    ///
+    /// Dollar-based orders convert to a fractional share estimate against the
+    /// current ask, so they are only accepted good-for-day. Share quantities
+    /// carry no such constraint and return `None`, leaving the duration to the
+    /// caller.
+    ///
+    /// This exists so adapters can ask rather than know. Preparation validates
+    /// against this same function, so a caller that honours it cannot be
+    /// rejected for the duration, and the rule has exactly one definition.
+    #[must_use]
+    pub fn required_time_in_force(&self) -> Option<TimeInForce> {
+        match self {
+            Self::Quantity(_) => None,
+            Self::DollarAmount(_) => Some(TimeInForce::Gfd),
+        }
+    }
+}
+
 /// The outcome of attempting to cancel every open order.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CancelAllOutcome {

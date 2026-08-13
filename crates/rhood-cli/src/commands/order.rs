@@ -232,11 +232,9 @@ pub async fn run(
                 )]
                 _ => unreachable!("clap group prevents both"),
             };
-            let time_in_force = if matches!(amount, OrderAmount::DollarAmount(_)) {
-                TimeInForce::Gfd
-            } else {
-                TimeInForce::Gtc
-            };
+            // Core owns which durations the brokerage accepts for an amount;
+            // the CLI only supplies its own default when the choice is free.
+            let time_in_force = amount.required_time_in_force().unwrap_or(TimeInForce::Gtc);
             let intent = StockOrderIntent {
                 account_number: requested_account.map(str::to_owned),
                 symbol: symbol.clone(),

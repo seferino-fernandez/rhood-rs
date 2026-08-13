@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - `get_futures_quotes` no longer attaches `requested_symbol` by response position. Each quote now carries the alias core correlated it to by instrument ID, so a reordered or partial upstream batch can no longer label a quote with another contract's symbol and shift every alias after it. A requested symbol the batch does not answer is simply absent from the results.
+- Tool errors no longer collapse unmapped core failures into the generic code `error`. Order validation now reports `invalid_order`, and challenge, token-expiry, device-verification, network, and timeout failures each report their own code. Serialization and filesystem failures report `internal_error` and no longer echo their source.
 
 ## [0.2.0](https://github.com/seferino-fernandez/rhood-rs/compare/rhood-mcp-v0.1.4...rhood-mcp-v0.2.0) - 2026-08-11
 
