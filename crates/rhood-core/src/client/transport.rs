@@ -14,6 +14,49 @@ use crate::pagination::{CursorPaginatedResponse, PaginatedResponse};
 use crate::{Result, RhoodError};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use std::collections::HashSet;
+
+/// Upper bound on pages followed in one paginated call.
+///
+/// Chosen well above any observed Robinhood collection so it never truncates a
+/// real result, and low enough that a peer looping forever fails in seconds
+/// rather than exhausting memory. It is a backstop behind [`PageTrail`], not
+/// the primary defence.
+const MAX_PAGES_FOLLOWED: usize = 1_000;
+
+/// Records the pagination links already followed in one call.
+///
+/// ADR-0004 rule 3: a loop whose continuation is decided by response content
+/// carries its own bound. A peer returning a `next` that points at a page
+/// already fetched must produce an error rather than an unbounded accumulation.
+struct PageTrail {
+    seen: HashSet<String>,
+}
+
+impl PageTrail {
+    fn new() -> Self {
+        Self {
+            seen: HashSet::new(),
+        }
+    }
+
+    /// Records one link, failing if it repeats or if the page ceiling is hit.
+    fn record(&mut self, next_url: &str) -> Result<()> {
+        if self.seen.len() >= MAX_PAGES_FOLLOWED {
+            return Err(RhoodError::InvalidMarketDataResponse {
+                endpoint: "pagination".to_string(),
+                message: "paginated response exceeded the page ceiling".into(),
+            });
+        }
+        if !self.seen.insert(next_url.to_string()) {
+            return Err(RhoodError::InvalidMarketDataResponse {
+                endpoint: "pagination".to_string(),
+                message: "paginated response repeated a page link".into(),
+            });
+        }
+        Ok(())
+    }
+}
 
 impl RobinhoodClient {
     /// Sends an authenticated GET request and deserializes the JSON response.
@@ -62,7 +105,10 @@ impl RobinhoodClient {
             .await?;
         let mut page: PaginatedResponse<T> = handle_read_response(res)?;
         let mut all_results = page.results;
+        let mut visited = PageTrail::new();
         while let Some(next_url) = page.next {
+            self.check_pagination_target(&next_url)?;
+            visited.record(&next_url)?;
             let res = self
                 .send_authenticated_get(self.http.get(&next_url))
                 .await?;
@@ -134,7 +180,10 @@ impl RobinhoodClient {
             .await?;
         let mut page: PaginatedResponse<T> = handle_read_response(res)?;
         let mut all_results = page.results;
+        let mut visited = PageTrail::new();
         while let Some(next_url) = page.next {
+            self.check_pagination_target(&next_url)?;
+            visited.record(&next_url)?;
             let res = self
                 .send_authenticated_get(
                     self.http
@@ -189,6 +238,49 @@ impl RobinhoodClient {
             all_results.extend(page.results);
         }
         Ok(all_results)
+    }
+
+    /// Refuses a pagination link whose host is not one this client is
+    /// configured to talk to.
+    ///
+    /// ADR-0004 rule 2: a URL taken from a response body is untrusted, and
+    /// [`Self::send_authenticated_get`] attaches the live bearer token to
+    /// whatever it is given. The test is deliberately against this client's own
+    /// configured hosts rather than the vendor's topology — a same-origin check
+    /// would guess at how Robinhood shards its API, and a hardcoded domain
+    /// would break every wiremock test, where all three base URLs point at one
+    /// local server.
+    fn check_pagination_target(&self, next_url: &str) -> Result<()> {
+        let reject = |message: &str| {
+            Err(RhoodError::InvalidMarketDataResponse {
+                endpoint: "pagination".to_string(),
+                message: message.to_string(),
+            })
+        };
+        let Ok(next) = reqwest::Url::parse(next_url) else {
+            return reject("pagination link is not a valid absolute URL");
+        };
+        let Some(next_host) = next.host_str() else {
+            return reject("pagination link has no host");
+        };
+        let configured = [
+            &self.config.api.base_url,
+            &self.config.api.phoenix_url,
+            &self.config.api.bonfire_url,
+        ];
+        let permitted = configured.iter().any(|base| {
+            reqwest::Url::parse(base).is_ok_and(|base| {
+                base.host_str() == Some(next_host)
+                    && base.port_or_known_default() == next.port_or_known_default()
+            })
+        });
+        if permitted {
+            Ok(())
+        } else {
+            // The rejected host is deliberately not echoed: it is attacker-
+            // supplied text and this message reaches logs and adapters.
+            reject("pagination link points outside the configured hosts")
+        }
     }
 
     async fn send_authenticated_get(
@@ -586,6 +678,137 @@ mod tests {
             refresh_token: SecretString::from("refresh-token"),
         };
         (dir, client)
+    }
+
+    /// Builds an authenticated client whose three configured base URLs point
+    /// at the two supplied servers, so a test can distinguish "a host this
+    /// client talks to" from "the host that served this page".
+    async fn authenticated_client_for_hosts(
+        base_url: &str,
+        phoenix_url: &str,
+    ) -> (tempfile::TempDir, RobinhoodClient) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = test_config_with_tempdir(&dir);
+        config.api.base_url = base_url.to_string();
+        config.api.phoenix_url = phoenix_url.to_string();
+        config.api.bonfire_url = base_url.to_string();
+        let client = RobinhoodClient::with_config(config).unwrap();
+        *client.auth_state.write().await = AuthState::Authenticated {
+            access_token: SecretString::from("access-token"),
+            token_type: "Bearer".to_string(),
+            refresh_token: SecretString::from("refresh-token"),
+        };
+        (dir, client)
+    }
+
+    /// ADR-0004 rule 2. The bearer token must never reach a host this client is
+    /// not configured to talk to, and the proof is that the foreign server
+    /// receives no request at all rather than one without a header.
+    #[tokio::test]
+    async fn pagination_refuses_a_next_link_outside_the_configured_hosts() {
+        let server = MockServer::start().await;
+        let foreign = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/page-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [1],
+                "next": format!("{}/steal", foreign.uri()),
+                "previous": null
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [99], "next": null, "previous": null
+            })))
+            .mount(&foreign)
+            .await;
+
+        let (_dir, client) = authenticated_client(&server.uri()).await;
+        let url = format!("{}/page-1", server.uri());
+        let error = client
+            .get_paginated::<i32>(&url, &[])
+            .await
+            .expect_err("a foreign pagination host must be refused");
+
+        assert!(
+            matches!(
+                &error,
+                RhoodError::InvalidMarketDataResponse { endpoint, .. } if endpoint == "pagination"
+            ),
+            "expected a fail-closed pagination error, got {error}"
+        );
+        assert!(
+            !error.to_string().contains(&foreign.uri()),
+            "the rejected host must not be echoed: {error}"
+        );
+        assert_eq!(
+            foreign.received_requests().await.unwrap().len(),
+            0,
+            "the client must never contact the foreign host"
+        );
+    }
+
+    /// The rule is about this client's configuration, not about the host that
+    /// served the page: a `next` on a different *configured* base URL is
+    /// legitimate and must still work.
+    #[tokio::test]
+    async fn pagination_follows_a_next_link_on_another_configured_host() {
+        let server = MockServer::start().await;
+        let phoenix = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/page-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [1],
+                "next": format!("{}/page-2", phoenix.uri()),
+                "previous": null
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/page-2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [2], "next": null, "previous": null
+            })))
+            .mount(&phoenix)
+            .await;
+
+        let (_dir, client) = authenticated_client_for_hosts(&server.uri(), &phoenix.uri()).await;
+        let url = format!("{}/page-1", server.uri());
+        let values = client.get_paginated::<i32>(&url, &[]).await.unwrap();
+
+        assert_eq!(values, vec![1, 2]);
+    }
+
+    /// ADR-0004 rule 3: the peer does not get to decide when the loop ends.
+    #[tokio::test]
+    async fn pagination_refuses_a_repeated_page_link() {
+        let server = MockServer::start().await;
+        let self_link = format!("{}/page-1", server.uri());
+        Mock::given(method("GET"))
+            .and(path("/page-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [1],
+                "next": self_link,
+                "previous": null
+            })))
+            .mount(&server)
+            .await;
+
+        let (_dir, client) = authenticated_client(&server.uri()).await;
+        let url = format!("{}/page-1", server.uri());
+        let error = client
+            .get_paginated::<i32>(&url, &[])
+            .await
+            .expect_err("a self-referential next link must be refused");
+
+        assert!(
+            matches!(
+                &error,
+                RhoodError::InvalidMarketDataResponse { endpoint, .. } if endpoint == "pagination"
+            ),
+            "expected a fail-closed pagination error, got {error}"
+        );
     }
 
     async fn authenticated_client_with_clock(
