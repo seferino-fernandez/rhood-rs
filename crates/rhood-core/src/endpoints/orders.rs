@@ -14,13 +14,25 @@ const STOCK_ORDER_FORM_VERSION: u8 = 7;
 const STAGED_STOCK_ORDER_TTL_MS: i64 = 60_000;
 const STAGED_OPTION_ORDER_TTL_MS: i64 = 600_000;
 
-/// Sentinel meaning "no test override is pinned". Production code never
-/// stores this value here; [`now_unix_ms`] only returns it if a test build
-/// races a load against an unset override, in which case it falls through
-/// to the real wall clock.
 #[cfg(test)]
-static TEST_CLOCK_OVERRIDE_UNIX_MS: std::sync::atomic::AtomicI64 =
-    std::sync::atomic::AtomicI64::new(i64::MIN);
+thread_local! {
+    /// A test's pinned clock value, or `i64::MIN` meaning "not pinned".
+    ///
+    /// Deliberately thread-local rather than a process-wide static. Test
+    /// harnesses that share one process across tests — `cargo test` does;
+    /// `cargo nextest` does not — otherwise let one test's pinned clock be
+    /// observed by every other test staging an order concurrently, which made
+    /// whole suites fail depending on scheduling. Isolation belongs to the
+    /// seam, not to the runner.
+    ///
+    /// This holds because the tests using it run on `#[tokio::test]`'s default
+    /// current-thread runtime, so the task never migrates off the thread that
+    /// pinned the value. A clock-pinning test on a multi-thread runtime would
+    /// not see its own override after a migration; put such a test on the
+    /// default runtime, or give it its own seam.
+    static TEST_CLOCK_OVERRIDE_UNIX_MS: std::cell::Cell<i64> =
+        const { std::cell::Cell::new(i64::MIN) };
+}
 
 /// Returns the current time, in Unix milliseconds, used to stamp and expire
 /// Staged Orders.
@@ -28,13 +40,14 @@ static TEST_CLOCK_OVERRIDE_UNIX_MS: std::sync::atomic::AtomicI64 =
 /// This is the module's private deterministic clock seam: in test builds a
 /// value pinned through `endpoint_tests::TestClock` takes priority over the real
 /// wall clock, so tests can assert exact Staged Order lifetimes without
-/// sleeping. Outside test builds this always reads the real wall clock, and
-/// the seam is not part of the public API — [`crate::RobinhoodClient`]
-/// exposes no clock abstraction.
+/// sleeping. The override is visible only to the thread that pinned it.
+/// Outside test builds this always reads the real wall clock, and the seam is
+/// not part of the public API — [`crate::RobinhoodClient`] exposes no clock
+/// abstraction.
 fn now_unix_ms() -> i64 {
     #[cfg(test)]
     {
-        let pinned = TEST_CLOCK_OVERRIDE_UNIX_MS.load(std::sync::atomic::Ordering::SeqCst);
+        let pinned = TEST_CLOCK_OVERRIDE_UNIX_MS.with(std::cell::Cell::get);
         if pinned != i64::MIN {
             return pinned;
         }
@@ -1240,18 +1253,18 @@ mod endpoint_tests {
 
     impl TestClock {
         fn pin(unix_ms: i64) -> Self {
-            super::TEST_CLOCK_OVERRIDE_UNIX_MS.store(unix_ms, std::sync::atomic::Ordering::SeqCst);
+            super::TEST_CLOCK_OVERRIDE_UNIX_MS.with(|pinned| pinned.set(unix_ms));
             Self
         }
 
         fn set(&self, unix_ms: i64) {
-            super::TEST_CLOCK_OVERRIDE_UNIX_MS.store(unix_ms, std::sync::atomic::Ordering::SeqCst);
+            super::TEST_CLOCK_OVERRIDE_UNIX_MS.with(|pinned| pinned.set(unix_ms));
         }
     }
 
     impl Drop for TestClock {
         fn drop(&mut self) {
-            super::TEST_CLOCK_OVERRIDE_UNIX_MS.store(i64::MIN, std::sync::atomic::Ordering::SeqCst);
+            super::TEST_CLOCK_OVERRIDE_UNIX_MS.with(|pinned| pinned.set(i64::MIN));
         }
     }
 
