@@ -42,7 +42,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(mcp)* Serve MCP 2026-07-28 only, with per-request metadata enforced
 - *(mcp)* Enforce the OAuth write scope on write tools
 - *(config)* Refuse secret-bearing config files with loose permissions
-- created BACKLOG.md, enabled lints
+- Enable the workspace lint policy
 
 ### Fixed
 
