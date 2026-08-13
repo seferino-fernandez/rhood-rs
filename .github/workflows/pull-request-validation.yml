@@ -44,6 +44,30 @@ jobs:
             - name: Run tests
               run: cargo nextest run --all-targets --all-features
 
+            # nextest skips doctests by design, so nothing else here runs the
+            # examples in the documentation.
+            - name: Run doctests
+              run: cargo test --doc --all-features
+
+    docs:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v7
+              with:
+                  lfs: true
+
+            - name: Install Rust toolchain
+              uses: dtolnay/rust-toolchain@stable
+
+            - uses: Swatinem/rust-cache@v2
+
+            # broken_intra_doc_links and bare_urls only warn, so a plain
+            # `cargo doc` exits zero over a page of dead links.
+            - name: Build documentation
+              run: cargo doc --no-deps --all-features
+              env:
+                  RUSTDOCFLAGS: -D warnings
+
     lint:
         runs-on: ubuntu-latest
         steps:

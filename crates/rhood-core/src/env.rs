@@ -53,7 +53,7 @@ impl MapEnv {
         Self::default()
     }
 
-    /// Inserts `key` → `value`, returning `self` so calls chain.
+    /// Inserts `key` -> `value`, returning `self` so calls chain.
     pub fn with<K, V>(mut self, key: K, value: V) -> Self
     where
         K: Into<String>,

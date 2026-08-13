@@ -183,21 +183,21 @@ pub struct CacheConfig {
     /// Master switch. When `false`, every cached wrapper falls through to the
     /// underlying resolver and nothing is inserted into the caches.
     pub enabled: bool,
-    /// Time-to-live for the symbol → instrument cache, in seconds.
+    /// Time-to-live for the symbol -> instrument cache, in seconds.
     pub instrument_ttl_secs: u64,
-    /// Maximum entries in the symbol → instrument cache.
+    /// Maximum entries in the symbol -> instrument cache.
     pub instrument_max_entries: u64,
-    /// Time-to-live for the uuid → symbol reverse map, in seconds.
+    /// Time-to-live for the uuid -> symbol reverse map, in seconds.
     pub instrument_id_ttl_secs: u64,
-    /// Maximum entries in the uuid → symbol reverse map.
+    /// Maximum entries in the uuid -> symbol reverse map.
     pub instrument_id_max_entries: u64,
-    /// Time-to-live for the symbol → index instrument cache, in seconds.
+    /// Time-to-live for the symbol -> index instrument cache, in seconds.
     pub index_ttl_secs: u64,
-    /// Maximum entries in the symbol → index instrument cache.
+    /// Maximum entries in the symbol -> index instrument cache.
     pub index_max_entries: u64,
-    /// Time-to-live for the symbol → futures contract cache, in seconds.
+    /// Time-to-live for the symbol -> futures contract cache, in seconds.
     pub futures_ttl_secs: u64,
-    /// Maximum entries in the symbol → futures contract cache.
+    /// Maximum entries in the symbol -> futures contract cache.
     pub futures_max_entries: u64,
     /// Batch size for strict and automatic best-effort Instrument Identity
     /// Enrichment `?ids=` requests.

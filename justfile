@@ -7,6 +7,16 @@ verify:
     cargo check --locked --workspace --all-targets --all-features
     cargo clippy --all-targets --all-features -- -D warnings
     cargo nextest run --all-targets --all-features
+    just docs-check
+
+# The docs gate. `cargo nextest` skips doctests by design, so without the first
+# command the examples in the documentation are never run. The lints that catch
+# documentation rot -- broken intra-doc links, bare URLs, invalid Rust code
+# blocks -- only warn, so without `-D warnings` the second exits zero over a
+# page of dead links.
+docs-check:
+    cargo test --doc --all-features
+    RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
 
 # Run all tests: full feature matrix, default features, doctests, and the
 # thread-parallel runner. `cargo nextest` gives every test its own process, so
@@ -76,7 +86,7 @@ clean:
 
 # Generate and open the project's API documentation in a browser
 docs:
-    cargo doc --open
+    cargo doc --no-deps --all-features --open
 
 # Generate an HTML coverage report from nextest runs and open it in a browser
 coverage:

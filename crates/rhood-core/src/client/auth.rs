@@ -1,6 +1,6 @@
 //! Login cascade and OAuth token refresh for [`RobinhoodClient`].
 //!
-//! Owns the multi-step login flow (cache → validate → refresh → headless OAuth),
+//! Owns the multi-step login flow (cache -> validate -> refresh -> headless OAuth),
 //! token extraction/persistence, and SMS/email challenge response handling.
 
 use super::{DEFAULT_TOKEN_TYPE, RobinhoodClient};

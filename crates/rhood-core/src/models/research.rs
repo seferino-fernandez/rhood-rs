@@ -76,7 +76,7 @@ impl RatingSummary {
             + self.num_sell_ratings.unwrap_or(0)
     }
 
-    /// Percentage of buy ratings (0.0–100.0). Returns 0.0 if no ratings exist.
+    /// Percentage of buy ratings (0.0-100.0). Returns 0.0 if no ratings exist.
     pub fn buy_pct(&self) -> f64 {
         let total = self.total();
         if total == 0 {

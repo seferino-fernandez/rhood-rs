@@ -46,7 +46,7 @@ const FUTURES_CONTRACT_HEADER_VALUE: &str = "true";
 ///
 /// Construct with [`new`](Self::new) or [`with_config`](Self::with_config),
 /// then call [`login`](Self::login) before any endpoint method. `login`
-/// follows a cascade: cached token → live validation → refresh →
+/// follows a cascade: cached token -> live validation -> refresh ->
 /// headless OAuth. If the server requires a verification code,
 /// `login` returns [`RhoodError::ChallengeRequired`] so collect the code
 /// from the user and complete the flow with

@@ -65,7 +65,7 @@ These flags apply to every subcommand.
 --output <table|json|csv>    Output format [default: table]
 --config <PATH>              Path to config.toml
 --token-cache <PATH>         Path to on-disk token cache
---read-write                 Enable order placement and cancellation
+--read-write                 Leave read-only mode, overriding `read_only` in config
 --account <NUMBER>           Select a canonical brokerage account number
 ```
 
@@ -73,7 +73,9 @@ Logs are written to stderr. `--output json` and `--output csv` are therefore saf
 
 ## Read-Only Mode and Safety
 
-The CLI defaults to read-only mode (`read_only = true` in config). Mutating commands order buy/sell, recurring create/update/cancel, and watchlist add/remove are blocked unless `--read-write` is passed.
+The CLI defaults to read-only mode (`read_only = true` in config). Mutating commands - order buy/sell, recurring create/update/cancel, and watchlist add/remove - are refused while read-only mode is on.
+
+`--read-write` turns read-only mode off for a single invocation. It is an override, not the only switch: setting `read_only = false` in the config file, or `RHOOD_READ_ONLY=false` in the environment, turns it off for **every** invocation with no flag on the command line. If you are assessing what an unattended environment can do, check the configuration and not just the command.
 
 Account-sensitive commands automatically select an account only when unified discovery returns exactly one usable account. Run `rhood account list`, then pass global `--account <NUMBER>` when multiple accounts exist. The selector covers individual and IRA accounts. Aggregate income, transfer, and document commands remain unfiltered because Robinhood's account filter contract is not established for those routes.
 
@@ -190,12 +192,12 @@ rhood option quote NKE \
 
 Place, list, and cancel stock orders.
 
-| Subcommand | Description                                  |
-| ---------- | -------------------------------------------- |
-| `buy`      | Place a buy order (requires `--read-write`)  |
-| `sell`     | Place a sell order (requires `--read-write`) |
-| `list`     | List stock orders (all or filtered)          |
-| `cancel`   | Cancel an open stock order by ID             |
+| Subcommand | Description                          |
+| ---------- | ------------------------------------ |
+| `buy`      | Place a buy order (write operation)  |
+| `sell`     | Place a sell order (write operation) |
+| `list`     | List stock orders (all or filtered)  |
+| `cancel`   | Cancel an open stock order by ID     |
 
 ```bash
 # Buy 10 shares at market (interactive confirmation)
@@ -307,10 +309,13 @@ rhood account documents
 # Filter by type
 rhood account documents --doc-type account_statement
 rhood account documents --doc-type trade_confirm
+rhood account documents --doc-type 1099
 
 rhood account day-trades
 rhood account user-profile
 ```
+
+`--doc-type` values: `account_statement`, `trade_confirm`, `1099`
 
 When multiple accounts are listed, select one with the global flag, for example `rhood --account ABC123 account positions`.
 
@@ -395,13 +400,13 @@ The list is an offering-dependent presentation model, so table and CSV output pr
 
 Recurring investment schedules.
 
-| Subcommand  | Description                                           |
-| ----------- | ----------------------------------------------------- |
-| `list`      | All recurring investment schedules                    |
-| `create`    | Create a new schedule (requires `--read-write`)       |
-| `update`    | Update an existing schedule (requires `--read-write`) |
-| `cancel`    | Cancel a schedule (requires `--read-write`)           |
-| `next-date` | Look up the next investment date                      |
+| Subcommand  | Description                                   |
+| ----------- | --------------------------------------------- |
+| `list`      | All recurring investment schedules            |
+| `create`    | Create a new schedule (write operation)       |
+| `update`    | Update an existing schedule (write operation) |
+| `cancel`    | Cancel a schedule (write operation)           |
+| `next-date` | Look up the next investment date              |
 
 ```bash
 # List all schedules
@@ -415,6 +420,12 @@ rhood --read-write recurring create TSLA \
 
 # Update amount on an existing schedule
 rhood --read-write recurring update <SCHEDULE_ID> --amount 50
+
+# Change how often a schedule invests
+rhood --read-write recurring update <SCHEDULE_ID> --frequency monthly
+
+# Move a schedule's start date
+rhood --read-write recurring update <SCHEDULE_ID> --start-date 2025-09-01
 
 # Pause a schedule
 rhood --read-write recurring update <SCHEDULE_ID> --state paused
@@ -436,12 +447,12 @@ rhood recurring next-date --frequency biweekly --start-date 2025-06-01
 
 Manage Robinhood watchlists.
 
-| Subcommand | Description                                               |
-| ---------- | --------------------------------------------------------- |
-| `list`     | All watchlists                                            |
-| `show`     | Items in a specific watchlist                             |
-| `add`      | Add symbols to a watchlist (requires `--read-write`)      |
-| `remove`   | Remove symbols from a watchlist (requires `--read-write`) |
+| Subcommand | Description                                       |
+| ---------- | ------------------------------------------------- |
+| `list`     | All watchlists                                    |
+| `show`     | Items in a specific watchlist                     |
+| `add`      | Add symbols to a watchlist (write operation)      |
+| `remove`   | Remove symbols from a watchlist (write operation) |
 
 ```bash
 # List all watchlists
