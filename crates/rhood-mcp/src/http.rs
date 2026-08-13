@@ -356,14 +356,14 @@ mod tests {
 mod wire_tests {
     use super::*;
     use crate::middleware::oauth::{OAuthAuthenticated, OAuthPrincipal};
-    use crate::tools::{TOOLS_LIST_PAGE_SIZE, WRITE_TOOLS};
+    use crate::tools::TOOLS_LIST_PAGE_SIZE;
     use axum::body::Body;
     use rhood_core::{RhoodConfig, RobinhoodClient};
     use rmcp::{
         handler::server::tool::{ToolRoute, ToolRouter},
         model::{
             CallToolResponse, CallToolResult, ContentBlock, CreateTaskResult, InputRequiredResult,
-            MetaObject, ProtocolVersion, Task, TaskStatus, Tool,
+            MetaObject, ProtocolVersion, Task, TaskStatus, Tool, ToolAnnotations,
         },
     };
     use serde_json::{Value, json};
@@ -475,7 +475,8 @@ mod wire_tests {
                         TEST_TOOL,
                         "Count actual dispatches",
                         Arc::new(Default::default()),
-                    ),
+                    )
+                    .with_annotations(ToolAnnotations::new().read_only(true)),
                     move |_context| {
                         dispatches.fetch_add(1, Ordering::SeqCst);
                         Box::pin(async move {
@@ -517,7 +518,8 @@ mod wire_tests {
                         "place_stock_order",
                         "Count actual write-tool dispatches",
                         Arc::new(Default::default()),
-                    ),
+                    )
+                    .with_annotations(ToolAnnotations::new().read_only(false)),
                     move |_context| {
                         dispatches.fetch_add(1, Ordering::SeqCst);
                         Box::pin(async move {
@@ -730,10 +732,10 @@ mod wire_tests {
             .collect()
     }
 
-    async fn all_tool_names(
+    async fn all_tools(
         service: &StreamableHttpService<RhoodTools, LocalSessionManager>,
-    ) -> Vec<String> {
-        let mut names = Vec::new();
+    ) -> Vec<Value> {
+        let mut tools = Vec::new();
         let mut cursor = None;
         for _ in 0..10 {
             let (status, _, payloads) = post(
@@ -748,13 +750,45 @@ mod wire_tests {
                 "tools/list page failed: {status} {payloads:?}"
             );
             let result = result_of(&payloads);
-            names.extend(tool_names(&result));
+            tools.extend(
+                result["tools"]
+                    .as_array()
+                    .expect("tools is an array")
+                    .iter()
+                    .cloned(),
+            );
             cursor = result["nextCursor"].as_str().map(str::to_string);
             if cursor.is_none() {
                 break;
             }
         }
         assert!(cursor.is_none(), "tools/list pagination must terminate");
+        tools
+    }
+
+    async fn all_tool_names(
+        service: &StreamableHttpService<RhoodTools, LocalSessionManager>,
+    ) -> Vec<String> {
+        all_tools(service)
+            .await
+            .into_iter()
+            .filter_map(|tool| tool["name"].as_str().map(str::to_string))
+            .collect()
+    }
+
+    async fn annotation_declared_write_tool_names() -> Vec<String> {
+        let service = mcp_service(false);
+        let _ = post(&service, initialize(V_MODERN), None, None).await;
+        let names: Vec<_> = all_tools(&service)
+            .await
+            .into_iter()
+            .filter(|tool| tool["annotations"]["readOnlyHint"] == Value::Bool(false))
+            .filter_map(|tool| tool["name"].as_str().map(str::to_string))
+            .collect();
+        assert!(
+            !names.is_empty(),
+            "the live router must declare at least one write tool"
+        );
         names
     }
 
@@ -865,6 +899,7 @@ mod wire_tests {
     /// advertise anything that places, cancels, or modifies an order.
     #[tokio::test]
     async fn read_only_server_advertises_no_write_tools() {
+        let write_tools = annotation_declared_write_tool_names().await;
         let service = mcp_service(true);
         let _ = post(&service, initialize(V_MODERN), None, None).await;
         let names = all_tool_names(&service).await;
@@ -872,9 +907,9 @@ mod wire_tests {
             !names.is_empty(),
             "read-only mode must still advertise read tools"
         );
-        for write_tool in WRITE_TOOLS {
+        for write_tool in write_tools {
             assert!(
-                !names.iter().any(|name| name == write_tool),
+                !names.iter().any(|name| name == &write_tool),
                 "read-only mode must not advertise `{write_tool}`, got {names:?}"
             );
         }
@@ -884,12 +919,13 @@ mod wire_tests {
     /// against a filter that over-matches and hides tools unconditionally.
     #[tokio::test]
     async fn read_write_server_advertises_every_write_tool() {
+        let write_tools = annotation_declared_write_tool_names().await;
         let service = mcp_service(false);
         let _ = post(&service, initialize(V_MODERN), None, None).await;
         let names = all_tool_names(&service).await;
-        for write_tool in WRITE_TOOLS {
+        for write_tool in write_tools {
             assert!(
-                names.iter().any(|name| name == write_tool),
+                names.iter().any(|name| name == &write_tool),
                 "read-write mode must advertise `{write_tool}`, got {names:?}"
             );
         }
@@ -900,30 +936,33 @@ mod wire_tests {
     /// it by name.
     #[tokio::test]
     async fn read_only_server_rejects_a_write_tool_call() {
+        let write_tools = annotation_declared_write_tool_names().await;
         let service = mcp_service(true);
         let _ = post(&service, initialize(V_MODERN), None, None).await;
-        let (_, _, payloads) = post(
-            &service,
-            modern_tools_call("place_stock_order"),
-            None,
-            Some(V_MODERN),
-        )
-        .await;
+        for write_tool in write_tools {
+            let (_, _, payloads) = post(
+                &service,
+                modern_tools_call(&write_tool),
+                None,
+                Some(V_MODERN),
+            )
+            .await;
 
-        let error = error_of(&payloads);
-        assert_eq!(
-            error["code"], -32602,
-            "expected INVALID_PARAMS, got {error}"
-        );
-        assert!(
-            error.get("_meta").is_none(),
-            "JSON-RPC errors are not tool results: {error}"
-        );
-        let message = error["message"].as_str().unwrap_or_default();
-        assert!(
-            message.contains("read-only"),
-            "rejection must say why: {message}"
-        );
+            let error = error_of(&payloads);
+            assert_eq!(
+                error["code"], -32602,
+                "expected INVALID_PARAMS for {write_tool}, got {error}"
+            );
+            assert!(
+                error.get("_meta").is_none(),
+                "JSON-RPC errors are not tool results: {error}"
+            );
+            let message = error["message"].as_str().unwrap_or_default();
+            assert!(
+                message.contains("read-only"),
+                "rejection must say why: {message}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -984,6 +1023,43 @@ mod wire_tests {
             0,
             "scope-rejected invocation must not reach the tool router"
         );
+    }
+
+    #[tokio::test]
+    async fn oauth_read_scope_rejects_every_annotation_declared_write_tool() {
+        let write_tools = annotation_declared_write_tool_names().await;
+        let service = mcp_service(false);
+        let _ = post(&service, initialize(V_MODERN), None, None).await;
+
+        for write_tool in write_tools {
+            let (status, _, payloads) = post_with_oauth(
+                &service,
+                modern_tools_call(&write_tool),
+                None,
+                Some(V_MODERN),
+                Some(OAuthPrincipal {
+                    principal: "rhood_cid_read_only".to_string(),
+                    scopes: vec!["read".to_string()],
+                }),
+            )
+            .await;
+
+            assert!(
+                !status.is_server_error(),
+                "unexpected HTTP failure for {write_tool}: {status}"
+            );
+            let error = error_of(&payloads);
+            assert_eq!(
+                error["code"], -32602,
+                "expected INVALID_PARAMS for {write_tool}: {error}"
+            );
+            assert!(
+                error["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("write")),
+                "rejection must identify the required scope: {error}"
+            );
+        }
     }
 
     #[tokio::test]

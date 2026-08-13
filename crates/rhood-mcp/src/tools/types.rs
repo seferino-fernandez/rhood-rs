@@ -1,17 +1,3 @@
-/// Tool names that perform write operations (order placement, cancellation).
-/// Filtered out of tool listings and blocked from execution in read-only mode.
-pub const WRITE_TOOLS: &[&str] = &[
-    "place_stock_order",
-    "place_option_order",
-    "cancel_order",
-    "cancel_option_order",
-    "create_recurring_investment",
-    "update_recurring_investment",
-    "cancel_recurring_investment",
-    "add_to_watchlist",
-    "remove_from_watchlist",
-];
-
 /// Convert a [`RhoodError`](rhood_core::RhoodError) into a structured JSON error string
 /// suitable for MCP tool responses.
 pub fn format_tool_error(err: &rhood_core::RhoodError) -> String {
