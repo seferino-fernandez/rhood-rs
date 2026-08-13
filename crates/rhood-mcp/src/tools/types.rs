@@ -235,8 +235,8 @@ mod tests {
     /// Compile-forcing guard: matches `RhoodError` without a wildcard, so a new
     /// core variant fails to compile here until someone decides what code a
     /// model should see for it. `RhoodError` is not `#[non_exhaustive]`, which
-    /// is what makes this possible; before BL-72 the production mapper ended in
-    /// `_ => "error"` and eight variants quietly shared that one code.
+    /// is what makes this possible. The production mapper previously ended in
+    /// `_ => "error"`, and eight variants quietly shared that one code.
     #[test]
     fn every_core_error_maps_to_its_own_intended_code() {
         let expectations: Vec<(RhoodError, &str)> = vec![
@@ -355,9 +355,9 @@ mod tests {
         );
     }
 
-    /// Order validation is the largest consumer of `InvalidOrder`, and BL-63
-    /// routed symbol validation through it too. Before BL-72 every one of these
-    /// reached a model as `"error"`.
+    /// Order validation is the largest consumer of `InvalidOrder`, and symbol
+    /// validation routes through it too. Every one of these previously reached
+    /// a model as `"error"`.
     #[test]
     fn order_validation_failures_are_distinguishable_from_infrastructure() {
         let validation = code(&RhoodError::InvalidOrder(
