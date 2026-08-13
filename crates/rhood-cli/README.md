@@ -144,13 +144,13 @@ Option contract quotes, open positions, aggregate strategy positions, and order 
 position commands use the global `--account <NUMBER>` selector; without it, account discovery
 only proceeds when exactly one usable individual or IRA account is available.
 
-| Subcommand     | Description                                     |
-| -------------- | ----------------------------------------------- |
-| `positions`    | Open option positions                           |
-| `aggregate-positions` | Aggregate option strategy positions           |
-| `orders`       | Option order history (all or open only)         |
-| `cancel-order` | Cancel an open option order by ID               |
-| `quote`        | Live bid/ask, Greeks, volume, and open interest |
+| Subcommand            | Description                                     |
+| --------------------- | ----------------------------------------------- |
+| `positions`           | Open option positions                           |
+| `aggregate-positions` | Aggregate option strategy positions             |
+| `orders`              | Option order history (all or open only)         |
+| `cancel-order`        | Cancel an open option order by ID               |
+| `quote`               | Live bid/ask, Greeks, volume, and open interest |
 
 ```bash
 # Open option positions
@@ -270,7 +270,7 @@ Positions, portfolio summaries, raw portfolio performance charts, profiles, and 
 | `positions`     | Open stock positions (non-zero quantity)             |
 | `all-positions` | All stock positions including closed (zero quantity) |
 | `portfolio`     | Portfolio summary (equity, market value)             |
-| `performance`   | Raw returns chart model and rendering metadata        |
+| `performance`   | Raw returns chart model and rendering metadata       |
 | `profile`       | Account number, buying power, and cash               |
 | `buying-power`  | Unified account summary                              |
 | `dividends`     | Dividend payment history                             |
@@ -320,13 +320,13 @@ When multiple accounts are listed, select one with the global flag, for example 
 
 Futures contract lookup, real-time quotes, positions, and order history.
 
-| Subcommand | Description                                |
-| ---------- | ------------------------------------------ |
-| `contract` | Look up a futures contract by symbol       |
-| `quote`    | Real-time quotes for one or more contracts |
-| `orders`   | Futures order history                      |
-| `positions` | Futures positions                         |
-| `account`  | Show the futures account ID                |
+| Subcommand  | Description                                |
+| ----------- | ------------------------------------------ |
+| `contract`  | Look up a futures contract by symbol       |
+| `quote`     | Real-time quotes for one or more contracts |
+| `orders`    | Futures order history                      |
+| `positions` | Futures positions                          |
+| `account`   | Show the futures account ID                |
 
 ```bash
 # Contract details

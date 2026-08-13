@@ -113,15 +113,15 @@ Tools are grouped by domain: **Stocks**, **Options**, **Futures**, **Indices**, 
 
 A few representative tools:
 
-| Tool                | What it does                                                 |
-| ------------------- | ------------------------------------------------------------ |
-| `get_stock_quotes`  | Current quotes for stock tickers                             |
-| `get_accounts`      | Discover canonical brokerage account selectors               |
-| `get_portfolio`     | Portfolio summary (equity, cash, etc.)                       |
-| `get_portfolio_performance` | Raw portfolio returns chart and rendering metadata   |
-| `get_ipo_access_list` | IPO Access offerings or the authenticated user's empty state |
-| `place_stock_order` | Prepare exact wire fields, confirm, then submit once          |
-| `cancel_order`      | Cancel an open stock order                                   |
+| Tool                        | What it does                                                 |
+| --------------------------- | ------------------------------------------------------------ |
+| `get_stock_quotes`          | Current quotes for stock tickers                             |
+| `get_accounts`              | Discover canonical brokerage account selectors               |
+| `get_portfolio`             | Portfolio summary (equity, cash, etc.)                       |
+| `get_portfolio_performance` | Raw portfolio returns chart and rendering metadata           |
+| `get_ipo_access_list`       | IPO Access offerings or the authenticated user's empty state |
+| `place_stock_order`         | Prepare exact wire fields, confirm, then submit once         |
+| `cancel_order`              | Cancel an open stock order                                   |
 
 For the live tool list, page through MCP `tools/list` against the running server. Each response contains at most 20 definitions; pass `nextCursor` back as `cursor` until it is absent. Account-sensitive tools accept `account_number`. It may be omitted only when unified discovery returns exactly one account; otherwise call `get_accounts` and pass a canonical number. Order placement uses MCP elicitation. Stock and option orders are both fully prepared before confirmation, so the human authorises the exact executable order rather than its parameters: stock preparation freezes quote collar data, fractional-share conversion, client reference, and form version, and option preparation freezes the resolved contract and its payload alongside the same client reference. After acceptance, the client retries the same call with the sealed state and submits that exact preparation once. Read-only mode (default) hides write tools.
 
