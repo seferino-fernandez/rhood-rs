@@ -1,10 +1,32 @@
 use rhood_core::models::futures::FuturesQuote;
 use rmcp::{Peer, RoleServer, handler::server::wrapper::Parameters, tool, tool_router};
+use schemars::JsonSchema;
+use serde::Deserialize;
 use serde::Serialize;
 
 use super::handler::RhoodTools;
-use super::params::*;
 use super::types::format_tool_error;
+
+#[derive(Deserialize, JsonSchema)]
+struct FuturesContractParams {
+    /// Futures contract symbol (e.g., "ESH26")
+    #[schemars(length(max = 12), regex(pattern = r"^[A-Za-z0-9.]{1,12}$"))]
+    symbol: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct FuturesQuoteParams {
+    /// Futures contract symbols (e.g., ["ESH26", "NQH26"])
+    #[schemars(length(max = 50))]
+    symbols: Vec<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct FuturesOrderHistoryParams {
+    /// Filter orders updated since this date (ISO 8601, e.g. "2025-01-01")
+    #[schemars(regex(pattern = r"^\d{4}-\d{2}-\d{2}$"))]
+    since: Option<String>,
+}
 
 fn serialize_futures_positions(
     positions: &[rhood_core::models::futures::FuturesPosition],

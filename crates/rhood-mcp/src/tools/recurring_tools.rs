@@ -1,8 +1,87 @@
+use rhood_core::models::recurring::{RecurringFrequency, RecurringSource, RecurringState};
 use rmcp::{Peer, RoleServer, handler::server::wrapper::Parameters, tool, tool_router};
+use schemars::JsonSchema;
+use serde::Deserialize;
 
-use super::handler::RhoodTools;
-use super::params::*;
+use super::handler::{AccountSelectorParams, RhoodTools};
 use super::types::format_tool_error;
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct CreateRecurringInvestmentParams {
+    /// Canonical brokerage account number from get_accounts. May be omitted only when exactly one account exists.
+    account_number: Option<String>,
+    /// Stock symbol (e.g. "TSLA")
+    #[schemars(length(max = 12), regex(pattern = r"^[A-Za-z0-9.]{1,12}$"))]
+    symbol: String,
+    /// Dollar amount per recurrence
+    #[schemars(range(min = 0.0))]
+    amount: f64,
+    /// Recurrence frequency
+    frequency: RecurringFrequency,
+    /// Start date in YYYY-MM-DD format
+    #[schemars(regex(pattern = r"^\d{4}-\d{2}-\d{2}$"))]
+    start_date: String,
+    /// Source of funds (default: buying_power)
+    #[serde(default)]
+    source_of_funds: RecurringSource,
+}
+
+/// States an MCP caller may set on `update_recurring_investment`.
+///
+/// Deliberately excludes `RecurringState::Deleted` - cancellation goes through
+/// the dedicated `cancel_recurring_investment` tool, so `"deleted"` is not a
+/// valid input here and is rejected with a structured `-32602` error.
+#[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum UpdatableRecurringState {
+    /// Resume the schedule.
+    Active,
+    /// Pause the schedule (it persists but executes no investments).
+    Paused,
+}
+
+impl From<UpdatableRecurringState> for RecurringState {
+    fn from(state: UpdatableRecurringState) -> Self {
+        match state {
+            UpdatableRecurringState::Active => RecurringState::Active,
+            UpdatableRecurringState::Paused => RecurringState::Paused,
+        }
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct UpdateRecurringInvestmentParams {
+    /// Schedule ID to update - call get_recurring_investments first to discover valid IDs.
+    schedule_id: String,
+    /// New dollar amount (optional)
+    #[schemars(range(min = 0.0))]
+    amount: Option<f64>,
+    /// New frequency (optional)
+    frequency: Option<RecurringFrequency>,
+    /// New state (optional)
+    state: Option<UpdatableRecurringState>,
+    /// New start date (optional)
+    #[schemars(regex(pattern = r"^\d{4}-\d{2}-\d{2}$"))]
+    start_date: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct CancelRecurringInvestmentParams {
+    /// Schedule ID to cancel - call get_recurring_investments first to discover valid IDs.
+    schedule_id: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct NextInvestmentDateParams {
+    /// Recurrence frequency
+    frequency: RecurringFrequency,
+    /// Start date in YYYY-MM-DD format
+    #[schemars(regex(pattern = r"^\d{4}-\d{2}-\d{2}$"))]
+    start_date: String,
+}
 
 #[tool_router(router = recurring_router, vis = "pub(super)")]
 impl RhoodTools {
@@ -131,5 +210,59 @@ impl RhoodTools {
             .await
             .map_err(|rhood_error| format_tool_error(&rhood_error))?;
         serde_json::to_string_pretty(&result).map_err(|error| error.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        CancelRecurringInvestmentParams, UpdatableRecurringState, UpdateRecurringInvestmentParams,
+    };
+
+    #[test]
+    fn update_recurring_state_rejects_deleted() {
+        let err = serde_json::from_str::<UpdateRecurringInvestmentParams>(
+            r#"{"schedule_id":"s1","state":"deleted"}"#,
+        );
+        assert!(
+            err.is_err(),
+            "state \"deleted\" must be rejected on the MCP surface"
+        );
+    }
+
+    #[test]
+    fn update_recurring_state_accepts_active_and_paused() {
+        let active: UpdateRecurringInvestmentParams =
+            serde_json::from_str(r#"{"schedule_id":"s1","state":"active"}"#).unwrap();
+        assert!(matches!(
+            active.state,
+            Some(UpdatableRecurringState::Active)
+        ));
+        let paused: UpdateRecurringInvestmentParams =
+            serde_json::from_str(r#"{"schedule_id":"s1","state":"paused"}"#).unwrap();
+        assert!(matches!(
+            paused.state,
+            Some(UpdatableRecurringState::Paused)
+        ));
+    }
+
+    #[test]
+    fn recurring_id_schema_descriptions_name_discovery_tool() {
+        for (schema, expected_description) in [
+            (
+                schemars::schema_for!(UpdateRecurringInvestmentParams),
+                "Schedule ID to update - call get_recurring_investments first to discover valid IDs.",
+            ),
+            (
+                schemars::schema_for!(CancelRecurringInvestmentParams),
+                "Schedule ID to cancel - call get_recurring_investments first to discover valid IDs.",
+            ),
+        ] {
+            let json = serde_json::to_value(&schema).unwrap();
+            assert_eq!(
+                json["properties"]["schedule_id"]["description"], expected_description,
+                "schema description for schedule_id"
+            );
+        }
     }
 }

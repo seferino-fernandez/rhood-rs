@@ -5,12 +5,39 @@
 //! a versioned MCP-local cursor to the collected results before serialization.
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use serde::Serialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
 const CURSOR_VERSION: &str = "v1:";
 const DEFAULT_PAGE_SIZE: usize = 50;
 pub(super) const MAX_PAGE_SIZE: usize = 100;
 const MAX_CURSOR_LENGTH: usize = 128;
+
+/// Paging controls shared by bounded collection tools.
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct CollectionPageParams {
+    /// Opaque continuation cursor returned as `next_cursor` by the previous call.
+    #[schemars(length(max = 128))]
+    pub(super) cursor: Option<String>,
+    /// Maximum items to return. Defaults to 50 and cannot exceed 100.
+    #[schemars(range(min = 1, max = 100))]
+    pub(super) limit: Option<usize>,
+}
+
+/// Account selector plus paging controls for account-sensitive collections.
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct AccountCollectionPageParams {
+    /// Canonical brokerage account number from get_accounts. May be omitted only when exactly one account exists.
+    pub(super) account_number: Option<String>,
+    /// Opaque continuation cursor returned as `next_cursor` by the previous call.
+    #[schemars(length(max = 128))]
+    pub(super) cursor: Option<String>,
+    /// Maximum items to return. Defaults to 50 and cannot exceed 100.
+    #[schemars(range(min = 1, max = 100))]
+    pub(super) limit: Option<usize>,
+}
 
 /// A validated request for one bounded collection page.
 pub(super) struct CollectionPager {

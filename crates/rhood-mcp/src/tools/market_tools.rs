@@ -1,9 +1,27 @@
 use rmcp::{Peer, RoleServer, handler::server::wrapper::Parameters, tool, tool_router};
+use schemars::JsonSchema;
+use serde::Deserialize;
 
 use super::handler::RhoodTools;
-use super::params::*;
 use super::types::format_tool_error;
 use rhood_core::models::watchlist::WatchlistItem;
+
+#[derive(Deserialize, JsonSchema)]
+struct MarketHoursParams {
+    /// Market Identifier Code (e.g. "XNYS", "XNAS")
+    #[schemars(length(max = 8), regex(pattern = r"^[A-Z]{1,8}$"))]
+    mic: String,
+    /// Date in YYYY-MM-DD format
+    #[schemars(regex(pattern = r"^\d{4}-\d{2}-\d{2}$"))]
+    date: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct MarketTodayHoursParams {
+    /// Market Identifier Code (e.g. "XNYS", "XNAS")
+    #[schemars(length(max = 8), regex(pattern = r"^[A-Z]{1,8}$"))]
+    mic: String,
+}
 
 /// Decision-relevant projection of a daily-mover row. Drops list-membership
 /// metadata, tradability/IPO flags, timestamps, and the redundant rolling

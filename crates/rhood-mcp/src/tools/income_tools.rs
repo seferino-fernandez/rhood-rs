@@ -1,10 +1,18 @@
 use rmcp::{Peer, RoleServer, handler::server::wrapper::Parameters, tool, tool_router};
+use schemars::JsonSchema;
+use serde::Deserialize;
 
 use super::handler::RhoodTools;
-use super::pagination::CollectionPager;
-use super::params::*;
+use super::pagination::{CollectionPageParams, CollectionPager};
 use super::types::format_tool_error;
 use rhood_core::models::transfer::Transfer;
+
+#[derive(Deserialize, JsonSchema)]
+struct DividendParams {
+    /// Filter dividends updated since this date (ISO 8601, e.g. "2025-01-01")
+    #[schemars(regex(pattern = r"^\d{4}-\d{2}-\d{2}$"))]
+    since: Option<String>,
+}
 
 /// Lean projection of a unified transfer. Drops the untyped, variant-shaped
 /// `details` blob (which carries upstream marketing cruft like
