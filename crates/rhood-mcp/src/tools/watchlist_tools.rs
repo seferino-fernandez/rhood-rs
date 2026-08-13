@@ -1,8 +1,28 @@
 use rmcp::{Peer, RoleServer, handler::server::wrapper::Parameters, tool, tool_router};
+use schemars::JsonSchema;
+use serde::Deserialize;
 
 use super::handler::RhoodTools;
-use super::params::*;
 use super::types::format_tool_error;
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct WatchlistNameParams {
+    /// Watchlist name or ID - call get_watchlists first to discover valid names/IDs.
+    #[schemars(length(max = 100))]
+    name: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct WatchlistModifyParams {
+    /// Watchlist name or ID - call get_watchlists first to discover valid names/IDs.
+    #[schemars(length(max = 100))]
+    name: String,
+    /// Stock symbols to add or remove
+    #[schemars(length(max = 50))]
+    symbols: Vec<String>,
+}
 
 #[tool_router(router = watchlist_router, vis = "pub(super)")]
 impl RhoodTools {

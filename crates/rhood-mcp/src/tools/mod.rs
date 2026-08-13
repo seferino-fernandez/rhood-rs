@@ -15,7 +15,6 @@ mod market_tools;
 mod option_tools;
 mod order_tools;
 mod pagination;
-mod params;
 mod rate_limit;
 mod recurring_tools;
 mod research_tools;

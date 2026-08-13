@@ -1,12 +1,26 @@
 use rhood_core::models::account::{AccountDescriptor, AccountProfile, AccountSummary};
 use rhood_core::models::dividend::MoneyAmount;
+use rhood_core::models::document::DocumentType;
 use rmcp::{Peer, RoleServer, handler::server::wrapper::Parameters, tool, tool_router};
-use serde::Serialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
-use super::handler::RhoodTools;
+use super::handler::{AccountSelectorParams, RhoodTools};
 use super::pagination::CollectionPager;
-use super::params::*;
 use super::types::format_tool_error;
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct DocumentsParams {
+    /// Document type filter (optional)
+    doc_type: Option<DocumentType>,
+    /// Opaque continuation cursor returned as `next_cursor` by the previous call.
+    #[schemars(length(max = 128))]
+    cursor: Option<String>,
+    /// Maximum items to return. Defaults to 50 and cannot exceed 100.
+    #[schemars(range(min = 1, max = 100))]
+    limit: Option<usize>,
+}
 
 fn amount_of(m: &Option<MoneyAmount>) -> Option<String> {
     m.as_ref().and_then(|v| v.amount.clone())
@@ -318,5 +332,33 @@ mod tests {
         );
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value[0]["symbol"], "RKLB");
+    }
+
+    #[test]
+    fn portfolio_performance_advertises_account_only_raw_returns_contract() {
+        let tool = RhoodTools::account_router()
+            .list_all()
+            .into_iter()
+            .find(|tool| tool.name == "get_portfolio_performance")
+            .expect("get_portfolio_performance must be advertised");
+        let schema = serde_json::Value::Object((*tool.input_schema).clone());
+        let description = tool.description.as_deref().unwrap_or_default();
+
+        assert!(
+            tool.annotations
+                .as_ref()
+                .is_some_and(|annotations| annotations.read_only_hint == Some(true))
+        );
+        assert!(description.contains("returns"));
+        assert!(description.contains("not historical equity candles"));
+        assert_eq!(
+            schema["properties"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+            ["account_number"]
+        );
     }
 }

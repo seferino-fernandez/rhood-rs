@@ -1,7 +1,6 @@
 use rmcp::{Peer, RoleServer, handler::server::wrapper::Parameters, tool, tool_router};
 
-use super::handler::RhoodTools;
-use super::params::AccountSelectorParams;
+use super::handler::{AccountSelectorParams, RhoodTools};
 use super::types::format_tool_error;
 
 #[tool_router(router = user_router, vis = "pub(super)")]
