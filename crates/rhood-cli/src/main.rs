@@ -5,8 +5,9 @@
 //! investments. Output renders as a human table by default; pass
 //! `--output json` or `--output csv` for machine-readable formats.
 //!
-//! Order placement is gated behind `--read-write`; otherwise the CLI runs
-//! in read-only mode and refuses mutating operations.
+//! Mutating operations are refused in read-only mode, which is the default.
+//! `--read-write` leaves read-only mode for one invocation; a configured
+//! `read_only = false` leaves it for every invocation without a flag.
 
 #![warn(missing_docs)]
 #![forbid(unsafe_code)]
@@ -39,7 +40,7 @@ struct Cli {
     #[arg(long, global = true, value_name = "PATH")]
     token_cache: Option<PathBuf>,
 
-    /// Enable write operations (order placement and cancellation)
+    /// Leave read-only mode for this invocation, overriding `read_only` in config
     #[arg(long, global = true)]
     read_write: bool,
 

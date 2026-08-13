@@ -66,7 +66,7 @@ rhood ipo list
 rhood account list
 rhood --account ABC123 account portfolio
 
-# Place an order (orders require --read-write; you'll be prompted to confirm)
+# Place an order (--read-write leaves read-only mode; you'll be prompted to confirm)
 rhood --read-write order buy AAPL --quantity 10 --type market
 
 # Output as JSON

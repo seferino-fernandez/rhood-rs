@@ -19,8 +19,8 @@ thread_local! {
     /// A test's pinned clock value, or `i64::MIN` meaning "not pinned".
     ///
     /// Deliberately thread-local rather than a process-wide static. Test
-    /// harnesses that share one process across tests — `cargo test` does;
-    /// `cargo nextest` does not — otherwise let one test's pinned clock be
+ /// harnesses that share one process across tests - `cargo test` does;
+ /// `cargo nextest` does not - otherwise let one test's pinned clock be
     /// observed by every other test staging an order concurrently, which made
     /// whole suites fail depending on scheduling. Isolation belongs to the
     /// seam, not to the runner.
@@ -42,7 +42,7 @@ thread_local! {
 /// wall clock, so tests can assert exact Staged Order lifetimes without
 /// sleeping. The override is visible only to the thread that pinned it.
 /// Outside test builds this always reads the real wall clock, and the seam is
-/// not part of the public API — [`crate::RobinhoodClient`] exposes no clock
+/// not part of the public API - [`crate::RobinhoodClient`] exposes no clock
 /// abstraction.
 fn now_unix_ms() -> i64 {
     #[cfg(test)]

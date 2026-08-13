@@ -246,7 +246,7 @@ impl RobinhoodClient {
     /// A URL taken from a response body is untrusted, and
     /// [`Self::send_authenticated_get`] attaches the live bearer token to
     /// whatever it is given. The test is deliberately against this client's own
-    /// configured hosts rather than the vendor's topology — a same-origin check
+    /// configured hosts rather than the vendor's topology - a same-origin check
     /// would guess at how Robinhood shards its API, and a hardcoded domain
     /// would break every wiremock test, where all three base URLs point at one
     /// local server.

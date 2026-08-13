@@ -260,9 +260,10 @@ pub async fn run(
 
 /// Returns the display value for the first column of a position row.
 ///
-/// Prefers the resolved ticker symbol; falls back to the raw instrument URL
-/// when the symbol has not been resolved, and returns an empty string when
-/// neither is available.
+/// Prefers the position's Ticker Symbol, whether Robinhood supplied it on the
+/// wire or Instrument Identity Enrichment filled it in. Falls back to the
+/// Instrument Reference when the position carries no symbol, and returns an
+/// empty string when it carries neither.
 pub fn position_symbol_cell(position: &rhood_core::models::account::Position) -> String {
     position
         .symbol

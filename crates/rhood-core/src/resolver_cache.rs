@@ -25,10 +25,10 @@ use crate::models::stock::{IndexInstrument, Instrument};
 /// The cache stores only identity and metadata lookups that are effectively
 /// immutable over the server lifetime:
 ///
-/// - `symbol → Instrument` (equity metadata)
-/// - `uuid → symbol` (reverse lookup for enrichment)
-/// - `symbol → IndexInstrument`
-/// - `symbol → FuturesContract`
+/// - `symbol -> Instrument` (equity metadata)
+/// - `uuid -> symbol` (reverse lookup for enrichment)
+/// - `symbol -> IndexInstrument`
+/// - `symbol -> FuturesContract`
 /// - The singleton futures account id
 ///
 /// Financial data such as quotes, prices, candles, positions, orders, fundamentals,

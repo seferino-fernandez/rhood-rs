@@ -43,7 +43,7 @@ The workspace enables a strict Clippy lint set in
 no swallowed errors, careful numeric casts, and more).
 
 Do not silence lints with bare `#[allow(...)]`. When a suppression is genuinely
-warranted, use `#[expect(lint_name, reason = "…")]` with a clear reason. This is
+warranted, use `#[expect(lint_name, reason = "...")]` with a clear reason. This is
 enforced by the `allow_attributes` and `allow_attributes_without_reason` lints.
 
 A suppression's reason must stay true. Tooling cannot check this: the lint still
