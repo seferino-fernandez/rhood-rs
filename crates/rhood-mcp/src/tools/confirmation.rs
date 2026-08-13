@@ -366,6 +366,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use axum::http::Request;
+    use rhood_core::RhoodConfig;
     use rhood_core::models::order::{
         MarketHours, OptionOrderIntent, OptionPositionEffect, OrderAmount, OrderType,
         StockOrderIntent, Trigger,
@@ -418,6 +419,20 @@ mod tests {
     }
 
     fn staged_stock(lifetime: Duration) -> StagedOrder {
+        staged_stock_for(
+            lifetime,
+            "AAPL",
+            "https://api.robinhood.com/instruments/instrument-aapl/",
+            "stock-client-ref",
+        )
+    }
+
+    fn staged_stock_for(
+        lifetime: Duration,
+        symbol: &str,
+        instrument: &str,
+        client_ref: &str,
+    ) -> StagedOrder {
         let now = chrono::Utc::now().timestamp_millis();
         let lifetime_ms = i64::try_from(lifetime.as_millis()).unwrap();
         serde_json::from_value(serde_json::json!({
@@ -425,8 +440,8 @@ mod tests {
                 "kind": "Stock",
                 "payload": {
                     "account": "https://api.robinhood.com/accounts/ABC123/",
-                    "instrument": "https://api.robinhood.com/instruments/instrument-aapl/",
-                    "symbol": "AAPL",
+                    "instrument": instrument,
+                    "symbol": symbol,
                     "quantity": "2",
                     "side": "buy",
                     "type": "limit",
@@ -437,7 +452,7 @@ mod tests {
                     "price": "187.25",
                     "override_day_trade_checks": false,
                     "override_dtbp_checks": false,
-                    "ref_id": "stock-client-ref",
+                    "ref_id": client_ref,
                     "order_form_version": 7
                 }
             },
@@ -446,8 +461,8 @@ mod tests {
                 "summary": {
                     "account_number": "ABC123",
                     "account_label": "individual ****C123",
-                    "symbol": "AAPL",
-                    "instrument": "https://api.robinhood.com/instruments/instrument-aapl/",
+                    "symbol": symbol,
+                    "instrument": instrument,
                     "quantity": "2",
                     "side": "buy",
                     "order_type": "limit",
@@ -461,7 +476,7 @@ mod tests {
                     "bid_price": null,
                     "requested_dollar_amount": null,
                     "conversion_price": null,
-                    "client_ref": "stock-client-ref",
+                    "client_ref": client_ref,
                     "order_form_version": 7
                 }
             },
@@ -1044,6 +1059,200 @@ mod tests {
                 .unwrap_err();
             assert!(matches!(error, ConfirmationError::InvalidState));
         }
+    }
+
+    #[tokio::test]
+    async fn confirmation_state_is_bound_to_its_write_tool() {
+        let confirmation = confirmation(ORDER_CONFIRMATION_TTL);
+        let request_state = stage_stock(&confirmation).await;
+        let submissions = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&submissions);
+
+        let error = confirmation
+            .advance_with(
+                "principal-a",
+                "place_option_order",
+                stock_intent(),
+                ConfirmationRound {
+                    request_state: Some(request_state.clone()),
+                    input_responses: Some(response(ElicitationAction::Accept)),
+                },
+                |_| async { panic!("wrong tool must not prepare") },
+                move |_| async move {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                    Ok(submitted_stock())
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ConfirmationError::InvalidState));
+        assert_eq!(submissions.load(Ordering::SeqCst), 0);
+
+        let counted = Arc::clone(&submissions);
+        confirmation
+            .advance_with(
+                "principal-a",
+                "place_stock_order",
+                stock_intent(),
+                ConfirmationRound {
+                    request_state: Some(request_state),
+                    input_responses: Some(response(ElicitationAction::Accept)),
+                },
+                |_| async { panic!("resumed round must not prepare") },
+                move |_| async move {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                    Ok(submitted_stock())
+                },
+            )
+            .await
+            .expect("the correctly bound state remains confirmable");
+        assert_eq!(submissions.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn confirming_one_staged_order_preserves_another_staged_order() {
+        let confirmation = confirmation(ORDER_CONFIRMATION_TTL);
+        let first_staged = staged_stock_for(
+            Duration::from_secs(60),
+            "AAPL",
+            "https://api.robinhood.com/instruments/instrument-aapl/",
+            "aapl-client-ref",
+        );
+        let first_expected = serde_json::to_value(&first_staged).unwrap();
+        let first_state = confirmation
+            .advance_with(
+                "principal-a",
+                "place_stock_order",
+                stock_intent(),
+                ConfirmationRound {
+                    request_state: None,
+                    input_responses: None,
+                },
+                |_| async move { Ok(first_staged) },
+                |_| async { panic!("staging must not submit") },
+            )
+            .await
+            .map(state)
+            .unwrap();
+        let second_staged = staged_stock_for(
+            Duration::from_secs(60),
+            "MSFT",
+            "https://api.robinhood.com/instruments/instrument-msft/",
+            "msft-client-ref",
+        );
+        let second_expected = serde_json::to_value(&second_staged).unwrap();
+        let second_state = confirmation
+            .advance_with(
+                "principal-a",
+                "place_stock_order",
+                stock_intent_for("MSFT"),
+                ConfirmationRound {
+                    request_state: None,
+                    input_responses: None,
+                },
+                |_| async move { Ok(second_staged) },
+                |_| async { panic!("staging must not submit") },
+            )
+            .await
+            .map(state)
+            .unwrap();
+        let submissions = Arc::new(AtomicUsize::new(0));
+
+        let counted = Arc::clone(&submissions);
+        confirmation
+            .advance_with(
+                "principal-a",
+                "place_stock_order",
+                stock_intent(),
+                ConfirmationRound {
+                    request_state: Some(first_state),
+                    input_responses: Some(response(ElicitationAction::Accept)),
+                },
+                |_| async { panic!("resumed round must not prepare") },
+                move |staged| async move {
+                    assert_eq!(serde_json::to_value(staged).unwrap(), first_expected);
+                    counted.fetch_add(1, Ordering::SeqCst);
+                    Ok(submitted_stock())
+                },
+            )
+            .await
+            .expect("the first staged order submits with its sealed identity");
+
+        let counted = Arc::clone(&submissions);
+        confirmation
+            .advance_with(
+                "principal-a",
+                "place_stock_order",
+                stock_intent_for("MSFT"),
+                ConfirmationRound {
+                    request_state: Some(second_state),
+                    input_responses: Some(response(ElicitationAction::Accept)),
+                },
+                |_| async { panic!("resumed round must not prepare") },
+                move |staged| async move {
+                    assert_eq!(serde_json::to_value(staged).unwrap(), second_expected);
+                    counted.fetch_add(1, Ordering::SeqCst);
+                    Ok(submitted_stock())
+                },
+            )
+            .await
+            .expect("the second staged order remains independently confirmable");
+        assert_eq!(submissions.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn advance_consumes_accepted_confirmation_before_real_client_submission() {
+        let confirmation = confirmation(ORDER_CONFIRMATION_TTL);
+        let staged = confirmation
+            .advance_with(
+                STDIO_PRINCIPAL,
+                "place_stock_order",
+                stock_intent(),
+                ConfirmationRound {
+                    request_state: None,
+                    input_responses: None,
+                },
+                |_| async { Ok(staged_stock(Duration::from_secs(60))) },
+                |_| async { panic!("staging must not submit") },
+            )
+            .await
+            .unwrap();
+        let request_state = state(staged);
+        let client = RobinhoodClient::with_config(RhoodConfig::default()).unwrap();
+
+        let error = confirmation
+            .advance(
+                &client,
+                &Extensions::new(),
+                "place_stock_order",
+                stock_intent(),
+                ConfirmationRound {
+                    request_state: Some(request_state.clone()),
+                    input_responses: Some(response(ElicitationAction::Accept)),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ConfirmationError::SubmissionFailure(RhoodError::ReadOnlyMode)
+        ));
+
+        let replay = confirmation
+            .advance_with(
+                "transport:stdio",
+                "place_stock_order",
+                stock_intent(),
+                ConfirmationRound {
+                    request_state: Some(request_state),
+                    input_responses: Some(response(ElicitationAction::Accept)),
+                },
+                |_| async { panic!("replay must not prepare") },
+                |_| async { panic!("accepted state must be consumed before replay") },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(replay, ConfirmationError::AlreadyConsumed));
     }
 
     #[tokio::test]
