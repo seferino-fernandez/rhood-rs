@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::api::paths;
@@ -130,10 +130,19 @@ impl RobinhoodClient {
     /// repeated for duplicate inputs when the API returns the corresponding
     /// fundamental record.
     ///
+    /// The endpoint answers with an instrument reference and no ticker symbol,
+    /// so each record is attributed to the symbol that reference resolves to,
+    /// and that symbol is filled in on the returned record. Attribution costs
+    /// one additional batched instrument lookup, served from cache after the
+    /// first call.
+    ///
     /// # Errors
     ///
     /// If a request chunk fails, returns [`RhoodError::RequestChunkFailed`]
-    /// with its one-based position and no partial results.
+    /// with its one-based position and no partial results. Returns
+    /// [`RhoodError::InvalidMarketDataResponse`] if a record carries no
+    /// instrument reference, if that reference does not resolve to a symbol, or
+    /// if it resolves to a symbol outside the request.
     pub async fn get_fundamentals(&self, symbols: &[&str]) -> Result<Vec<Fundamentals>> {
         let requested = symbols
             .iter()
@@ -146,7 +155,7 @@ impl RobinhoodClient {
         )?;
         let total_chunks = chunks.len();
         let url = self.api_url(paths::FUNDAMENTALS);
-        let mut by_symbol = HashMap::with_capacity(requested.len());
+        let mut received = Vec::with_capacity(requested.len());
 
         for (index, chunk) in chunks.iter().enumerate() {
             let joined = join_chunk(chunk);
@@ -162,24 +171,60 @@ impl RobinhoodClient {
                         source,
                     )
                 })?;
-            for fundamental in resp.results {
-                let symbol = response_symbol("fundamentals", fundamental.symbol.as_deref(), chunk)
-                    .map_err(|source| {
-                        chunk_failed(
-                            "fundamentals",
-                            index.saturating_add(1),
-                            total_chunks,
-                            source,
-                        )
-                    })?;
-                by_symbol.entry(symbol).or_insert(fundamental);
-            }
+            received.extend(resp.results);
         }
 
+        let by_symbol = self.attribute_fundamentals(received, &requested).await?;
         Ok(requested
             .iter()
             .filter_map(|symbol| by_symbol.get(symbol).cloned())
             .collect())
+    }
+
+    /// Keys each fundamentals record by the requested symbol it answers.
+    ///
+    /// Correlation runs through the instrument reference because that is the
+    /// only identifier this endpoint and the request both carry. Taking records
+    /// in the order they arrive would attribute one company's valuation to
+    /// another the first time upstream reorders or short-answers a batch.
+    async fn attribute_fundamentals(
+        &self,
+        received: Vec<Fundamentals>,
+        requested: &[String],
+    ) -> Result<HashMap<String, Fundamentals>> {
+        let invalid = |message: &str| RhoodError::InvalidMarketDataResponse {
+            endpoint: "fundamentals".to_string(),
+            message: message.to_string(),
+        };
+        let mut references = Vec::with_capacity(received.len());
+        for fundamental in &received {
+            let reference = fundamental
+                .instrument
+                .as_deref()
+                .map(str::trim)
+                .filter(|reference| !reference.is_empty())
+                .ok_or_else(|| {
+                    invalid("response item omitted the instrument reference identifying it")
+                })?;
+            references.push(reference.to_owned());
+        }
+
+        let resolved = self.resolve_instrument_symbols(&references).await?;
+        let requested_set = requested.iter().collect::<HashSet<_>>();
+        let mut by_symbol = HashMap::with_capacity(requested.len());
+        for (mut fundamental, symbol) in received.into_iter().zip(resolved) {
+            let symbol = symbol
+                .map(|symbol| symbol.to_uppercase())
+                .ok_or_else(|| invalid("response item named an unresolvable instrument"))?;
+            if !requested_set.contains(&symbol) {
+                return Err(invalid("response item named a symbol outside the request"));
+            }
+            if fundamental.symbol.is_none() {
+                fundamental.symbol = Some(symbol.clone());
+            }
+            by_symbol.entry(symbol).or_insert(fundamental);
+        }
+        Ok(by_symbol)
     }
 
     /// Fetches historical price data (OHLCV candles) for one or more symbols.
@@ -399,7 +444,45 @@ mod tests {
     use crate::models::stock::{Fundamentals, Instrument, StockQuote};
     use secrecy::SecretString;
     use wiremock::matchers::{method, path, query_param};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
+
+    fn instrument_uuid(index: usize) -> String {
+        format!("00000000-0000-4000-8000-{index:012}")
+    }
+
+    fn instrument_url(index: usize) -> String {
+        format!(
+            "https://api.robinhood.com/instruments/{}/",
+            instrument_uuid(index)
+        )
+    }
+
+    /// Answers `/instruments/?ids=` from a UUID-to-symbol table.
+    ///
+    /// Resolution batches its lookups, so a test that mounted one mock per
+    /// expected batch would be asserting how the batching happens rather than
+    /// what the endpoint returns. This states the mapping once instead.
+    struct InstrumentDirectory(HashMap<String, String>);
+
+    impl Respond for InstrumentDirectory {
+        fn respond(&self, request: &Request) -> ResponseTemplate {
+            let ids = request
+                .url
+                .query_pairs()
+                .find(|(name, _)| name == "ids")
+                .map(|(_, value)| value.into_owned())
+                .unwrap_or_default();
+            let results = ids
+                .split(',')
+                .filter_map(|id| {
+                    self.0
+                        .get(id)
+                        .map(|symbol| serde_json::json!({"id": id, "symbol": symbol}))
+                })
+                .collect::<Vec<_>>();
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({"results": results}))
+        }
+    }
 
     async fn client_for_server(base_url: &str) -> (tempfile::TempDir, RobinhoodClient) {
         let dir = tempfile::tempdir().unwrap();
@@ -505,11 +588,26 @@ mod tests {
             .collect::<Vec<_>>();
         let first_joined = unique[..100].join(",");
         let second_joined = unique[100..].join(",");
-        let first_results = unique[..100]
-            .iter()
+        // The endpoint answers with instrument references and no symbols, and
+        // the first chunk answers in reverse. Order is restored from the
+        // references, so reversing the batch must not reorder the results.
+        // Each record carries a value unique to its instrument. Without it the
+        // records are interchangeable, and attributing them by arrival order
+        // instead of by reference would produce the same output.
+        let first_results = (0..100)
             .rev()
-            .map(|symbol| serde_json::json!({"symbol": symbol}))
+            .map(|index| {
+                serde_json::json!({
+                    "instrument": instrument_url(index),
+                    "pe_ratio": index.to_string()
+                })
+            })
             .collect::<Vec<_>>();
+        let directory = InstrumentDirectory(
+            (0..101)
+                .map(|index| (instrument_uuid(index), unique[index].clone()))
+                .collect(),
+        );
         Mock::given(method("GET"))
             .and(path("/fundamentals/"))
             .and(query_param("symbols", first_joined))
@@ -524,9 +622,14 @@ mod tests {
             .and(path("/fundamentals/"))
             .and(query_param("symbols", second_joined))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "results": [{"symbol": unique[100]}]
+                "results": [{"instrument": instrument_url(100), "pe_ratio": "100"}]
             })))
             .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/instruments/"))
+            .respond_with(directory)
             .mount(&server)
             .await;
         let (_dir, client) = client_for_server(&server.uri()).await;
@@ -541,30 +644,30 @@ mod tests {
             .collect::<Vec<_>>();
         let expected = caller.to_vec();
         assert_eq!(actual, expected);
+        // Every record must carry the value belonging to its own instrument.
+        let carried = fundamentals
+            .iter()
+            .filter_map(|fundamental| fundamental.pe_ratio.as_deref())
+            .collect::<Vec<_>>();
+        let mut owned = (0..101).map(|index| index.to_string()).collect::<Vec<_>>();
+        owned.push("0".to_string());
+        assert_eq!(carried, owned);
         let requests = server.received_requests().await.unwrap();
-        assert_eq!(requests.len(), 2);
-        assert_eq!(
-            requests[0]
-                .url
-                .query_pairs()
-                .find(|(name, _)| name == "symbols")
-                .unwrap()
-                .1
-                .split(',')
-                .count(),
-            100
-        );
-        assert_eq!(
-            requests[1]
-                .url
-                .query_pairs()
-                .find(|(name, _)| name == "symbols")
-                .unwrap()
-                .1
-                .split(',')
-                .count(),
-            1
-        );
+        let batch_sizes = requests
+            .iter()
+            .filter(|request| request.url.path() == "/fundamentals/")
+            .map(|request| {
+                request
+                    .url
+                    .query_pairs()
+                    .find(|(name, _)| name == "symbols")
+                    .unwrap()
+                    .1
+                    .split(',')
+                    .count()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(batch_sizes, [100, 1]);
         server.verify().await;
     }
 
@@ -646,14 +749,46 @@ mod tests {
         assert!(server.received_requests().await.unwrap().is_empty());
     }
 
+    /// The endpoint sends no `symbol` key at all, only an instrument reference.
+    /// Requiring one made every call fail against the live API while this
+    /// module's mocks, which invented the field, stayed green.
     #[tokio::test]
-    async fn fundamentals_without_a_requested_symbol_fail_the_whole_call() {
+    async fn fundamentals_carrying_no_symbol_resolve_through_the_instrument() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/fundamentals/"))
             .and(query_param("symbols", "AAPL"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "results": [{}]
+                "results": [{"instrument": instrument_url(7), "pe_ratio": "34.6"}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/instruments/"))
+            .respond_with(InstrumentDirectory(
+                [(instrument_uuid(7), "AAPL".to_string())].into(),
+            ))
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server.uri()).await;
+
+        let fundamentals = client.get_fundamentals(&["aapl"]).await.unwrap();
+
+        assert_eq!(fundamentals.len(), 1);
+        assert_eq!(fundamentals[0].symbol.as_deref(), Some("AAPL"));
+        assert_eq!(fundamentals[0].pe_ratio.as_deref(), Some("34.6"));
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn fundamentals_without_an_instrument_reference_fail_the_whole_call() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/fundamentals/"))
+            .and(query_param("symbols", "AAPL"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [{"pe_ratio": "34.6"}]
             })))
             .expect(1)
             .mount(&server)
@@ -664,8 +799,70 @@ mod tests {
 
         assert!(matches!(
             error,
-            RhoodError::RequestChunkFailed { source, .. }
-                if matches!(*source, RhoodError::InvalidMarketDataResponse { .. })
+            RhoodError::InvalidMarketDataResponse { ref endpoint, .. }
+                if endpoint == "fundamentals"
+        ));
+        server.verify().await;
+    }
+
+    /// A record answering for a company nobody asked about must not be handed
+    /// back under a requested ticker.
+    #[tokio::test]
+    async fn fundamentals_naming_a_symbol_outside_the_request_fail_the_whole_call() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/fundamentals/"))
+            .and(query_param("symbols", "AAPL"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [{"instrument": instrument_url(9)}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/instruments/"))
+            .respond_with(InstrumentDirectory(
+                [(instrument_uuid(9), "TSLA".to_string())].into(),
+            ))
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server.uri()).await;
+
+        let error = client.get_fundamentals(&["AAPL"]).await.unwrap_err();
+
+        assert!(matches!(
+            error,
+            RhoodError::InvalidMarketDataResponse { ref endpoint, .. }
+                if endpoint == "fundamentals"
+        ));
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn fundamentals_naming_an_unresolvable_instrument_fail_the_whole_call() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/fundamentals/"))
+            .and(query_param("symbols", "AAPL"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [{"instrument": instrument_url(11)}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/instruments/"))
+            .respond_with(InstrumentDirectory(HashMap::new()))
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server.uri()).await;
+
+        let error = client.get_fundamentals(&["AAPL"]).await.unwrap_err();
+
+        assert!(matches!(
+            error,
+            RhoodError::InvalidMarketDataResponse { ref endpoint, .. }
+                if endpoint == "fundamentals"
         ));
         server.verify().await;
     }
