@@ -297,7 +297,26 @@ impl RobinhoodClient {
         let resp: ResultsResponse<Instrument> = self
             .get_with_params(&self.api_url(paths::INSTRUMENTS), &params)
             .await?;
-        Ok(resp.results.into_iter().next())
+        // ADR-0004 rule 1: the query is a server-side filter, but a record is
+        // attributed to this request only by an identifier both sides carry.
+        // Taking the first row on trust is how an order gets staged against one
+        // instrument while its Order Summary names another.
+        let Some(instrument) = resp.results.into_iter().next() else {
+            return Ok(None);
+        };
+        let Some(returned_symbol) = instrument.symbol.as_deref() else {
+            return Err(RhoodError::InvalidMarketDataResponse {
+                endpoint: "instruments".to_string(),
+                message: "instrument response omitted its symbol".into(),
+            });
+        };
+        if !returned_symbol.eq_ignore_ascii_case(&uppercased_symbol) {
+            return Err(RhoodError::InvalidMarketDataResponse {
+                endpoint: "instruments".to_string(),
+                message: "instrument response named a different symbol than requested".into(),
+            });
+        }
+        Ok(Some(instrument))
     }
 
     /// Looks up a Robinhood index instrument by its symbol (e.g., "SPX").
@@ -1028,5 +1047,84 @@ mod tests {
         let tradabilities = inst.account_type_tradabilities.unwrap();
         assert_eq!(tradabilities.len(), 1);
         assert_eq!(tradabilities[0].account_type.as_deref(), Some("individual"));
+    }
+
+    /// Mounts one instruments response and asks for AAPL.
+    async fn instrument_lookup(body: serde_json::Value) -> Result<Option<Instrument>> {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/instruments/"))
+            .and(query_param("symbol", "AAPL"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server.uri()).await;
+        client.get_instrument_by_symbol("AAPL").await
+    }
+
+    /// ADR-0004 rule 1. The query is a server-side filter, and this is the test
+    /// that says we do not take its word for it: a mismatched first row must
+    /// fail rather than reach order preparation, where its URL would go into
+    /// the broker payload under the requested symbol's name.
+    #[tokio::test]
+    async fn instrument_lookup_rejects_a_symbol_it_did_not_ask_for() {
+        let error = instrument_lookup(serde_json::json!({
+            "results": [{
+                "symbol": "MSFT",
+                "url": "https://api.robinhood.com/instruments/instrument-msft/"
+            }]
+        }))
+        .await
+        .expect_err("a non-matching instrument must be refused");
+
+        assert!(
+            matches!(
+                &error,
+                RhoodError::InvalidMarketDataResponse { endpoint, .. } if endpoint == "instruments"
+            ),
+            "expected a fail-closed market-data error, got {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn instrument_lookup_rejects_a_record_that_cannot_identify_itself() {
+        let error = instrument_lookup(serde_json::json!({
+            "results": [{
+                "url": "https://api.robinhood.com/instruments/instrument-unknown/"
+            }]
+        }))
+        .await
+        .expect_err("an instrument with no symbol must be refused");
+
+        assert!(matches!(
+            &error,
+            RhoodError::InvalidMarketDataResponse { endpoint, .. } if endpoint == "instruments"
+        ));
+    }
+
+    #[tokio::test]
+    async fn instrument_lookup_accepts_a_matching_symbol_case_insensitively() {
+        let instrument = instrument_lookup(serde_json::json!({
+            "results": [{
+                "symbol": "aapl",
+                "url": "https://api.robinhood.com/instruments/instrument-aapl/"
+            }]
+        }))
+        .await
+        .unwrap()
+        .expect("a matching instrument is returned");
+
+        assert_eq!(
+            instrument.url.as_deref(),
+            Some("https://api.robinhood.com/instruments/instrument-aapl/")
+        );
+    }
+
+    #[tokio::test]
+    async fn instrument_lookup_still_reports_an_empty_result_as_absence() {
+        let instrument = instrument_lookup(serde_json::json!({ "results": [] }))
+            .await
+            .unwrap();
+        assert!(instrument.is_none());
     }
 }
