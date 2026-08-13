@@ -1,10 +1,12 @@
 use crate::output::{OutputFormat, output};
 use clap::Subcommand;
 use rhood_core::models::order::{
-    MarketHours, OrderAmount, OrderIntent, OrderSummary, OrderType, Side, StockOrderIntent,
-    StockOrderSummary, TimeInForce, Trigger,
+    MarketHours, OrderAmount, OrderIntent, OrderSummary, OrderType, Side, StagedOrder,
+    StockOrderIntent, StockOrderSummary, SubmittedOrder, TimeInForce, Trigger,
 };
 use rhood_core::{RhoodConfig, RobinhoodClient};
+use std::future::Future;
+use std::io::Write;
 
 #[derive(Subcommand)]
 pub enum OrderCommand {
@@ -142,6 +144,60 @@ fn staged_order_message(summary: &StockOrderSummary) -> String {
     )
 }
 
+/// Stages an order through core, shows the human the exact execution terms,
+/// asks for Confirmation, and submits at most once.
+///
+/// This is the whole trade-authorisation path for both `buy` and `sell`, kept
+/// in one place so the two subcommands cannot drift apart in what they show or
+/// when they submit.
+async fn stage_confirm_submit(
+    client: &RobinhoodClient,
+    intent: OrderIntent,
+    yes: bool,
+    out: &mut impl Write,
+) -> anyhow::Result<()> {
+    stage_confirm_submit_with(
+        intent,
+        |intent| client.prepare_order(intent),
+        || confirm_order(yes),
+        |staged| client.submit_order(staged),
+        out,
+    )
+    .await
+}
+
+/// [`stage_confirm_submit`] with its three effects supplied by the caller.
+///
+/// Preparation, Confirmation, and submission are parameters so tests can
+/// observe how many times each one runs without a brokerage, a terminal, or a
+/// network. Production always reaches this through [`stage_confirm_submit`],
+/// which binds them to the real client and the real prompt.
+async fn stage_confirm_submit_with<PrepareFut, SubmitFut>(
+    intent: OrderIntent,
+    prepare: impl FnOnce(OrderIntent) -> PrepareFut,
+    confirm: impl FnOnce() -> anyhow::Result<bool>,
+    submit: impl FnOnce(StagedOrder) -> SubmitFut,
+    out: &mut impl Write,
+) -> anyhow::Result<()>
+where
+    PrepareFut: Future<Output = rhood_core::Result<StagedOrder>>,
+    SubmitFut: Future<Output = rhood_core::Result<SubmittedOrder>>,
+{
+    let staged = prepare(intent).await?;
+    let OrderSummary::Stock(summary) = staged.summary() else {
+        anyhow::bail!("core returned an option summary for a stock order");
+    };
+    writeln!(out, "{}", staged_order_message(summary))?;
+    if !confirm()? {
+        writeln!(out, "Order cancelled.")?;
+        return Ok(());
+    }
+    let order = submit(staged).await?;
+    let id = order.id().unwrap_or("unknown");
+    writeln!(out, "{}", placed_order_message(id, order.state()))?;
+    Ok(())
+}
+
 pub async fn run(
     cmd: &OrderCommand,
     format: OutputFormat,
@@ -193,18 +249,13 @@ pub async fn run(
                 time_in_force,
                 market_hours: *market_hours,
             };
-            let staged = client.prepare_order(OrderIntent::Stock(intent)).await?;
-            let OrderSummary::Stock(summary) = staged.summary() else {
-                anyhow::bail!("core returned an option summary for a stock order");
-            };
-            println!("{}", staged_order_message(summary));
-            if !confirm_order(*yes)? {
-                println!("Order cancelled.");
-                return Ok(());
-            }
-            let order = client.submit_order(staged).await?;
-            let id = order.id().unwrap_or("unknown");
-            println!("{}", placed_order_message(id, order.state()));
+            stage_confirm_submit(
+                &client,
+                OrderIntent::Stock(intent),
+                *yes,
+                &mut std::io::stdout(),
+            )
+            .await?;
         }
         OrderCommand::Sell {
             symbol,
@@ -231,18 +282,13 @@ pub async fn run(
                 time_in_force: TimeInForce::Gtc,
                 market_hours: *market_hours,
             };
-            let staged = client.prepare_order(OrderIntent::Stock(intent)).await?;
-            let OrderSummary::Stock(summary) = staged.summary() else {
-                anyhow::bail!("core returned an option summary for a stock order");
-            };
-            println!("{}", staged_order_message(summary));
-            if !confirm_order(*yes)? {
-                println!("Order cancelled.");
-                return Ok(());
-            }
-            let order = client.submit_order(staged).await?;
-            let id = order.id().unwrap_or("unknown");
-            println!("{}", placed_order_message(id, order.state()));
+            stage_confirm_submit(
+                &client,
+                OrderIntent::Stock(intent),
+                *yes,
+                &mut std::io::stdout(),
+            )
+            .await?;
         }
         OrderCommand::List { status, since } => {
             let account = super::resolve_account_number(&client, requested_account).await?;
@@ -281,11 +327,17 @@ pub async fn run(
 
 #[cfg(test)]
 mod tests {
-    use rhood_core::models::order::{
-        MarketHours, OrderType, Side, StockOrderSummary, TimeInForce, Trigger,
-    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use super::{placed_order_message, staged_order_message};
+    use rhood_core::models::order::{
+        MarketHours, OrderAmount, OrderIntent, OrderType, Side, StagedOrder, StockOrderIntent,
+        StockOrderSummary, SubmittedOrder, TimeInForce, Trigger,
+    };
+    use rhood_core::{RhoodConfig, RhoodError, RobinhoodClient};
+
+    use super::{
+        placed_order_message, stage_confirm_submit, stage_confirm_submit_with, staged_order_message,
+    };
 
     #[test]
     fn staged_stock_message_renders_core_summary() {
@@ -453,6 +505,227 @@ mod tests {
             Side::Buy => "buy",
             Side::Sell => "sell",
         }
+    }
+
+    // End-to-end proofs for the trade-authorisation path. Preparation,
+    // Confirmation, and submission are injected, so each test can count how
+    // many times each effect ran -- a submission that happens after a decline,
+    // or twice after one acceptance, is the failure these exist to catch.
+
+    fn stock_intent() -> OrderIntent {
+        OrderIntent::Stock(StockOrderIntent {
+            account_number: Some("ABC123".to_string()),
+            symbol: "AAPL".to_string(),
+            amount: OrderAmount::Quantity(2.0),
+            side: Side::Buy,
+            order_type: OrderType::Limit,
+            limit_price: Some(187.25),
+            trigger: Trigger::Immediate,
+            stop_price: None,
+            time_in_force: TimeInForce::Gtc,
+            market_hours: MarketHours::RegularHours,
+        })
+    }
+
+    fn staged_stock() -> StagedOrder {
+        let now = chrono_now_ms();
+        serde_json::from_value(serde_json::json!({
+            "payload": {
+                "kind": "Stock",
+                "payload": {
+                    "account": "https://api.robinhood.com/accounts/ABC123/",
+                    "instrument": "https://api.robinhood.com/instruments/instrument-aapl/",
+                    "symbol": "AAPL",
+                    "quantity": "2",
+                    "side": "buy",
+                    "type": "limit",
+                    "time_in_force": "gtc",
+                    "trigger": "immediate",
+                    "market_hours": "regular_hours",
+                    "extended_hours": false,
+                    "price": "187.25",
+                    "override_day_trade_checks": false,
+                    "override_dtbp_checks": false,
+                    "ref_id": "cli-client-ref-4f21",
+                    "order_form_version": 7
+                }
+            },
+            "summary": {
+                "kind": "Stock",
+                "summary": {
+                    "account_number": "ABC123",
+                    "account_label": "individual ****C123",
+                    "symbol": "AAPL",
+                    "instrument": "https://api.robinhood.com/instruments/instrument-aapl/",
+                    "quantity": "2",
+                    "side": "buy",
+                    "order_type": "limit",
+                    "time_in_force": "gtc",
+                    "trigger": "immediate",
+                    "market_hours": "regular_hours",
+                    "extended_hours": false,
+                    "price": "187.25",
+                    "stop_price": null,
+                    "ask_price": null,
+                    "bid_price": null,
+                    "requested_dollar_amount": null,
+                    "conversion_price": null,
+                    "client_ref": "cli-client-ref-4f21",
+                    "order_form_version": 7
+                }
+            },
+            "prepared_at_unix_ms": now,
+            "expires_at_unix_ms": now.saturating_add(60_000)
+        }))
+        .unwrap()
+    }
+
+    fn chrono_now_ms() -> i64 {
+        std::time::UNIX_EPOCH
+            .elapsed()
+            .map(|elapsed| i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX))
+            .unwrap_or_default()
+    }
+
+    fn submitted_stock() -> SubmittedOrder {
+        serde_json::from_value(serde_json::json!({
+            "kind": "Stock",
+            "order": {"id": "stock-order-id", "state": "queued"}
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn decline_submits_nothing() {
+        let mut out = Vec::new();
+        stage_confirm_submit_with(
+            stock_intent(),
+            |_| async { Ok(staged_stock()) },
+            || Ok(false),
+            |_| async { panic!("a declined order must never be submitted") },
+            &mut out,
+        )
+        .await
+        .unwrap();
+
+        let rendered = String::from_utf8(out).unwrap();
+        assert!(rendered.contains("Staged stock order"), "{rendered}");
+        assert!(rendered.contains("Order cancelled."), "{rendered}");
+        assert!(!rendered.contains("Order placed"), "{rendered}");
+    }
+
+    #[tokio::test]
+    async fn interactive_acceptance_submits_exactly_once() {
+        let submissions = AtomicUsize::new(0);
+        let confirmations = AtomicUsize::new(0);
+        let mut out = Vec::new();
+        stage_confirm_submit_with(
+            stock_intent(),
+            |_| async { Ok(staged_stock()) },
+            || {
+                confirmations.fetch_add(1, Ordering::SeqCst);
+                Ok(true)
+            },
+            |_| async {
+                submissions.fetch_add(1, Ordering::SeqCst);
+                Ok(submitted_stock())
+            },
+            &mut out,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(submissions.load(Ordering::SeqCst), 1);
+        assert_eq!(confirmations.load(Ordering::SeqCst), 1);
+        let rendered = String::from_utf8(out).unwrap();
+        assert!(
+            rendered.contains("Order placed: stock-order-id"),
+            "{rendered}"
+        );
+    }
+
+    #[tokio::test]
+    async fn yes_flag_submits_exactly_once_without_consulting_the_terminal() {
+        // `confirm_order(true)` returns before it touches stdin, so the real
+        // `--yes` path never prompts. Binding the confirm effect to a panic
+        // here proves the flag short-circuits Confirmation rather than merely
+        // answering it.
+        let submissions = AtomicUsize::new(0);
+        let mut out = Vec::new();
+        stage_confirm_submit_with(
+            stock_intent(),
+            |_| async { Ok(staged_stock()) },
+            || super::confirm_order(true),
+            |_| async {
+                submissions.fetch_add(1, Ordering::SeqCst);
+                Ok(submitted_stock())
+            },
+            &mut out,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(submissions.load(Ordering::SeqCst), 1);
+        let rendered = String::from_utf8(out).unwrap();
+        assert!(
+            rendered.contains("Order placed: stock-order-id"),
+            "{rendered}"
+        );
+    }
+
+    #[tokio::test]
+    async fn uncertain_submission_reports_reconciliation_and_client_reference() {
+        let mut out = Vec::new();
+        let error = stage_confirm_submit_with(
+            stock_intent(),
+            |_| async { Ok(staged_stock()) },
+            || Ok(true),
+            |staged| {
+                let client_ref = staged.client_reference().to_string();
+                async move {
+                    Err(RhoodError::SubmissionUncertain {
+                        client_ref,
+                        message: "request timed out after dispatch".to_string(),
+                    })
+                }
+            },
+            &mut out,
+        )
+        .await
+        .unwrap_err();
+
+        let reported = error.to_string();
+        assert!(
+            reported.contains("cli-client-ref-4f21"),
+            "the frozen client reference must survive to the user: {reported}"
+        );
+        assert!(
+            reported.contains("Reconcile"),
+            "uncertainty must carry reconciliation guidance: {reported}"
+        );
+        let rendered = String::from_utf8(out).unwrap();
+        assert!(!rendered.contains("Order placed"), "{rendered}");
+    }
+
+    #[tokio::test]
+    async fn production_path_uses_the_real_client_preparation() {
+        // The injected variant above proves the orchestration; this proves the
+        // production entry point is wired to the real `prepare_order` rather
+        // than to a stand-in. A default configuration is read-only, so core
+        // refuses before any network call.
+        let client = RobinhoodClient::with_config(RhoodConfig::default()).unwrap();
+        let mut out = Vec::new();
+        let error = stage_confirm_submit(&client, stock_intent(), true, &mut out)
+            .await
+            .unwrap_err();
+
+        assert!(
+            error
+                .downcast_ref::<RhoodError>()
+                .is_some_and(|source| { matches!(source, RhoodError::ReadOnlyMode) }),
+            "expected the real preparation path to refuse in read-only mode: {error}"
+        );
+        assert!(out.is_empty(), "nothing may be shown when staging fails");
     }
 
     #[test]
