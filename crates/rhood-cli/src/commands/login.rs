@@ -14,7 +14,7 @@ enum MfaSource {
 /// Decides whether to use a configured MFA secret, prompt for one, or proceed
 /// without.
 ///
-/// Skipping the prompt is about whether we can prompt at all — never about
+/// Skipping the prompt is about whether we can prompt at all - never about
 /// whether *other* credentials happen to be configured. Keying it on username
 /// and password meant a user who kept those two in a password manager and
 /// expected to type their one-time code was silently never asked for it.
