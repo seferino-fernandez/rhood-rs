@@ -79,12 +79,22 @@ impl RobinhoodClient {
         let wrapper: FuturesQuoteDataWrapper = self
             .get_futures_with_params(&self.api_url(paths::FUTURES_QUOTES), &params)
             .await?;
-        wrapper
+        // ADR-0004 rule 1 applies to single-item requests too. "We only asked
+        // for one" is exactly the reasoning that left this method trusting
+        // response position while the batch method below correlates by ID.
+        let quote = wrapper
             .data
             .into_iter()
             .next()
             .map(|item| item.data)
-            .ok_or_else(|| RhoodError::InvalidSymbol(symbol.to_string()))
+            .ok_or_else(|| RhoodError::InvalidSymbol(symbol.to_string()))?;
+        if quote_instrument_id(quote.instrument_id.as_deref())? != instrument_id {
+            return Err(RhoodError::InvalidMarketDataResponse {
+                endpoint: "futures quotes".to_string(),
+                message: "response item named an instrument outside its request".into(),
+            });
+        }
+        Ok(quote)
     }
 
     /// Fetches real-time futures quotes for multiple symbols in a single request.
@@ -300,6 +310,92 @@ mod tests {
             .await;
         let (_dir, client) = client_for_server(&server).await;
         client.get_futures_quotes(symbols).await
+    }
+
+    /// Mounts one contract lookup and one quote batch, then asks for the
+    /// singular quote.
+    async fn single_quote_against(
+        symbol: &str,
+        instrument_id: &str,
+        quote_body: serde_json::Value,
+    ) -> crate::Result<FuturesQuote> {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/arsenal/v1/futures/contracts/symbol/{symbol}/"
+            )))
+            .and(header("authorization", "Bearer access-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "result": {"id": instrument_id, "symbol": symbol}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/marketdata/futures/quotes/v1/"))
+            .and(header("authorization", "Bearer access-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(quote_body))
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server).await;
+        client.get_futures_quote(symbol).await
+    }
+
+    /// ADR-0004 rule 1 covers single-item requests. This is the sibling the
+    /// BL-57 fix left behind: the batch method below correlates by instrument
+    /// ID, and for a day this one three lines above still took the first row.
+    #[tokio::test]
+    async fn single_futures_quote_rejects_an_instrument_it_did_not_request() {
+        let error = single_quote_against(
+            "ESM26",
+            "id-es",
+            serde_json::json!({"data": [
+                {"data": {"symbol": "/NQM26:XCME", "instrument_id": "id-nq"}}
+            ]}),
+        )
+        .await
+        .expect_err("a quote for another instrument must be refused");
+
+        assert!(
+            matches!(
+                &error,
+                RhoodError::InvalidMarketDataResponse { endpoint, .. } if endpoint == "futures quotes"
+            ),
+            "expected a fail-closed market-data error, got {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn single_futures_quote_rejects_a_response_without_an_instrument_id() {
+        let error = single_quote_against(
+            "ESM26",
+            "id-es",
+            serde_json::json!({"data": [
+                {"data": {"symbol": "/ESM26:XCME", "instrument_id": null}}
+            ]}),
+        )
+        .await
+        .expect_err("a quote that cannot identify itself must be refused");
+
+        assert!(matches!(
+            &error,
+            RhoodError::InvalidMarketDataResponse { endpoint, .. } if endpoint == "futures quotes"
+        ));
+    }
+
+    #[tokio::test]
+    async fn single_futures_quote_returns_the_requested_instrument() {
+        let quote = single_quote_against(
+            "ESM26",
+            "id-es",
+            serde_json::json!({"data": [
+                {"data": {"symbol": "/ESM26:XCME", "instrument_id": "id-es", "last_trade_price": "5182.75"}}
+            ]}),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(quote.symbol.as_deref(), Some("/ESM26:XCME"));
+        assert_eq!(quote.last_trade_price.as_deref(), Some("5182.75"));
     }
 
     /// The defect BL-57 was filed for. The upstream batch answers in an order
