@@ -8,10 +8,16 @@ verify:
     cargo clippy --all-targets --all-features -- -D warnings
     cargo nextest run --all-targets --all-features
 
-# Run all tests: full feature matrix, default features, and doctests
+# Run all tests: full feature matrix, default features, doctests, and the
+# thread-parallel runner. `cargo nextest` gives every test its own process, so
+# it cannot see tests leaking shared state into each other; `cargo test` shares
+# one process and does. Keep both — BL-75 was a module-wide clock override that
+# was invisible to nextest and failed a different set of tests on every
+# `cargo test` run.
 test:
 	cargo nextest run --all-targets --all-features
 	cargo nextest run
+	cargo test --workspace --all-features
 	cargo test --doc
 
 # Run live-API integration tests against Robinhood (requires credentials)
