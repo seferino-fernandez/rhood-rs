@@ -46,6 +46,34 @@ Do not silence lints with bare `#[allow(...)]`. When a suppression is genuinely
 warranted, use `#[expect(lint_name, reason = "…")]` with a clear reason. This is
 enforced by the `allow_attributes` and `allow_attributes_without_reason` lints.
 
+A suppression's reason must stay true. Tooling cannot check this: the lint still
+fires, so the expectation is still fulfilled and the gate stays green while the
+stated justification has quietly become false. When you change the code around a
+suppression, re-read its reason.
+
+## Tests must constrain the code, not agree with it
+
+A test that is written from the same information as the code will agree with the
+code instead of constraining it, and it reports success either way. This has been
+caught five times in this repository, so it is worth stating plainly.
+
+Two rules:
+
+- **Never assert against a value the production code also computes.** Do not read
+  the constant a test exists to guard, and do not rebuild the production
+  expression inside the test and assert on your copy. Write the expected value as
+  a literal. A test that reads `STAGED_STOCK_ORDER_TTL_MS` cannot notice that
+  constant changing; a test that reconstructs a table row cannot notice the
+  renderer reordering its columns.
+- **Watch every new assertion fail once before you trust it.** Break the thing it
+  guards, see it go red, put it back. This costs a minute and is the only check
+  that distinguishes a passing test from a test that cannot fail.
+
+Choose fixture values that cannot be satisfied by accident. A fixture using
+`quantity: "2"` once passed a `contains("2")` assertion via an unrelated account
+label in the same string, and would have survived the field being deleted. Long,
+mutually non-overlapping values remove that whole class.
+
 ## Pull requests
 
 - Keep PRs focused and reasonably small.
