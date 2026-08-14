@@ -160,7 +160,7 @@ pub async fn run(
                     total: total_amount.clone(),
                 };
                 let headers = &["Total Dividends"];
-                let rows = vec![vec![format!("${total_amount}")]];
+                let rows = dividend_total_rows(&total_amount);
                 output(format, headers, &rows, &payload);
             } else {
                 let dividends = client.get_dividends(since.as_deref()).await?;
@@ -324,6 +324,13 @@ pub fn buying_power_rows(summary: &AccountSummary) -> Vec<Vec<String>> {
         money(&summary.uninvested_cash),
         money(&summary.withdrawable_cash),
     ]]
+}
+
+/// Build a single-row table for the total-dividends view.
+///
+/// Columns: Total Dividends.
+pub fn dividend_total_rows(total_amount: &str) -> Vec<Vec<String>> {
+    vec![vec![format!("${total_amount}")]]
 }
 
 /// Build table rows for the documents list view.
@@ -521,7 +528,10 @@ mod tests {
     #[test]
     fn dividend_total_row_has_dollar_prefix() {
         let total_amount = "0.19";
-        assert_eq!(format!("${total_amount}"), "$0.19");
+        let rows = dividend_total_rows(total_amount);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].len(), 1);
+        assert_eq!(rows[0][0], "$0.19");
     }
 
     #[test]
