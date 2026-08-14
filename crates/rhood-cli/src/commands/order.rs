@@ -914,9 +914,9 @@ mod tests {
     #[tokio::test]
     async fn yes_flag_submits_exactly_once_without_consulting_the_terminal() {
         // `confirm_order(true)` returns before it touches stdin, so the real
-        // `--yes` path never prompts. Binding the confirm effect to a panic
-        // here proves the flag short-circuits Confirmation rather than merely
-        // answering it.
+        // `--yes` path never prompts. Calling the real confirmation function
+        // proves that production behavior returns before stdin is touched,
+        // rather than merely proving that orchestration skips a panicking stub.
         let submissions = AtomicUsize::new(0);
         let mut out = Vec::new();
         let mut err = Vec::new();
