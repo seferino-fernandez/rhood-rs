@@ -127,6 +127,7 @@ pub async fn run(
         } => {
             let account = super::resolve_account_number(&client, requested_account).await?;
             let req = CreateRecurringRequest {
+                client_ref: None,
                 account_number: account,
                 symbol: symbol.clone(),
                 amount: *amount,

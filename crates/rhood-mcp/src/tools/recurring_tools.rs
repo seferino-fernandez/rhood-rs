@@ -126,6 +126,7 @@ impl RhoodTools {
         let account =
             Self::resolve_account_number(&client, params.account_number.as_deref()).await?;
         let req = CreateRecurringRequest {
+            client_ref: None,
             account_number: account,
             symbol: params.symbol,
             amount: params.amount,
