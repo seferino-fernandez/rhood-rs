@@ -124,6 +124,8 @@ pub struct RecurringInvestment {
 /// Request to create a new recurring investment schedule.
 #[derive(Debug, Clone)]
 pub struct CreateRecurringRequest {
+    /// Caller-supplied reference used to reconcile an uncertain submission.
+    pub client_ref: Option<String>,
     /// Canonical brokerage account number selected through account discovery.
     pub account_number: String,
     /// Ticker symbol (e.g., "TSLA").
