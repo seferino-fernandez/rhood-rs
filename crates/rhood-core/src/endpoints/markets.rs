@@ -2,7 +2,7 @@ use crate::api::paths;
 use crate::client::RobinhoodClient;
 use crate::models::market::*;
 use crate::models::watchlist::WatchlistItem;
-use crate::pagination::PaginatedResponse;
+use crate::pagination::ResultsResponse;
 use crate::{Result, RhoodError};
 
 impl RobinhoodClient {
@@ -56,20 +56,87 @@ impl RobinhoodClient {
     /// Fetches the top 20 daily movers from Robinhood's curated list.
     ///
     /// Uses the `/discovery/lists/items/` endpoint with Robinhood's daily
-    /// movers list ID. Returns enriched items with live price and change data.
+    /// movers list ID. This route returns one non-paginated list of enriched
+    /// items with live price and change data.
     ///
     /// # Errors
     ///
     /// Returns an error if the HTTP request fails or the response cannot be
     /// deserialized.
     pub async fn get_daily_movers(&self) -> Result<Vec<WatchlistItem>> {
-        let resp: PaginatedResponse<WatchlistItem> = self
+        let resp: ResultsResponse<WatchlistItem> = self
             .get_with_params(
                 &self.api_url(paths::WATCHLIST_ITEMS),
                 &[("list_id", paths::DAILY_MOVERS_LIST_ID)],
             )
             .await?;
         Ok(resp.results)
+    }
+}
+
+#[cfg(test)]
+mod endpoint_tests {
+    use crate::client::RobinhoodClient;
+    use crate::config::RhoodConfig;
+    use crate::models::watchlist::WatchlistItem;
+    use secrecy::SecretString;
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    async fn client_for_server(base_url: &str) -> (tempfile::TempDir, RobinhoodClient) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = RhoodConfig::default();
+        config.auth.token_cache_path = dir
+            .path()
+            .join("nonexistent-token.json")
+            .to_str()
+            .unwrap()
+            .to_string();
+        config.api.base_url = base_url.to_string();
+        let client = RobinhoodClient::with_config(config).unwrap();
+        client
+            .inject_test_auth(
+                SecretString::from("access-token"),
+                "Bearer".to_string(),
+                SecretString::from("refresh-token"),
+            )
+            .await;
+        (dir, client)
+    }
+
+    #[tokio::test]
+    async fn get_daily_movers_deserializes_non_paginated_envelope() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/discovery/lists/items/"))
+            .and(query_param(
+                "list_id",
+                "eddbebe5-34cc-4df1-953c-d3e3cb55bc19",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "has_futures_contracts": false,
+                "results": [
+                    {"id": "mover-1", "symbol": "AAPL"},
+                    {"id": "mover-2", "symbol": "MSFT"}
+                ]
+            })))
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server.uri()).await;
+
+        let movers = client.get_daily_movers().await.unwrap();
+
+        let ids: Vec<_> = movers
+            .iter()
+            .filter_map(|item: &WatchlistItem| item.id.as_deref())
+            .collect();
+        assert_eq!(ids, ["mover-1", "mover-2"]);
+        let symbols: Vec<_> = movers
+            .iter()
+            .filter_map(|item| item.symbol.as_deref())
+            .collect();
+        assert_eq!(symbols, ["AAPL", "MSFT"]);
+        server.verify().await;
     }
 }
 
