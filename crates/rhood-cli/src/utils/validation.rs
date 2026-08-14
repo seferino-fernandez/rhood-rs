@@ -20,21 +20,7 @@ pub fn parse_date(value: &str) -> Result<String, String> {
     if !shaped {
         return Err(format!("must be in {DATE_FORMAT_PATTERN} format"));
     }
-    #[expect(
-        clippy::string_slice,
-        reason = "the shaped check has verified ASCII digits and fixed YYYY-MM-DD byte positions"
-    )]
-    let month: u8 = value[5..7]
-        .parse()
-        .map_err(|error| format!("invalid month: {error}"))?;
-    #[expect(
-        clippy::string_slice,
-        reason = "the shaped check has verified ASCII digits and fixed YYYY-MM-DD byte positions"
-    )]
-    let day: u8 = value[8..10]
-        .parse()
-        .map_err(|error| format!("invalid day: {error}"))?;
-    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+    if value.parse::<jiff::civil::Date>().is_err() {
         return Err(format!(
             "must be a real calendar date in {DATE_FORMAT_PATTERN} format"
         ));
@@ -80,6 +66,24 @@ mod tests {
         assert!(parse_date("2026/06/01").is_err());
         assert!(parse_date("2026-13-40").is_err());
         assert!(parse_date("206-6-1").is_err());
+    }
+
+    #[test]
+    fn parse_date_rejects_impossible_month_days() {
+        assert!(parse_date("2026-02-31").is_err());
+        assert!(parse_date("2026-04-31").is_err());
+    }
+
+    #[test]
+    fn parse_date_applies_ordinary_leap_year_rules() {
+        assert!(parse_date("2025-02-29").is_err());
+        assert_eq!(parse_date("2024-02-29").unwrap(), "2024-02-29");
+    }
+
+    #[test]
+    fn parse_date_applies_century_leap_year_rules() {
+        assert!(parse_date("1900-02-29").is_err());
+        assert_eq!(parse_date("2000-02-29").unwrap(), "2000-02-29");
     }
 
     #[test]
