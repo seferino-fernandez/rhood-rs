@@ -1,8 +1,8 @@
 use crate::output::{OutputFormat, output};
 use clap::Subcommand;
 use rhood_core::models::recurring::{
-    CreateRecurringRequest, RecurringFrequency, RecurringInvestment, RecurringSource,
-    RecurringState, UpdateRecurringRequest,
+    CreateRecurringRequest, NextInvestmentDate, RecurringFrequency, RecurringInvestment,
+    RecurringSource, RecurringState, UpdateRecurringRequest,
 };
 use rhood_core::{RhoodConfig, RobinhoodClient};
 
@@ -91,6 +91,17 @@ fn recurring_rows(items: &[RecurringInvestment]) -> Vec<Vec<String>> {
         .collect()
 }
 
+/// Build a single-row table for the next-investment-date view.
+///
+/// Columns: Frequency, Start Date, Next Investment Date.
+pub fn next_date_rows(result: &NextInvestmentDate) -> Vec<Vec<String>> {
+    vec![vec![
+        result.frequency.clone().unwrap_or_default(),
+        result.start_date.clone().unwrap_or_default(),
+        result.next_investment_date.clone().unwrap_or_default(),
+    ]]
+}
+
 pub async fn run(
     cmd: &RecurringCommand,
     format: OutputFormat,
@@ -162,11 +173,7 @@ pub async fn run(
                 .get_next_investment_date(*frequency, start_date)
                 .await?;
             let headers = &["Frequency", "Start Date", "Next Investment Date"];
-            let rows = vec![vec![
-                result.frequency.clone().unwrap_or_default(),
-                result.start_date.clone().unwrap_or_default(),
-                result.next_investment_date.clone().unwrap_or_default(),
-            ]];
+            let rows = next_date_rows(&result);
             output(format, headers, &rows, &result);
         }
     }
@@ -261,15 +268,12 @@ mod tests {
             next_investment_date: Some("2026-06-08".to_string()),
             start_date: Some("2026-06-01".to_string()),
         };
-        let row = [
-            result.frequency.clone().unwrap_or_default(),
-            result.start_date.clone().unwrap_or_default(),
-            result.next_investment_date.clone().unwrap_or_default(),
-        ];
-        assert_eq!(row.len(), 3, "NextDate row must have 3 columns");
-        assert_eq!(row[0], "weekly", "column 0 is Frequency");
-        assert_eq!(row[1], "2026-06-01", "column 1 is Start Date");
-        assert_eq!(row[2], "2026-06-08", "column 2 is Next Investment Date");
+        let rows = next_date_rows(&result);
+        assert_eq!(rows.len(), 1, "NextDate output must contain one row");
+        assert_eq!(rows[0].len(), 3, "NextDate row must have 3 columns");
+        assert_eq!(rows[0][0], "weekly", "column 0 is Frequency");
+        assert_eq!(rows[0][1], "2026-06-01", "column 1 is Start Date");
+        assert_eq!(rows[0][2], "2026-06-08", "column 2 is Next Investment Date");
     }
 
     #[test]
