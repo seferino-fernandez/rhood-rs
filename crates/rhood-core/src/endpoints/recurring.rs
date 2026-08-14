@@ -36,6 +36,10 @@ impl RobinhoodClient {
     ///
     /// Returns [`RhoodError::ReadOnlyMode`] if the client is in read-only mode.
     /// Returns [`RhoodError::InvalidSymbol`] if the symbol cannot be resolved.
+    /// Returns [`RhoodError::SubmissionUncertain`] with the submitted client
+    /// reference if transport fails after dispatch or a successful response
+    /// cannot be read as a schedule. Reconcile recent recurring schedules with
+    /// that reference before retrying.
     /// Also returns an error on HTTP or deserialization failures.
     pub async fn create_recurring_investment(
         &self,
@@ -67,7 +71,10 @@ impl RobinhoodClient {
                 asset_type: "equity".to_string(),
             },
             source_of_funds: create_recurring_request.source_of_funds.to_string(),
-            ref_id: uuid::Uuid::new_v4().to_string(),
+            ref_id: create_recurring_request
+                .client_ref
+                .clone()
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
             is_backup_ach_enabled: false,
         };
 
@@ -76,7 +83,7 @@ impl RobinhoodClient {
             self.bonfire_url(paths::RECURRING_SCHEDULES),
             create_recurring_request.account_number
         );
-        self.post_json(&url, &payload).await
+        self.submit_recurring_investment_json(&url, &payload).await
     }
 
     /// Updates an existing recurring investment schedule.
@@ -219,6 +226,7 @@ mod endpoint_tests {
 
     fn sample_create_request() -> CreateRecurringRequest {
         CreateRecurringRequest {
+            client_ref: None,
             account_number: "ABC123".to_string(),
             symbol: "tsla".to_string(),
             amount: 10.0,
@@ -264,7 +272,7 @@ mod endpoint_tests {
     }
 
     #[tokio::test]
-    async fn create_recurring_investment_happy_path_posts_expected_payload() {
+    async fn create_recurring_investment_posts_caller_reference() {
         let server = MockServer::start().await;
         // Symbol resolution.
         Mock::given(method("GET"))
@@ -286,6 +294,7 @@ mod endpoint_tests {
             .and(body_string_contains("\"asset_symbol\":\"TSLA\""))
             .and(body_string_contains("\"asset_type\":\"equity\""))
             .and(body_string_contains("\"source_of_funds\":\"buying_power\""))
+            .and(body_string_contains("\"ref_id\":\"caller-recurring-ref\""))
             .and(body_string_contains("\"is_backup_ach_enabled\":false"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "id": "sched-new",
@@ -296,14 +305,127 @@ mod endpoint_tests {
             .mount(&server)
             .await;
         let (_dir, client) = client_for_server(&server.uri(), false).await;
+        let mut request = sample_create_request();
+        request.client_ref = Some("caller-recurring-ref".to_string());
 
-        let created = client
-            .create_recurring_investment(&sample_create_request())
-            .await
-            .unwrap();
+        let created = client.create_recurring_investment(&request).await.unwrap();
 
         assert_eq!(created.id.as_deref(), Some("sched-new"));
         assert_eq!(created.account_number.as_deref(), Some("ABC123"));
+    }
+
+    #[tokio::test]
+    async fn create_recurring_investment_generates_reference_when_absent() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/instruments/"))
+            .and(query_param("symbol", "TSLA"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [{"id": "inst-tsla", "symbol": "TSLA"}],
+                "next": null
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/recurring_schedules/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "sched-new"
+            })))
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server.uri(), false).await;
+
+        let request = sample_create_request();
+        client.create_recurring_investment(&request).await.unwrap();
+        client.create_recurring_investment(&request).await.unwrap();
+
+        let requests = server.received_requests().await.unwrap();
+        let create_requests = requests
+            .iter()
+            .filter(|request| request.url.path() == "/recurring_schedules/")
+            .collect::<Vec<_>>();
+        assert_eq!(create_requests.len(), 2);
+        let first_body: serde_json::Value =
+            serde_json::from_slice(&create_requests[0].body).unwrap();
+        let second_body: serde_json::Value =
+            serde_json::from_slice(&create_requests[1].body).unwrap();
+        let first_client_ref = first_body["ref_id"].as_str().unwrap();
+        let second_client_ref = second_body["ref_id"].as_str().unwrap();
+        assert!(uuid::Uuid::parse_str(first_client_ref).is_ok());
+        assert!(uuid::Uuid::parse_str(second_client_ref).is_ok());
+        assert_ne!(first_client_ref, second_client_ref);
+    }
+
+    #[tokio::test]
+    async fn create_recurring_investment_transport_failure_is_uncertain() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/instruments/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [{"id": "inst-tsla", "symbol": "TSLA"}],
+                "next": null
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/recurring_schedules/"))
+            .respond_with_err(|_: &wiremock::Request| std::io::Error::other("connection closed"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server.uri(), false).await;
+        let mut request = sample_create_request();
+        request.client_ref = Some("reconcile-this-schedule".to_string());
+
+        let error = client
+            .create_recurring_investment(&request)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            RhoodError::SubmissionUncertain {
+                client_ref,
+                ..
+            } if client_ref == "reconcile-this-schedule"
+        ));
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn create_recurring_investment_unreadable_success_is_uncertain() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/instruments/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [{"id": "inst-tsla", "symbol": "TSLA"}],
+                "next": null
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/recurring_schedules/"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("not a schedule"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server.uri(), false).await;
+        let mut request = sample_create_request();
+        request.client_ref = Some("reconcile-unreadable-schedule".to_string());
+
+        let error = client
+            .create_recurring_investment(&request)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            RhoodError::SubmissionUncertain {
+                client_ref,
+                ..
+            } if client_ref == "reconcile-unreadable-schedule"
+        ));
+        server.verify().await;
     }
 
     #[tokio::test]
