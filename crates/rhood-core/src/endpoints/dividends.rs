@@ -1,7 +1,7 @@
-use crate::Result;
 use crate::api::paths;
 use crate::client::RobinhoodClient;
 use crate::models::dividend::{Dividend, InterestPayment};
+use crate::{Result, RhoodError};
 use rust_decimal::Decimal;
 use std::str::FromStr;
 
@@ -11,14 +11,24 @@ use std::str::FromStr;
 /// Decimal summation preserves the source amounts' scale, so currency values
 /// keep their trailing zeros (e.g. `"0.07" + "0.12" -> "0.19"`, and a lone
 /// `"5.00" -> "5.00"`). Trailing zeros are deliberately *not* stripped.
-pub(crate) fn sum_dividend_amounts(dividends: &[crate::models::dividend::Dividend]) -> String {
-    let total: Decimal = dividends
+pub(crate) fn sum_dividend_amounts(
+    dividends: &[crate::models::dividend::Dividend],
+) -> Result<String> {
+    let invalid_amount = || RhoodError::InvalidMarketDataResponse {
+        endpoint: "dividends".to_string(),
+        message: "dividend response contained an unreadable amount".to_string(),
+    };
+    let total = dividends
         .iter()
         .filter(|d| matches!(d.state.as_deref(), Some("paid" | "reinvested")))
-        .filter_map(|d| d.amount.as_deref())
-        .filter_map(|a| Decimal::from_str(a).ok())
-        .sum();
-    total.to_string()
+        .map(|d| {
+            d.amount
+                .as_deref()
+                .and_then(|amount| Decimal::from_str(amount).ok())
+                .ok_or_else(invalid_amount)
+        })
+        .sum::<Result<Decimal>>()?;
+    Ok(total.to_string())
 }
 
 impl RobinhoodClient {
@@ -54,12 +64,13 @@ impl RobinhoodClient {
     ///
     /// # Errors
     ///
-    /// Returns an error if the dividend fetch fails.
+    /// Returns an error if the dividend fetch fails, or if a paid or reinvested
+    /// dividend has no amount or an amount that cannot be parsed as a decimal.
     pub async fn get_total_dividends(&self) -> Result<String> {
         let dividends: Vec<Dividend> = self
             .get_paginated(&self.api_url(paths::DIVIDENDS), &[])
             .await?;
-        Ok(sum_dividend_amounts(&dividends))
+        sum_dividend_amounts(&dividends)
     }
 
     /// Fetches all interest/sweep payments.
@@ -318,7 +329,7 @@ mod tests {
             mk("pending", "5.00"), // excluded
             mk("voided", "9.00"),  // excluded
         ];
-        assert_eq!(super::sum_dividend_amounts(&divs), "0.19");
+        assert_eq!(super::sum_dividend_amounts(&divs).unwrap(), "0.19");
     }
 
     #[test]
@@ -332,9 +343,56 @@ mod tests {
         // A whole-dollar total keeps its currency precision rather than
         // collapsing to "5".
         let divs = vec![mk("paid", "2.50"), mk("reinvested", "2.50")];
-        assert_eq!(super::sum_dividend_amounts(&divs), "5.00");
+        assert_eq!(super::sum_dividend_amounts(&divs).unwrap(), "5.00");
+        assert_eq!(
+            super::sum_dividend_amounts(&[mk("paid", "5.00")]).unwrap(),
+            "5.00"
+        );
         // Empty / all-excluded sums to a plain zero.
-        assert_eq!(super::sum_dividend_amounts(&[]), "0");
+        assert_eq!(super::sum_dividend_amounts(&[]).unwrap(), "0");
+    }
+
+    #[test]
+    fn sum_dividend_amounts_rejects_unparseable_paid_amount() {
+        let dividends = vec![Dividend {
+            amount: Some("not-a-decimal".into()),
+            state: Some("paid".into()),
+            ..Default::default()
+        }];
+
+        let error = super::sum_dividend_amounts(&dividends).unwrap_err();
+
+        assert!(matches!(
+            error,
+            crate::RhoodError::InvalidMarketDataResponse { ref endpoint, .. }
+                if endpoint == "dividends"
+        ));
+    }
+
+    #[test]
+    fn sum_dividend_amounts_rejects_paid_dividend_without_amount() {
+        let dividends = vec![Dividend {
+            state: Some("paid".into()),
+            ..Default::default()
+        }];
+
+        let error = super::sum_dividend_amounts(&dividends).unwrap_err();
+
+        assert!(matches!(
+            error,
+            crate::RhoodError::InvalidMarketDataResponse { ref endpoint, .. }
+                if endpoint == "dividends"
+        ));
+    }
+
+    #[test]
+    fn sum_dividend_amounts_ignores_pending_dividend_without_amount() {
+        let dividends = vec![Dividend {
+            state: Some("pending".into()),
+            ..Default::default()
+        }];
+
+        assert_eq!(super::sum_dividend_amounts(&dividends).unwrap(), "0");
     }
 
     #[test]
