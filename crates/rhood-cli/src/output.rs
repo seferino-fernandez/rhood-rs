@@ -43,22 +43,25 @@ pub fn print_json<T: Serialize>(data: &T) {
 }
 
 fn escape_csv_field(field: &str) -> String {
-    if field.contains(',') || field.contains('"') || field.contains('\n') {
+    if field.contains(',') || field.contains('"') || field.contains('\n') || field.contains('\r') {
         format!("\"{}\"", field.replace('"', "\"\""))
     } else {
         field.to_string()
     }
 }
 
+fn format_csv_row<'a>(fields: impl IntoIterator<Item = &'a str>) -> String {
+    fields
+        .into_iter()
+        .map(escape_csv_field)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 pub fn print_csv(headers: &[&str], rows: &[Vec<String>]) {
-    let escaped_headers: Vec<String> = headers
-        .iter()
-        .map(|header| escape_csv_field(header))
-        .collect();
-    write_line(&escaped_headers.join(","));
+    write_line(&format_csv_row(headers.iter().copied()));
     for row in rows {
-        let escaped: Vec<String> = row.iter().map(|field| escape_csv_field(field)).collect();
-        write_line(&escaped.join(","));
+        write_line(&format_csv_row(row.iter().map(String::as_str)));
     }
 }
 
@@ -103,6 +106,18 @@ mod tests {
     #[test]
     fn escape_csv_with_newline() {
         assert_eq!(escape_csv_field("line1\nline2"), "\"line1\nline2\"");
+    }
+
+    #[test]
+    fn escape_csv_with_carriage_return() {
+        assert_eq!(escape_csv_field("line1\rline2"), "\"line1\rline2\"");
+    }
+
+    #[test]
+    fn format_csv_row_with_carriage_return_is_single_record() {
+        let row = ["line1\rline2"];
+
+        assert_eq!(format_csv_row(row), "\"line1\rline2\"");
     }
 
     #[test]
