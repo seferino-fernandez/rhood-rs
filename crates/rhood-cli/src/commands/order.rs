@@ -8,6 +8,15 @@ use rhood_core::{RhoodConfig, RobinhoodClient};
 use std::future::Future;
 use std::io::Write;
 
+/// Order-history scope accepted by the order-listing command.
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub enum OrderStatus {
+    /// Show only open (cancellable) orders.
+    Open,
+    /// Show orders in every state.
+    All,
+}
+
 #[derive(Subcommand)]
 pub enum OrderCommand {
     /// Place a buy order
@@ -64,11 +73,11 @@ pub enum OrderCommand {
     },
     /// List orders (all or filtered by status)
     List {
-        /// Filter by status: open
-        #[arg(long)]
-        status: Option<String>,
+        /// Filter by status
+        #[arg(long, value_enum, default_value = "all")]
+        status: OrderStatus,
         /// Filter orders updated since this date (YYYY-MM-DD)
-        #[arg(long)]
+        #[arg(long, value_parser = crate::utils::validation::parse_date)]
         since: Option<String>,
     },
     /// Cancel an order by ID
@@ -290,9 +299,13 @@ pub async fn run(
         }
         OrderCommand::List { status, since } => {
             let account = super::resolve_account_number(&client, requested_account).await?;
-            let orders = match status.as_deref() {
-                Some("open") => client.get_open_stock_orders(&account).await?,
-                _ => {
+            let orders = match status {
+                OrderStatus::Open => {
+                    client
+                        .get_open_stock_orders(&account, since.as_deref())
+                        .await?
+                }
+                OrderStatus::All => {
                     client
                         .get_all_stock_orders(&account, since.as_deref())
                         .await?

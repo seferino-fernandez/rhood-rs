@@ -128,7 +128,9 @@ pub async fn run(
         OptionCommand::Orders { open, since } => {
             let account = super::resolve_account_number(&client, requested_account).await?;
             let orders = if *open {
-                client.get_open_option_orders(&account).await?
+                client
+                    .get_open_option_orders(&account, since.as_deref())
+                    .await?
             } else {
                 client
                     .get_all_option_orders(&account, since.as_deref())
