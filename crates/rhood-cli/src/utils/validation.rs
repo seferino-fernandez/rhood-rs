@@ -50,7 +50,7 @@ pub fn parse_uuid(value: &str) -> Result<String, String> {
 #[cfg(test)]
 #[expect(
     clippy::assertions_on_result_states,
-    reason = "the rejection tests check Result state without extracting an error because unwrap_used is denied"
+    reason = "the rejection is the contract, not the specific error message, so these tests assert Result state without extracting the error"
 )]
 mod tests {
     use super::*;
