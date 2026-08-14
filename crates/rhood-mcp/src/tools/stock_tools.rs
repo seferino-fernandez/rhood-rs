@@ -199,7 +199,7 @@ impl RhoodTools {
         let account =
             Self::resolve_account_number(&client, params.account_number.as_deref()).await?;
         let orders = client
-            .get_open_stock_orders(&account)
+            .get_open_stock_orders(&account, None)
             .await
             .map_err(|rhood_error| format_tool_error(&rhood_error))?;
         serde_json::to_string_pretty(&orders).map_err(|error| error.to_string())

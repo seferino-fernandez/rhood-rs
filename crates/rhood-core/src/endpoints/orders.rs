@@ -344,13 +344,18 @@ impl RobinhoodClient {
 
     /// Fetches only open (cancellable) stock orders.
     ///
-    /// Filters the full order list to those with a non-null cancel URL.
+    /// When `since` is provided, requests orders updated on or after that date,
+    /// then filters the result to open orders with a non-null cancel URL.
     ///
     /// # Errors
     ///
     /// Returns an error if the underlying orders request fails.
-    pub async fn get_open_stock_orders(&self, account_number: &str) -> Result<Vec<StockOrder>> {
-        let mut orders = self.get_stock_orders_raw(account_number, None).await?;
+    pub async fn get_open_stock_orders(
+        &self,
+        account_number: &str,
+        since: Option<&str>,
+    ) -> Result<Vec<StockOrder>> {
+        let mut orders = self.get_stock_orders_raw(account_number, since).await?;
         orders.retain(|order| order.cancel.is_some());
         self.enrich_instrument_identities("get_open_stock_orders", &mut orders)
             .await;
@@ -651,13 +656,18 @@ impl RobinhoodClient {
 
     /// Fetches only open (cancellable) option orders.
     ///
-    /// Filters the full order list to those with a non-null cancel URL.
+    /// When `since` is provided, requests orders updated on or after that date,
+    /// then filters the result to open orders with a non-null cancel URL.
     ///
     /// # Errors
     ///
     /// Returns an error if the underlying orders request fails.
-    pub async fn get_open_option_orders(&self, account_number: &str) -> Result<Vec<OptionOrder>> {
-        let orders = self.get_all_option_orders(account_number, None).await?;
+    pub async fn get_open_option_orders(
+        &self,
+        account_number: &str,
+        since: Option<&str>,
+    ) -> Result<Vec<OptionOrder>> {
+        let orders = self.get_all_option_orders(account_number, since).await?;
         Ok(orders
             .into_iter()
             .filter(|order| order.cancel_url.is_some())
@@ -691,7 +701,7 @@ impl RobinhoodClient {
     /// Returns an error if fetching the open orders fails.
     pub async fn cancel_all_stock_orders(&self, account_number: &str) -> Result<CancelAllOutcome> {
         self.require_writable()?;
-        let open = self.get_open_stock_orders(account_number).await?;
+        let open = self.get_open_stock_orders(account_number, None).await?;
         let mut outcome = CancelAllOutcome::default();
         for order in open {
             let Some(id) = order.id else {
@@ -725,7 +735,7 @@ impl RobinhoodClient {
     /// Returns an error if fetching the open orders fails.
     pub async fn cancel_all_option_orders(&self, account_number: &str) -> Result<CancelAllOutcome> {
         self.require_writable()?;
-        let open = self.get_open_option_orders(account_number).await?;
+        let open = self.get_open_option_orders(account_number, None).await?;
         let mut outcome = CancelAllOutcome::default();
         for order in open {
             let Some(id) = order.id else {
@@ -1240,7 +1250,9 @@ mod endpoint_tests {
         Trigger,
     };
     use secrecy::SecretString;
-    use wiremock::matchers::{body_partial_json, method, path, query_param};
+    use wiremock::matchers::{
+        body_partial_json, method, path, query_param, query_param_is_missing,
+    };
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     /// RAII guard that pins [`super::now_unix_ms`] to a fixed value for the
@@ -2060,6 +2072,78 @@ mod endpoint_tests {
     }
 
     #[tokio::test]
+    async fn get_open_stock_orders_applies_optional_since_query() {
+        let server = MockServer::start().await;
+        let response = ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "results": [],
+            "next": null,
+            "previous": null
+        }));
+        Mock::given(method("GET"))
+            .and(path("/orders/"))
+            .and(query_param("account_numbers", "ABC123"))
+            .and(query_param("updated_at[gte]", "2025-01-01"))
+            .respond_with(response.clone())
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/orders/"))
+            .and(query_param("account_numbers", "ABC123"))
+            .and(query_param_is_missing("updated_at[gte]"))
+            .respond_with(response)
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server.uri()).await;
+
+        client
+            .get_open_stock_orders("ABC123", Some("2025-01-01"))
+            .await
+            .unwrap();
+        client.get_open_stock_orders("ABC123", None).await.unwrap();
+
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn get_open_stock_orders_composes_since_with_open_filter() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/orders/"))
+            .and(query_param("account_numbers", "ABC123"))
+            .and(query_param("updated_at[gte]", "2025-01-01"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [
+                    {"id": "closed", "symbol": "AAPL", "cancel": null},
+                    {
+                        "id": "open",
+                        "symbol": "MSFT",
+                        "cancel": "https://api.robinhood.com/orders/open/cancel/"
+                    }
+                ],
+                "next": null,
+                "previous": null
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server.uri()).await;
+
+        let orders = client
+            .get_open_stock_orders("ABC123", Some("2025-01-01"))
+            .await
+            .unwrap();
+        let ids: Vec<&str> = orders
+            .iter()
+            .filter_map(|order| order.id.as_deref())
+            .collect();
+
+        assert_eq!(ids, ["open"]);
+        server.verify().await;
+    }
+
+    #[tokio::test]
     async fn get_open_stock_orders_does_not_resolve_closed_order_only_references() {
         const INSTRUMENT_ID: &str = "450dfc6d-5510-4d40-abfb-f633b7d9be3e";
         let server = MockServer::start().await;
@@ -2085,7 +2169,7 @@ mod endpoint_tests {
             .await;
         let (_dir, client) = client_for_server(&server.uri()).await;
 
-        let orders = client.get_open_stock_orders("ABC123").await.unwrap();
+        let orders = client.get_open_stock_orders("ABC123", None).await.unwrap();
 
         assert!(orders.is_empty());
         server.verify().await;
@@ -2149,6 +2233,41 @@ mod endpoint_tests {
                 },
             ]
         );
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn get_open_option_orders_applies_optional_since_query() {
+        let server = MockServer::start().await;
+        let response = ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "results": [],
+            "next": null,
+            "previous": null
+        }));
+        Mock::given(method("GET"))
+            .and(path("/options/orders/"))
+            .and(query_param("account_numbers", "ABC123"))
+            .and(query_param("updated_at[gte]", "2025-01-01"))
+            .respond_with(response.clone())
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/options/orders/"))
+            .and(query_param("account_numbers", "ABC123"))
+            .and(query_param_is_missing("updated_at[gte]"))
+            .respond_with(response)
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server.uri()).await;
+
+        client
+            .get_open_option_orders("ABC123", Some("2025-01-01"))
+            .await
+            .unwrap();
+        client.get_open_option_orders("ABC123", None).await.unwrap();
+
         server.verify().await;
     }
 
