@@ -163,47 +163,127 @@ async fn stage_confirm_submit(
     client: &RobinhoodClient,
     intent: OrderIntent,
     yes: bool,
-    out: &mut impl Write,
+    format: OutputFormat,
+    writers: StageWriters<'_>,
 ) -> anyhow::Result<()> {
     stage_confirm_submit_with(
+        format,
         intent,
         |intent| client.prepare_order(intent),
         || confirm_order(yes),
         |staged| client.submit_order(staged),
-        out,
+        writers,
+        |outcome, out| render_order_outcome(format, outcome, out),
     )
     .await
 }
 
-/// [`stage_confirm_submit`] with its three effects supplied by the caller.
+/// [`stage_confirm_submit`] with its effects supplied by the caller.
 ///
-/// Preparation, Confirmation, and submission are parameters so tests can
-/// observe how many times each one runs without a brokerage, a terminal, or a
-/// network. Production always reaches this through [`stage_confirm_submit`],
-/// which binds them to the real client and the real prompt.
-async fn stage_confirm_submit_with<PrepareFut, SubmitFut>(
+/// Preparation, Confirmation, submission, and outcome rendering are parameters
+/// so tests can observe them without a brokerage, a terminal, or a network.
+/// Production always reaches this through [`stage_confirm_submit`], which binds
+/// them to the real client, real prompt, and real renderer.
+enum OrderOutcome<'a> {
+    Cancelled,
+    Submitted(&'a SubmittedOrder),
+}
+
+struct StageWriters<'a> {
+    out: &'a mut dyn Write,
+    err: &'a mut dyn Write,
+}
+
+async fn stage_confirm_submit_with<PrepareFut, SubmitFut, RenderOutcome>(
+    format: OutputFormat,
     intent: OrderIntent,
     prepare: impl FnOnce(OrderIntent) -> PrepareFut,
     confirm: impl FnOnce() -> anyhow::Result<bool>,
     submit: impl FnOnce(StagedOrder) -> SubmitFut,
-    out: &mut impl Write,
+    writers: StageWriters<'_>,
+    render_outcome: RenderOutcome,
 ) -> anyhow::Result<()>
 where
     PrepareFut: Future<Output = rhood_core::Result<StagedOrder>>,
     SubmitFut: Future<Output = rhood_core::Result<SubmittedOrder>>,
+    RenderOutcome: for<'a> FnOnce(OrderOutcome<'a>, &mut dyn Write) -> anyhow::Result<()>,
 {
     let staged = prepare(intent).await?;
     let OrderSummary::Stock(summary) = staged.summary() else {
         anyhow::bail!("core returned an option summary for a stock order");
     };
-    writeln!(out, "{}", staged_order_message(summary))?;
+    if matches!(format, OutputFormat::Table) {
+        writeln!(writers.out, "{}", staged_order_message(summary))?;
+    } else {
+        writeln!(writers.err, "{}", staged_order_message(summary))?;
+    }
     if !confirm()? {
-        writeln!(out, "Order cancelled.")?;
-        return Ok(());
+        if matches!(format, OutputFormat::Table) {
+            writeln!(writers.out, "Order cancelled.")?;
+            return Ok(());
+        }
+        writeln!(writers.err, "Order cancelled.")?;
+        return render_outcome(OrderOutcome::Cancelled, writers.out);
     }
     let order = submit(staged).await?;
-    let id = order.id().unwrap_or("unknown");
-    writeln!(out, "{}", placed_order_message(id, order.state()))?;
+    render_outcome(OrderOutcome::Submitted(&order), writers.out)
+}
+
+fn render_order_outcome(
+    format: OutputFormat,
+    outcome: OrderOutcome<'_>,
+    out: &mut dyn Write,
+) -> anyhow::Result<()> {
+    #[derive(serde::Serialize)]
+    struct PlacementOutcome<'a> {
+        outcome: &'static str,
+        order_id: Option<&'a str>,
+        state: Option<&'a str>,
+    }
+
+    match format {
+        OutputFormat::Table => match outcome {
+            OrderOutcome::Cancelled => writeln!(out, "Order cancelled.")?,
+            OrderOutcome::Submitted(order) => {
+                let id = order.id().unwrap_or("unknown");
+                writeln!(out, "{}", placed_order_message(id, order.state()))?;
+            }
+        },
+        OutputFormat::Json | OutputFormat::Csv => {
+            let (outcome, order_id, state) = match &outcome {
+                OrderOutcome::Cancelled => ("cancelled", None, None),
+                OrderOutcome::Submitted(order) => {
+                    let outcome = match order.state() {
+                        Some(state)
+                            if state.eq_ignore_ascii_case("rejected")
+                                || state.eq_ignore_ascii_case("failed") =>
+                        {
+                            "not_placed"
+                        }
+                        _ => "placed",
+                    };
+                    (outcome, order.id(), order.state())
+                }
+            };
+            let payload = PlacementOutcome {
+                outcome,
+                order_id,
+                state,
+            };
+            let headers = &["Outcome", "Order ID", "State"];
+            let rows = vec![vec![
+                outcome.to_string(),
+                order_id.unwrap_or_default().to_string(),
+                state.unwrap_or_default().to_string(),
+            ]];
+            if matches!(format, OutputFormat::Json) {
+                serde_json::to_writer_pretty(&mut *out, &payload)?;
+                writeln!(out)?;
+            } else {
+                output(format, headers, &rows, &payload);
+            }
+        }
+    }
     Ok(())
 }
 
@@ -256,11 +336,17 @@ pub async fn run(
                 time_in_force,
                 market_hours: *market_hours,
             };
+            let mut stdout = std::io::stdout();
+            let mut stderr = std::io::stderr();
             stage_confirm_submit(
                 &client,
                 OrderIntent::Stock(intent),
                 *yes,
-                &mut std::io::stdout(),
+                format,
+                StageWriters {
+                    out: &mut stdout,
+                    err: &mut stderr,
+                },
             )
             .await?;
         }
@@ -289,11 +375,17 @@ pub async fn run(
                 time_in_force: TimeInForce::Gtc,
                 market_hours: *market_hours,
             };
+            let mut stdout = std::io::stdout();
+            let mut stderr = std::io::stderr();
             stage_confirm_submit(
                 &client,
                 OrderIntent::Stock(intent),
                 *yes,
-                &mut std::io::stdout(),
+                format,
+                StageWriters {
+                    out: &mut stdout,
+                    err: &mut stderr,
+                },
             )
             .await?;
         }
@@ -330,7 +422,22 @@ pub async fn run(
         }
         OrderCommand::Cancel { order_id } => {
             client.cancel_stock_order(order_id).await?;
-            println!("Order {order_id} cancelled.");
+            #[derive(serde::Serialize)]
+            struct Cancelled<'a> {
+                cancelled: bool,
+                order_id: &'a str,
+            }
+            let payload = Cancelled {
+                cancelled: true,
+                order_id,
+            };
+            let headers = &["Cancelled", "Order ID"];
+            let rows = vec![vec!["true".to_string(), order_id.clone()]];
+            if matches!(format, OutputFormat::Table) {
+                println!("Order {order_id} cancelled.");
+            } else {
+                output(format, headers, &rows, &payload);
+            }
         }
     }
     Ok(())
@@ -347,8 +454,10 @@ mod tests {
     use rhood_core::{RhoodConfig, RhoodError, RobinhoodClient};
 
     use super::{
-        placed_order_message, stage_confirm_submit, stage_confirm_submit_with, staged_order_message,
+        StageWriters, placed_order_message, render_order_outcome, stage_confirm_submit,
+        stage_confirm_submit_with, staged_order_message,
     };
+    use crate::output::OutputFormat;
 
     #[test]
     fn staged_stock_message_renders_core_summary() {
@@ -607,14 +716,155 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn decline_submits_nothing() {
-        let mut out = Vec::new();
+    async fn json_mode_writes_only_the_outcome_document_to_stdout() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
         stage_confirm_submit_with(
+            OutputFormat::Json,
+            stock_intent(),
+            |_| async { Ok(staged_stock()) },
+            || Ok(true),
+            |_| async { Ok(submitted_stock()) },
+            StageWriters {
+                out: &mut stdout,
+                err: &mut stderr,
+            },
+            |outcome, out| render_order_outcome(OutputFormat::Json, outcome, out),
+        )
+        .await
+        .unwrap();
+
+        let document: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
+        assert_eq!(document["outcome"], "placed");
+        assert_eq!(
+            stdout,
+            concat!(
+                "{\n",
+                "  \"outcome\": \"placed\",\n",
+                "  \"order_id\": \"stock-order-id\",\n",
+                "  \"state\": \"queued\"\n",
+                "}\n",
+            )
+            .as_bytes()
+        );
+        assert_eq!(
+            String::from_utf8(stderr).unwrap(),
+            concat!(
+                "Staged stock order\n",
+                "  Account: individual ****C123\n",
+                "  Trade: buy 2 shares AAPL\n",
+                "  Instrument: https://api.robinhood.com/instruments/instrument-aapl/\n",
+                "  Type: limit, trigger immediate, price $187.25, stop price n/a\n",
+                "  Session: regular, extended hours false, time in force gtc\n",
+                "  Quote: n/a, conversion price n/a\n",
+                "  Client ref: cli-client-ref-4f21\n",
+                "  Form version: 7\n",
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn json_mode_routes_a_decline_to_stderr_and_its_outcome_to_stdout() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        stage_confirm_submit_with(
+            OutputFormat::Json,
             stock_intent(),
             |_| async { Ok(staged_stock()) },
             || Ok(false),
             |_| async { panic!("a declined order must never be submitted") },
-            &mut out,
+            StageWriters {
+                out: &mut stdout,
+                err: &mut stderr,
+            },
+            |outcome, out| render_order_outcome(OutputFormat::Json, outcome, out),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            stdout,
+            concat!(
+                "{\n",
+                "  \"outcome\": \"cancelled\",\n",
+                "  \"order_id\": null,\n",
+                "  \"state\": null\n",
+                "}\n",
+            )
+            .as_bytes()
+        );
+        assert_eq!(
+            String::from_utf8(stderr).unwrap(),
+            concat!(
+                "Staged stock order\n",
+                "  Account: individual ****C123\n",
+                "  Trade: buy 2 shares AAPL\n",
+                "  Instrument: https://api.robinhood.com/instruments/instrument-aapl/\n",
+                "  Type: limit, trigger immediate, price $187.25, stop price n/a\n",
+                "  Session: regular, extended hours false, time in force gtc\n",
+                "  Quote: n/a, conversion price n/a\n",
+                "  Client ref: cli-client-ref-4f21\n",
+                "  Form version: 7\n",
+                "Order cancelled.\n",
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn table_mode_keeps_the_existing_stdout_transcript() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        stage_confirm_submit_with(
+            OutputFormat::Table,
+            stock_intent(),
+            |_| async { Ok(staged_stock()) },
+            || Ok(true),
+            |_| async { Ok(submitted_stock()) },
+            StageWriters {
+                out: &mut stdout,
+                err: &mut stderr,
+            },
+            |outcome, out| render_order_outcome(OutputFormat::Table, outcome, out),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            String::from_utf8(stdout).unwrap(),
+            concat!(
+                "Staged stock order\n",
+                "  Account: individual ****C123\n",
+                "  Trade: buy 2 shares AAPL\n",
+                "  Instrument: https://api.robinhood.com/instruments/instrument-aapl/\n",
+                "  Type: limit, trigger immediate, price $187.25, stop price n/a\n",
+                "  Session: regular, extended hours false, time in force gtc\n",
+                "  Quote: n/a, conversion price n/a\n",
+                "  Client ref: cli-client-ref-4f21\n",
+                "  Form version: 7\n",
+                "Order placed: stock-order-id (state: queued)\n",
+            )
+        );
+        assert!(
+            stderr.is_empty(),
+            "table mode must not use stderr: {stderr:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn decline_submits_nothing() {
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        stage_confirm_submit_with(
+            OutputFormat::Table,
+            stock_intent(),
+            |_| async { Ok(staged_stock()) },
+            || Ok(false),
+            |_| async { panic!("a declined order must never be submitted") },
+            StageWriters {
+                out: &mut out,
+                err: &mut err,
+            },
+            |outcome, out| render_order_outcome(OutputFormat::Table, outcome, out),
         )
         .await
         .unwrap();
@@ -630,7 +880,9 @@ mod tests {
         let submissions = AtomicUsize::new(0);
         let confirmations = AtomicUsize::new(0);
         let mut out = Vec::new();
+        let mut err = Vec::new();
         stage_confirm_submit_with(
+            OutputFormat::Table,
             stock_intent(),
             |_| async { Ok(staged_stock()) },
             || {
@@ -641,7 +893,11 @@ mod tests {
                 submissions.fetch_add(1, Ordering::SeqCst);
                 Ok(submitted_stock())
             },
-            &mut out,
+            StageWriters {
+                out: &mut out,
+                err: &mut err,
+            },
+            |outcome, out| render_order_outcome(OutputFormat::Table, outcome, out),
         )
         .await
         .unwrap();
@@ -663,7 +919,9 @@ mod tests {
         // answering it.
         let submissions = AtomicUsize::new(0);
         let mut out = Vec::new();
+        let mut err = Vec::new();
         stage_confirm_submit_with(
+            OutputFormat::Table,
             stock_intent(),
             |_| async { Ok(staged_stock()) },
             || super::confirm_order(true),
@@ -671,7 +929,11 @@ mod tests {
                 submissions.fetch_add(1, Ordering::SeqCst);
                 Ok(submitted_stock())
             },
-            &mut out,
+            StageWriters {
+                out: &mut out,
+                err: &mut err,
+            },
+            |outcome, out| render_order_outcome(OutputFormat::Table, outcome, out),
         )
         .await
         .unwrap();
@@ -687,7 +949,9 @@ mod tests {
     #[tokio::test]
     async fn uncertain_submission_reports_reconciliation_and_client_reference() {
         let mut out = Vec::new();
+        let mut err = Vec::new();
         let error = stage_confirm_submit_with(
+            OutputFormat::Table,
             stock_intent(),
             |_| async { Ok(staged_stock()) },
             || Ok(true),
@@ -700,7 +964,11 @@ mod tests {
                     })
                 }
             },
-            &mut out,
+            StageWriters {
+                out: &mut out,
+                err: &mut err,
+            },
+            |outcome, out| render_order_outcome(OutputFormat::Table, outcome, out),
         )
         .await
         .unwrap_err();
@@ -725,10 +993,20 @@ mod tests {
         // than to a stand-in. A default configuration is read-only, so core
         // refuses before any network call.
         let client = RobinhoodClient::with_config(RhoodConfig::default()).unwrap();
-        let mut out = Vec::new();
-        let error = stage_confirm_submit(&client, stock_intent(), true, &mut out)
-            .await
-            .unwrap_err();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let error = stage_confirm_submit(
+            &client,
+            stock_intent(),
+            true,
+            OutputFormat::Table,
+            StageWriters {
+                out: &mut stdout,
+                err: &mut stderr,
+            },
+        )
+        .await
+        .unwrap_err();
 
         assert!(
             error
@@ -736,7 +1014,14 @@ mod tests {
                 .is_some_and(|source| { matches!(source, RhoodError::ReadOnlyMode) }),
             "expected the real preparation path to refuse in read-only mode: {error}"
         );
-        assert!(out.is_empty(), "nothing may be shown when staging fails");
+        assert!(
+            stdout.is_empty(),
+            "staging failure wrote stdout: {stdout:?}"
+        );
+        assert!(
+            stderr.is_empty(),
+            "staging failure wrote stderr: {stderr:?}"
+        );
     }
 
     #[test]
