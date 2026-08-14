@@ -2,6 +2,67 @@ use crate::output::{OutputFormat, output};
 use clap::Subcommand;
 use rhood_core::{RhoodConfig, RobinhoodClient};
 
+#[derive(serde::Serialize)]
+struct WatchlistAddResult<'a> {
+    watchlist_name: &'a str,
+    requested_symbol_count: usize,
+    added_symbol_count: usize,
+}
+
+#[derive(serde::Serialize)]
+struct WatchlistRemoveResult<'a> {
+    watchlist_name: &'a str,
+    requested_symbol_count: usize,
+    removed_symbol_count: usize,
+}
+
+struct WatchlistOutput<T> {
+    payload: T,
+    headers: [&'static str; 3],
+    rows: Vec<Vec<String>>,
+}
+
+fn map_add_result<'a>(
+    name: &'a str,
+    requested_symbols: &[String],
+) -> WatchlistOutput<WatchlistAddResult<'a>> {
+    let requested_symbol_count = requested_symbols.len();
+    WatchlistOutput {
+        payload: WatchlistAddResult {
+            watchlist_name: name,
+            requested_symbol_count,
+            added_symbol_count: requested_symbol_count,
+        },
+        headers: ["Watchlist", "Requested Symbols", "Added Symbols"],
+        rows: vec![vec![
+            name.to_string(),
+            requested_symbol_count.to_string(),
+            requested_symbol_count.to_string(),
+        ]],
+    }
+}
+
+fn map_remove_result<'a>(
+    name: &'a str,
+    requested_symbols: &[String],
+    removed_symbol_count: usize,
+) -> WatchlistOutput<WatchlistRemoveResult<'a>> {
+    let requested_symbol_count = requested_symbols.len();
+    WatchlistOutput {
+        payload: WatchlistRemoveResult {
+            watchlist_name: name,
+            requested_symbol_count,
+            removed_symbol_count,
+        },
+        headers: ["Watchlist", "Requested Symbols", "Removed Symbols"],
+        rows: vec![vec![
+            name.to_string(),
+            requested_symbol_count.to_string(),
+            removed_symbol_count.to_string(),
+        ]],
+    }
+}
+
 #[derive(Subcommand)]
 pub enum WatchlistCommand {
     /// List all watchlists
@@ -90,16 +151,85 @@ pub async fn run(
         WatchlistCommand::Add { name, symbols } => {
             let refs: Vec<&str> = symbols.iter().map(String::as_str).collect();
             client.add_to_watchlist(name, &refs).await?;
-            println!("Added {} symbol(s) to watchlist '{name}'", symbols.len());
+            let mapped = map_add_result(name, symbols);
+            if matches!(format, OutputFormat::Table) {
+                println!("Added {} symbol(s) to watchlist '{name}'", symbols.len());
+            } else {
+                output(format, &mapped.headers, &mapped.rows, &mapped.payload);
+            }
         }
         WatchlistCommand::Remove { name, symbols } => {
             let refs: Vec<&str> = symbols.iter().map(String::as_str).collect();
             let removed = client.remove_from_watchlist(name, &refs).await?;
-            println!(
-                "Removed {removed} of {} requested symbol(s) from watchlist '{name}'",
-                symbols.len()
-            );
+            let mapped = map_remove_result(name, symbols, removed);
+            if matches!(format, OutputFormat::Table) {
+                println!(
+                    "Removed {removed} of {} requested symbol(s) from watchlist '{name}'",
+                    symbols.len()
+                );
+            } else {
+                output(format, &mapped.headers, &mapped.rows, &mapped.payload);
+            }
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{map_add_result, map_remove_result};
+
+    #[test]
+    fn add_mapping_carries_the_watchlist_and_counts_to_json_and_the_row() {
+        let symbols = vec!["AAPL".to_string(), "NVDA".to_string()];
+        let mapped = map_add_result("Growth Picks", &symbols);
+
+        assert_eq!(
+            (
+                serde_json::to_value(&mapped.payload).unwrap(),
+                mapped.headers,
+                mapped.rows,
+            ),
+            (
+                serde_json::json!({
+                    "watchlist_name": "Growth Picks",
+                    "requested_symbol_count": 2,
+                    "added_symbol_count": 2,
+                }),
+                ["Watchlist", "Requested Symbols", "Added Symbols"],
+                vec![vec![
+                    "Growth Picks".to_string(),
+                    "2".to_string(),
+                    "2".to_string(),
+                ]],
+            )
+        );
+    }
+
+    #[test]
+    fn remove_mapping_carries_requested_and_removed_counts_to_json_and_the_row() {
+        let symbols = vec!["AAPL".to_string(), "NVDA".to_string(), "MSFT".to_string()];
+        let mapped = map_remove_result("Rotation List", &symbols, 2);
+
+        assert_eq!(
+            (
+                serde_json::to_value(&mapped.payload).unwrap(),
+                mapped.headers,
+                mapped.rows,
+            ),
+            (
+                serde_json::json!({
+                    "watchlist_name": "Rotation List",
+                    "requested_symbol_count": 3,
+                    "removed_symbol_count": 2,
+                }),
+                ["Watchlist", "Requested Symbols", "Removed Symbols"],
+                vec![vec![
+                    "Rotation List".to_string(),
+                    "3".to_string(),
+                    "2".to_string(),
+                ]],
+            )
+        );
+    }
 }

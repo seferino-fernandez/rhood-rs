@@ -52,11 +52,11 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Authenticate with Robinhood (prompts for username, password, and MFA code)
-    // Global flags (--output, --read-write) are inherited by clap but unused here;
+    // The global --read-write flag is inherited by clap but unused here;
     // filtering per-subcommand in clap derive is invasive, so we accept the noise.
     Login,
     /// Clear saved session credentials
-    // Global flags (--output, --read-write) are inherited by clap but unused here;
+    // The global --read-write flag is inherited by clap but unused here;
     // filtering per-subcommand in clap derive is invasive, so we accept the noise.
     Logout,
     /// Stock quotes, history, and fundamentals
@@ -140,8 +140,8 @@ async fn try_main() -> anyhow::Result<()> {
         .init();
 
     match &cli.command {
-        Command::Login => commands::login::run_login(config).await,
-        Command::Logout => commands::login::run_logout(config).await,
+        Command::Login => commands::login::run_login(cli.output, config).await,
+        Command::Logout => commands::login::run_logout(cli.output, config).await,
         Command::Stock { command } => commands::stock::run(command, cli.output, config).await,
         Command::Option { command } => {
             commands::option::run(command, cli.output, config, cli.account.as_deref()).await

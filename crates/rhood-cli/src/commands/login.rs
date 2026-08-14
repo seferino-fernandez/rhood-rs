@@ -1,5 +1,16 @@
+use crate::output::{OutputFormat, output};
 use rhood_core::{RhoodConfig, RhoodError, RobinhoodClient};
 use secrecy::ExposeSecret;
+
+#[derive(serde::Serialize)]
+struct LoginResult {
+    authenticated: bool,
+}
+
+#[derive(serde::Serialize)]
+struct LogoutResult {
+    logged_out: bool,
+}
 
 /// Where the MFA value for this login attempt comes from.
 enum MfaSource {
@@ -28,7 +39,7 @@ fn mfa_source(configured: Option<&secrecy::SecretString>, interactive: bool) -> 
     }
 }
 
-pub async fn run_login(config: RhoodConfig) -> anyhow::Result<()> {
+pub async fn run_login(format: OutputFormat, config: RhoodConfig) -> anyhow::Result<()> {
     let client = RobinhoodClient::with_config(config.clone())?;
 
     let username = match config.auth.username {
@@ -73,7 +84,7 @@ pub async fn run_login(config: RhoodConfig) -> anyhow::Result<()> {
 
     match client.login(&username, &password, mfa_ref).await {
         Ok(()) => {
-            println!("Login successful.");
+            output_login_success(format);
             Ok(())
         }
         Err(RhoodError::ChallengeRequired(challenge_type)) => {
@@ -88,17 +99,37 @@ pub async fn run_login(config: RhoodConfig) -> anyhow::Result<()> {
             client
                 .submit_challenge_response(&challenge_id, &code, &username, &password, mfa_ref)
                 .await?;
-            println!("Login successful.");
+            output_login_success(format);
             Ok(())
         }
         Err(err) => Err(err.into()),
     }
 }
 
-pub async fn run_logout(config: RhoodConfig) -> anyhow::Result<()> {
+fn output_login_success(format: OutputFormat) {
+    let payload = LoginResult {
+        authenticated: true,
+    };
+    let headers = &["Authenticated"];
+    let rows = vec![vec!["true".to_string()]];
+    if matches!(format, OutputFormat::Table) {
+        println!("Login successful.");
+    } else {
+        output(format, headers, &rows, &payload);
+    }
+}
+
+pub async fn run_logout(format: OutputFormat, config: RhoodConfig) -> anyhow::Result<()> {
     let client = RobinhoodClient::with_config(config)?;
     client.logout().await?;
-    println!("Logged out.");
+    let payload = LogoutResult { logged_out: true };
+    let headers = &["Logged Out"];
+    let rows = vec![vec!["true".to_string()]];
+    if matches!(format, OutputFormat::Table) {
+        println!("Logged out.");
+    } else {
+        output(format, headers, &rows, &payload);
+    }
     Ok(())
 }
 
