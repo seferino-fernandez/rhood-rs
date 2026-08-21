@@ -1,5 +1,5 @@
 use crate::config::HttpConfig;
-use chrono::{DateTime, NaiveDateTime, Utc};
+use jiff::{SignedDuration, Timestamp, civil::DateTime, tz::TimeZone};
 use std::collections::BTreeSet;
 use std::future::Future;
 use std::pin::Pin;
@@ -91,12 +91,12 @@ impl ReadTransportPolicy {
         }
 
         let retry_at = parse_http_date(value)?;
-        let wall_now: DateTime<Utc> = self.clock.wall_now().into();
-        let delay = retry_at.signed_duration_since(wall_now);
-        if delay <= chrono::TimeDelta::zero() {
+        let wall_now = Timestamp::try_from(self.clock.wall_now()).ok()?;
+        let delay: SignedDuration = retry_at.duration_since(wall_now);
+        if delay <= SignedDuration::ZERO {
             return Some(0);
         }
-        let delay = delay.to_std().ok()?;
+        let delay: Duration = delay.try_into().ok()?;
         let seconds = delay.as_secs();
         if delay.subsec_nanos() == 0 {
             Some(seconds)
@@ -250,15 +250,30 @@ impl ReadTransportPolicy {
     }
 }
 
-fn parse_http_date(value: &str) -> Option<DateTime<Utc>> {
+fn parse_http_date(value: &str) -> Option<Timestamp> {
     const IMF_FIXDATE: &str = "%a, %d %b %Y %H:%M:%S GMT";
     const RFC850_DATE: &str = "%A, %d-%b-%y %H:%M:%S GMT";
+    const RFC850_2069_DATE: &str = "%A, %d-%b-%Y %H:%M:%S GMT";
     const ASCTIME_DATE: &str = "%a %b %e %H:%M:%S %Y";
 
+    let value = value.trim();
+    if let Some((prefix, suffix)) = value.split_once("-69 ") {
+        let expanded = format!("{prefix}-2069 {suffix}");
+        if let Some(timestamp) = parse_utc_datetime(&expanded, RFC850_2069_DATE) {
+            return Some(timestamp);
+        }
+    }
     [IMF_FIXDATE, RFC850_DATE, ASCTIME_DATE]
         .into_iter()
-        .find_map(|format| NaiveDateTime::parse_from_str(value.trim(), format).ok())
-        .map(|date| date.and_utc())
+        .find_map(|format| parse_utc_datetime(value, format))
+}
+
+fn parse_utc_datetime(value: &str, format: &str) -> Option<Timestamp> {
+    DateTime::strptime(format, value)
+        .ok()?
+        .to_zoned(TimeZone::UTC)
+        .ok()
+        .map(|zoned| zoned.timestamp())
 }
 
 struct Reservation<'a> {
@@ -397,7 +412,7 @@ mod tests {
             "Tue Nov 14 22:13:30 2023",
         ] {
             assert_eq!(
-                parse_http_date(value).map(|date| date.timestamp()),
+                parse_http_date(value).map(Timestamp::as_second),
                 Some(1_700_000_010),
                 "HTTP date form {value:?}"
             );
@@ -412,7 +427,7 @@ mod tests {
             ("Saturday, 14-Nov-70 22:13:30 GMT", 27_468_810),
         ] {
             assert_eq!(
-                parse_http_date(value).map(|date| date.timestamp()),
+                parse_http_date(value).map(Timestamp::as_second),
                 Some(expected),
                 "RFC850 date {value:?}"
             );

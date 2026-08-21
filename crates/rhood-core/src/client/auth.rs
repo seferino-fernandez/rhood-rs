@@ -11,7 +11,7 @@ use crate::models::auth::{
     RefreshTokenPayload,
 };
 use crate::{ChallengeType, Result, RhoodError};
-use chrono::Utc;
+use jiff::Timestamp;
 use secrecy::{ExposeSecret, SecretString};
 use std::time::{SystemTime, SystemTimeError, UNIX_EPOCH};
 
@@ -50,7 +50,10 @@ impl RobinhoodClient {
         password: &str,
         mfa_secret: Option<&str>,
     ) -> Result<()> {
-        if self.recover_from_cache_at(Utc::now().timestamp()).await? {
+        if self
+            .recover_from_cache_at(Timestamp::now().as_second())
+            .await?
+        {
             return Ok(());
         }
 
@@ -76,7 +79,8 @@ impl RobinhoodClient {
     /// cleanup errors. Once cached credentials are staged for recovery, every error
     /// leaves the live authentication state unauthenticated.
     pub async fn login_from_cache(&self) -> Result<bool> {
-        self.recover_from_cache_at(Utc::now().timestamp()).await
+        self.recover_from_cache_at(Timestamp::now().as_second())
+            .await
     }
 
     async fn recover_from_cache_at(&self, unix_timestamp: i64) -> Result<bool> {
@@ -259,7 +263,10 @@ impl RobinhoodClient {
         password: &str,
         mfa_secret: Option<&str>,
     ) -> Result<()> {
-        if self.recover_from_cache_at(Utc::now().timestamp()).await? {
+        if self
+            .recover_from_cache_at(Timestamp::now().as_second())
+            .await?
+        {
             return Ok(());
         }
 
@@ -492,7 +499,7 @@ impl RobinhoodClient {
             token_type,
             device_token: self.device_token.read().await.clone(),
             expires_at: Some({
-                Utc::now().timestamp() + self.config.auth.token_expiry_secs.cast_signed()
+                Timestamp::now().as_second() + self.config.auth.token_expiry_secs.cast_signed()
             }),
         };
         self.token_cache.save(&cached)?;
@@ -783,7 +790,7 @@ mod tests {
 
         assert!(
             !client
-                .try_refresh_token_at(Utc::now().timestamp())
+                .try_refresh_token_at(Timestamp::now().as_second())
                 .await
                 .unwrap()
         );
@@ -807,7 +814,7 @@ mod tests {
 
         assert!(
             client
-                .try_refresh_token_at(Utc::now().timestamp())
+                .try_refresh_token_at(Timestamp::now().as_second())
                 .await
                 .unwrap()
         );
@@ -1285,7 +1292,7 @@ mod tests {
                 refresh_token: SecretString::from("cached-refresh"),
                 token_type: "Bearer".into(),
                 device_token: "cached-device".into(),
-                expires_at: Some(Utc::now().timestamp() + 60),
+                expires_at: Some(Timestamp::now().as_second() + 60),
             })
             .unwrap();
 
@@ -1383,7 +1390,7 @@ mod tests {
                 refresh_token: SecretString::from("cached-refresh"),
                 token_type: "Bearer".into(),
                 device_token: "cached-device".into(),
-                expires_at: Some(Utc::now().timestamp() + 60),
+                expires_at: Some(Timestamp::now().as_second() + 60),
             })
             .unwrap();
         set_mode(&cache_path, 0o600);
@@ -1410,7 +1417,7 @@ mod tests {
                 refresh_token: SecretString::from("cached-refresh"),
                 token_type: "Bearer".into(),
                 device_token: "cached-device".into(),
-                expires_at: Some(Utc::now().timestamp() + 60),
+                expires_at: Some(Timestamp::now().as_second() + 60),
             })
             .unwrap();
         set_mode(&cache_path, 0o644);
