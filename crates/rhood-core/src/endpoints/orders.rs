@@ -1128,6 +1128,35 @@ mod tests {
     }
 
     #[test]
+    fn option_expiration_dates_preserve_chrono_acceptance() {
+        let intent = |expiration_date: &str| OptionOrderIntent {
+            account_number: Some("ABC123".to_string()),
+            symbol: "AAPL".to_string(),
+            expiration_date: expiration_date.to_string(),
+            strike_price: 150.0,
+            option_type: "call".to_string(),
+            side: Side::Buy,
+            quantity: 1.0,
+            limit_price: 2.5,
+            position_effect: OptionPositionEffect::Open,
+            time_in_force: TimeInForce::Gtc,
+        };
+
+        for expiration_date in ["2026-02-03", "2026-2-3", "+2026-02-03", "0000-01-01"] {
+            assert!(
+                validate_option_order(&intent(expiration_date)).is_ok(),
+                "{expiration_date:?} must be accepted"
+            );
+        }
+        for expiration_date in ["2026-02-30", "12026-02-03"] {
+            assert!(
+                validate_option_order(&intent(expiration_date)).is_err(),
+                "{expiration_date:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
     fn stock_order_request_stop_limit() {
         let req = StockOrderIntent {
             account_number: Some("ABC123".to_string()),
@@ -1668,6 +1697,30 @@ mod endpoint_tests {
         assert!(matches!(error, RhoodError::StagedOrderExpired));
 
         server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn staged_order_epoch_millisecond_boundaries_are_json_integers() {
+        let server = MockServer::start().await;
+        mount_stock_instrument(&server).await;
+        mount_stock_quote(&server, "101.25", "100.75").await;
+        let (_dir, client) = client_for_server(&server.uri()).await;
+        let mut staged = client
+            .prepare_order(OrderIntent::Stock(stock_request()))
+            .await
+            .unwrap();
+        staged.prepared_at_unix_ms = i64::MIN;
+        staged.expires_at_unix_ms = i64::MAX;
+
+        let serialized = serde_json::to_value(staged).unwrap();
+        assert_eq!(
+            serialized["prepared_at_unix_ms"].to_string(),
+            "-9223372036854775808"
+        );
+        assert_eq!(
+            serialized["expires_at_unix_ms"].to_string(),
+            "9223372036854775807"
+        );
     }
 
     #[tokio::test]
