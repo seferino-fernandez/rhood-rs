@@ -29,9 +29,10 @@ test:
 	cargo test --workspace --all-features
 	cargo test --doc
 
-# Run live-API integration tests against Robinhood (requires credentials)
+# Run all live-API integration tests serially against Robinhood (requires credentials)
 integration:
-	cargo test --test integration -p rhood-cli -- --ignored --nocapture
+	cargo test --test integration -p rhood-cli -- --ignored --nocapture --test-threads=1
+	cargo test --test protocol -p rhood-mcp -- --ignored --nocapture --test-threads=1
 
 # Lint the code with Clippy, at the same severity CI enforces
 lint:

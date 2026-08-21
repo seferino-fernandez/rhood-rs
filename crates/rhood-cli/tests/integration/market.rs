@@ -1,4 +1,4 @@
-use crate::common::{MARKET_DATE, MARKET_MIC, cli, parse_json};
+use crate::common::{MARKET_MIC, cli, parse_json, today};
 
 #[test]
 fn market_hours_rejects_bad_date() {
@@ -23,10 +23,9 @@ fn market_list_returns_array() {
 #[test]
 #[ignore = "requires live Robinhood credentials"]
 fn market_hours_for_exchange_and_date_returns_object() {
-    // `market hours` requires <MIC> <DATE>. We use a weekday well in the future
-    // so the call always resolves against a future trading day.
+    let date = today();
     let output = cli()
-        .args(["market", "hours", MARKET_MIC, MARKET_DATE])
+        .args(["market", "hours", MARKET_MIC, &date])
         .assert()
         .success();
     let body = parse_json(&output);

@@ -1,4 +1,4 @@
-use crate::common::{INDEX_SYMBOL, INDEX_SYMBOLS_MULTI, cli, parse_json};
+use crate::common::{INDEX_SYMBOL, INDEX_SYMBOLS_MULTI, cli, discover_option_fixture, parse_json};
 use assert_cmd::Command;
 
 /// Confirms that `rhood index options --help` exposes `--option-type` (not
@@ -44,4 +44,31 @@ fn index_quote_multi_symbol_returns_array() {
         body.is_array() || body.is_object(),
         "multi-symbol index quote should be array or object"
     );
+}
+
+#[test]
+#[ignore = "requires live Robinhood credentials"]
+fn index_options_uses_a_discovered_active_expiration() {
+    let fixture = discover_option_fixture(INDEX_SYMBOL, true);
+    let output = cli()
+        .args([
+            "index",
+            "options",
+            INDEX_SYMBOL,
+            "--expiry",
+            &fixture.expiration,
+            "--option-type",
+            "call",
+            "--strike",
+            &fixture.strike,
+        ])
+        .assert()
+        .success();
+    let body = parse_json(&output);
+    let contracts = body.as_array().expect("index options should be an array");
+    assert!(!contracts.is_empty());
+    assert!(contracts.iter().all(|contract| {
+        contract["expiration_date"] == fixture.expiration
+            && contract["strike_price"] == fixture.strike
+    }));
 }

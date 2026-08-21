@@ -65,4 +65,5 @@ tower-http = { version = "0.7.0", features = ["cors"] }
 url = "2.5.8"
 
 [dev-dependencies]
+reqwest.workspace = true
 tower = "0.5.3"
