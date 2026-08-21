@@ -235,6 +235,25 @@ mod tests {
     }
 
     #[test]
+    fn epoch_second_boundaries_are_stored_as_json_integers() {
+        for (expires_at, expected) in [
+            (i64::MIN, "-9223372036854775808"),
+            (i64::MAX, "9223372036854775807"),
+        ] {
+            let serialized = serde_json::to_value(CachedTokenOnDisk::from(&make_token(
+                "acc",
+                Some(expires_at),
+            )))
+            .unwrap();
+            assert_eq!(
+                serialized["expires_at"].to_string(),
+                expected,
+                "epoch-second boundary {expires_at}"
+            );
+        }
+    }
+
+    #[test]
     fn save_atomically_replaces_existing_cache() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("token.json");
