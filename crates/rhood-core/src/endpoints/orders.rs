@@ -52,7 +52,7 @@ fn now_unix_ms() -> i64 {
             return pinned;
         }
     }
-    chrono::Utc::now().timestamp_millis()
+    jiff::Timestamp::now().as_millisecond()
 }
 
 /// Validates a stock order request for logical consistency.
@@ -139,7 +139,7 @@ fn validate_stock_order(req: &StockOrderIntent) -> Result<()> {
 
 fn validate_option_order(req: &OptionOrderIntent) -> Result<()> {
     validate_order_symbol(&req.symbol)?;
-    if chrono::NaiveDate::parse_from_str(&req.expiration_date, "%Y-%m-%d").is_err() {
+    if jiff::civil::Date::strptime("%Y-%m-%d", &req.expiration_date).is_err() {
         return Err(RhoodError::InvalidOrder(
             "expiration_date must use YYYY-MM-DD format".to_string(),
         ));
@@ -1128,7 +1128,7 @@ mod tests {
     }
 
     #[test]
-    fn option_expiration_dates_preserve_chrono_acceptance() {
+    fn option_expiration_date_acceptance_is_stable() {
         let intent = |expiration_date: &str| OptionOrderIntent {
             account_number: Some("ABC123".to_string()),
             symbol: "AAPL".to_string(),
@@ -1640,7 +1640,7 @@ mod endpoint_tests {
             .prepare_order(OrderIntent::Stock(stock_request()))
             .await
             .unwrap();
-        prepared.expires_at_unix_ms = chrono::Utc::now().timestamp_millis() - 1;
+        prepared.expires_at_unix_ms = jiff::Timestamp::now().as_millisecond() - 1;
         let request_count = server.received_requests().await.unwrap().len();
 
         let error = client.submit_order(prepared).await.unwrap_err();
@@ -2026,7 +2026,7 @@ mod endpoint_tests {
             )))
             .await
             .unwrap();
-        staged.expires_at_unix_ms = chrono::Utc::now().timestamp_millis() - 1;
+        staged.expires_at_unix_ms = jiff::Timestamp::now().as_millisecond() - 1;
         let request_count = server.received_requests().await.unwrap().len();
 
         let error = client.submit_order(staged).await.unwrap_err();

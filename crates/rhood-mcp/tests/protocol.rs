@@ -19,7 +19,7 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::thread;
 use std::time::Duration;
 
-use chrono::{Datelike, Days, Utc};
+use jiff::{Timestamp, ToSpan, civil::Date, tz::TimeZone};
 use serde_json::{Value, json};
 
 const MODERN_PROTOCOL: &str = "2026-07-28";
@@ -33,6 +33,10 @@ struct StdioMcp {
     input: ChildStdin,
     output: BufReader<ChildStdout>,
     next_id: u64,
+}
+
+fn utc_today() -> Date {
+    Timestamp::now().to_zoned(TimeZone::UTC).date()
 }
 
 impl StdioMcp {
@@ -243,7 +247,7 @@ fn first_string(value: &Value, key: &str) -> Option<String> {
 }
 
 fn current_futures_symbol() -> String {
-    let today = Utc::now().date_naive();
+    let today = utc_today();
     let quarters = [(3, 'H'), (6, 'M'), (9, 'U'), (12, 'Z')];
     let (code, year) = quarters
         .iter()
@@ -300,7 +304,7 @@ fn stdio_calls_every_live_read_only_tool() {
         "get_option_chain",
         json!({ "symbol": STOCK_SYMBOL }),
     );
-    let today = Utc::now().date_naive().format("%Y-%m-%d").to_string();
+    let today = utc_today().to_string();
     let option_expiration = option_chain["expiration_dates"]
         .as_array()
         .and_then(|dates| {
@@ -363,11 +367,9 @@ fn stdio_calls_every_live_read_only_tool() {
         .or_else(|| first_string(&watchlists, "id"))
         .expect("live account exposes a readable watchlist");
 
-    let one_year_ago = Utc::now()
-        .date_naive()
-        .checked_sub_days(Days::new(365))
+    let one_year_ago = utc_today()
+        .checked_sub(365.days())
         .expect("one year ago is representable")
-        .format("%Y-%m-%d")
         .to_string();
     let future = current_futures_symbol();
     let account = || json!({ "account_number": account_number });

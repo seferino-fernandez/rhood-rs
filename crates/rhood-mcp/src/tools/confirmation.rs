@@ -223,7 +223,7 @@ fn effective_ttl(
 ) -> Result<Duration, ConfirmationError> {
     let remaining_ms = staged
         .expires_at_unix_ms()
-        .checked_sub(chrono::Utc::now().timestamp_millis())
+        .checked_sub(jiff::Timestamp::now().as_millisecond())
         .ok_or_else(|| {
             ConfirmationError::InternalFailure(
                 "Staged order expiry exceeds the server clock range".to_string(),
@@ -433,7 +433,7 @@ mod tests {
         instrument: &str,
         client_ref: &str,
     ) -> StagedOrder {
-        let now = chrono::Utc::now().timestamp_millis();
+        let now = jiff::Timestamp::now().as_millisecond();
         let lifetime_ms = i64::try_from(lifetime.as_millis()).unwrap();
         serde_json::from_value(serde_json::json!({
             "payload": {
@@ -487,7 +487,7 @@ mod tests {
     }
 
     fn staged_option(lifetime: Duration) -> StagedOrder {
-        let now = chrono::Utc::now().timestamp_millis();
+        let now = jiff::Timestamp::now().as_millisecond();
         let lifetime_ms = i64::try_from(lifetime.as_millis()).unwrap();
         serde_json::from_value(serde_json::json!({
             "payload": {
