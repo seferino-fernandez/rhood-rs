@@ -648,7 +648,7 @@ mod tests {
     }
 
     fn staged_stock() -> StagedOrder {
-        let now = chrono_now_ms();
+        let now = now_unix_ms();
         serde_json::from_value(serde_json::json!({
             "payload": {
                 "kind": "Stock",
@@ -700,7 +700,7 @@ mod tests {
         .unwrap()
     }
 
-    fn chrono_now_ms() -> i64 {
+    fn now_unix_ms() -> i64 {
         std::time::UNIX_EPOCH
             .elapsed()
             .map(|elapsed| i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX))
