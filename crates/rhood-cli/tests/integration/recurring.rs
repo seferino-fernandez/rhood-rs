@@ -1,4 +1,4 @@
-use crate::common::{RECURRING_START_DATE, cli, parse_json};
+use crate::common::{cli, parse_json, today};
 
 #[test]
 #[ignore = "requires live Robinhood credentials"]
@@ -10,6 +10,7 @@ fn recurring_list_returns_array() {
 #[test]
 #[ignore = "requires live Robinhood credentials"]
 fn recurring_next_date_returns_object() {
+    let start_date = today();
     // `next-date` requires BOTH --frequency and --start-date flags.
     let output = cli()
         .args([
@@ -18,7 +19,7 @@ fn recurring_next_date_returns_object() {
             "--frequency",
             "weekly",
             "--start-date",
-            RECURRING_START_DATE,
+            &start_date,
         ])
         .assert()
         .success();
