@@ -389,6 +389,59 @@ mod tests {
         Arc::new(ReadTransportPolicy::new(&HttpConfig::default(), clock))
     }
 
+    #[test]
+    fn parses_all_http_date_forms_as_the_same_utc_instant() {
+        for value in [
+            "Tue, 14 Nov 2023 22:13:30 GMT",
+            "Tuesday, 14-Nov-23 22:13:30 GMT",
+            "Tue Nov 14 22:13:30 2023",
+        ] {
+            assert_eq!(
+                parse_http_date(value).map(|date| date.timestamp()),
+                Some(1_700_000_010),
+                "HTTP date form {value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rfc850_two_digit_years_use_chronos_pivot_and_validate_weekdays() {
+        for (value, expected) in [
+            ("Wednesday, 14-Nov-68 22:13:30 GMT", 3_120_156_810),
+            ("Thursday, 14-Nov-69 22:13:30 GMT", 3_151_692_810),
+            ("Saturday, 14-Nov-70 22:13:30 GMT", 27_468_810),
+        ] {
+            assert_eq!(
+                parse_http_date(value).map(|date| date.timestamp()),
+                Some(expected),
+                "RFC850 date {value:?}"
+            );
+        }
+        assert!(parse_http_date("Monday, 14-Nov-23 22:13:30 GMT").is_none());
+    }
+
+    #[test]
+    fn retry_after_parsing_preserves_whitespace_errors_rounding_and_cap_boundary() {
+        let policy = policy(Arc::new(ManualClock::new()));
+
+        for (value, expected) in [
+            ("  17\t", Some(17)),
+            ("soon", None),
+            ("Tue, 14 Nov 2023 22:13:19 GMT", Some(0)),
+            ("Tue, 14 Nov 2023 22:13:20 GMT", Some(0)),
+            ("Tue, 14 Nov 2023 22:13:21 GMT", Some(1)),
+            ("Tue, 14 Nov 2023 22:14:20 GMT", Some(60)),
+            ("Tue, 14 Nov 2023 22:14:21 GMT", Some(61)),
+            ("  Tue, 14 Nov 2023 22:13:22 GMT\t", Some(2)),
+        ] {
+            assert_eq!(
+                policy.retry_after_delay_secs(value),
+                expected,
+                "Retry-After value {value:?}"
+            );
+        }
+    }
+
     async fn wait_for_count(count: &AtomicUsize, expected: usize) {
         for _ in 0..100 {
             if count.load(Ordering::SeqCst) == expected {
