@@ -224,7 +224,7 @@ mod tests {
 
         assert!(cache.load().unwrap().is_none());
 
-        let token = make_token("acc", Some(chrono::Utc::now().timestamp() + 3600));
+        let token = make_token("acc", Some(jiff::Timestamp::now().as_second() + 3600));
         cache.save(&token).unwrap();
 
         let loaded = cache.load().unwrap().unwrap();
@@ -364,7 +364,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("token.json");
         let cache = TokenCache::with_path(path.clone());
-        let token = make_token("secret", Some(chrono::Utc::now().timestamp() + 3600));
+        let token = make_token("secret", Some(jiff::Timestamp::now().as_second() + 3600));
 
         cache.save(&token).unwrap();
         set_mode(&path, 0o600);
@@ -378,7 +378,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("token.json");
         let cache = TokenCache::with_path(path.clone());
-        let token = make_token("secret", Some(chrono::Utc::now().timestamp() + 3600));
+        let token = make_token("secret", Some(jiff::Timestamp::now().as_second() + 3600));
 
         cache.save(&token).unwrap();
         set_mode(&path, 0o644);
@@ -395,7 +395,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("token.json");
         let cache = TokenCache::with_path(path.clone());
-        let token = make_token("secret", Some(chrono::Utc::now().timestamp() + 3600));
+        let token = make_token("secret", Some(jiff::Timestamp::now().as_second() + 3600));
 
         cache.save(&token).unwrap();
         set_mode(&path, 0o644);
@@ -430,7 +430,7 @@ mod tests {
         let path = dir.path().join("token.json");
         let cache = TokenCache::with_path(path.clone());
 
-        let token = make_token("secret", Some(chrono::Utc::now().timestamp() + 3600));
+        let token = make_token("secret", Some(jiff::Timestamp::now().as_second() + 3600));
         cache.save(&token).unwrap();
 
         let mode = std::fs::metadata(&path).unwrap().mode() & 0o777;

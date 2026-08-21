@@ -13,7 +13,7 @@
 )]
 
 use assert_cmd::Command;
-use chrono::{Datelike, Days, Utc};
+use jiff::{Timestamp, ToSpan, civil::Date, tz::TimeZone};
 use rhood_core::models::option::OptionType;
 use rhood_core::{RhoodConfig, RobinhoodClient};
 use secrecy::ExposeSecret;
@@ -56,25 +56,27 @@ pub struct OptionFixture {
     pub strike: String,
 }
 
+fn utc_today() -> Date {
+    Timestamp::now().to_zoned(TimeZone::UTC).date()
+}
+
 /// Returns today's UTC date, which is accepted by both market-hours and
 /// recurring-date discovery without becoming stale in the repository.
 pub fn today() -> String {
-    Utc::now().date_naive().format("%Y-%m-%d").to_string()
+    utc_today().to_string()
 }
 
 pub fn one_year_ago() -> String {
-    Utc::now()
-        .date_naive()
-        .checked_sub_days(Days::new(365))
+    utc_today()
+        .checked_sub(365.days())
         .expect("one year ago is representable")
-        .format("%Y-%m-%d")
         .to_string()
 }
 
 /// Chooses the current (or next, once expiration is near) quarterly E-mini S&P
 /// contract instead of pinning the suite to an expired contract forever.
 pub fn futures_symbol() -> String {
-    let today = Utc::now().date_naive();
+    let today = utc_today();
     let quarters = [(3, 'H'), (6, 'M'), (9, 'U'), (12, 'Z')];
     let (code, year) = quarters
         .iter()

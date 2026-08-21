@@ -24,7 +24,7 @@ thiserror = "2.0.20"
 secrecy = { version = "0.10.3", features = ["serde"] }
 totp-rs = { version = "6.0.0", default-features = false, features = ["std", "zeroize"] }
 dirs = "6.0.0"
-chrono = { version = "0.4.45", features = ["serde"] }
+jiff = { version = "0.2.35", default-features = false, features = ["std"] }
 uuid = { version = "1.24.0", features = ["v4", "serde"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
