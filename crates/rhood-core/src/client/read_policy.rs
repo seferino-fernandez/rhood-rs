@@ -91,6 +91,7 @@ impl ReadTransportPolicy {
         }
 
         let retry_at = parse_http_date(value)?;
+        // Wall clocks outside Jiff's timestamp range deliberately return no delay.
         let wall_now = Timestamp::try_from(self.clock.wall_now()).ok()?;
         let delay: SignedDuration = retry_at.duration_since(wall_now);
         if delay <= SignedDuration::ZERO {
@@ -252,18 +253,18 @@ impl ReadTransportPolicy {
 
 fn parse_http_date(value: &str) -> Option<Timestamp> {
     const IMF_FIXDATE: &str = "%a, %d %b %Y %H:%M:%S GMT";
-    const RFC850_DATE: &str = "%A, %d-%b-%y %H:%M:%S GMT";
-    const RFC850_2069_DATE: &str = "%A, %d-%b-%Y %H:%M:%S GMT";
+    const RFC850_DATES: [&str; 2] = ["%A, %d-%b-%y %H:%M:%S GMT", "%a, %d-%b-%y %H:%M:%S GMT"];
+    const RFC850_2069_DATES: [&str; 2] = ["%A, %d-%b-%Y %H:%M:%S GMT", "%a, %d-%b-%Y %H:%M:%S GMT"];
     const ASCTIME_DATE: &str = "%a %b %e %H:%M:%S %Y";
 
     let value = value.trim();
     if let Some((prefix, suffix)) = value.split_once("-69 ") {
         let expanded = format!("{prefix}-2069 {suffix}");
-        if let Some(timestamp) = parse_utc_datetime(&expanded, RFC850_2069_DATE) {
-            return Some(timestamp);
-        }
+        return RFC850_2069_DATES
+            .into_iter()
+            .find_map(|format| parse_utc_datetime(&expanded, format));
     }
-    [IMF_FIXDATE, RFC850_DATE, ASCTIME_DATE]
+    [IMF_FIXDATE, RFC850_DATES[0], RFC850_DATES[1], ASCTIME_DATE]
         .into_iter()
         .find_map(|format| parse_utc_datetime(value, format))
 }
@@ -420,7 +421,7 @@ mod tests {
     }
 
     #[test]
-    fn rfc850_two_digit_years_use_chronos_pivot_and_validate_weekdays() {
+    fn rfc850_two_digit_years_use_2069_pivot_and_validate_weekdays() {
         for (value, expected) in [
             ("Wednesday, 14-Nov-68 22:13:30 GMT", 3_120_156_810),
             ("Thursday, 14-Nov-69 22:13:30 GMT", 3_151_692_810),
@@ -433,6 +434,22 @@ mod tests {
             );
         }
         assert!(parse_http_date("Monday, 14-Nov-23 22:13:30 GMT").is_none());
+        assert!(parse_http_date("Friday, 14-Nov-69 22:13:30 GMT").is_none());
+    }
+
+    #[test]
+    fn rfc850_accepts_abbreviated_weekdays() {
+        for (value, expected) in [
+            ("Wed, 14-Nov-68 22:13:30 GMT", 3_120_156_810),
+            ("Thu, 14-Nov-69 22:13:30 GMT", 3_151_692_810),
+            ("Sat, 14-Nov-70 22:13:30 GMT", 27_468_810),
+        ] {
+            assert_eq!(
+                parse_http_date(value).map(Timestamp::as_second),
+                Some(expected),
+                "RFC850 date {value:?}"
+            );
+        }
     }
 
     #[test]
