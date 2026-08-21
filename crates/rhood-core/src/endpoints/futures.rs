@@ -227,7 +227,7 @@ impl RobinhoodClient {
         self.get_futures_paginated(&url).await
     }
 
-    /// Fetches all futures orders with optional date filtering.
+    /// Fetches all futures orders with optional local date filtering.
     ///
     /// Discovers the futures account ID automatically. Uses cursor-based
     /// pagination to fetch all pages.
@@ -242,11 +242,23 @@ impl RobinhoodClient {
             "{}{account_id}/orders",
             self.api_url(paths::FUTURES_ACCOUNTS)
         );
-        let mut params: Vec<(&str, &str)> = vec![("contractType", "OUTRIGHT")];
+        // Unlike the stock and option order endpoints, Ceres rejects
+        // `updated_at[gte]`, `updatedAt[gte]`, and `createdAt[gte]` with HTTP
+        // 400. Collect the cursor pages first and apply the same lower bound
+        // locally. An order with no update timestamp cannot be proven to fall
+        // inside the requested range and is therefore omitted.
+        let mut orders = self
+            .get_futures_cursor_paginated(&url, &[("contractType", "OUTRIGHT")])
+            .await?;
         if let Some(date) = since {
-            params.push(("updated_at[gte]", date));
+            orders.retain(|order: &FuturesOrder| {
+                order
+                    .updated_at
+                    .as_deref()
+                    .is_some_and(|updated_at| updated_at >= date)
+            });
         }
-        self.get_futures_cursor_paginated(&url, &params).await
+        Ok(orders)
     }
 }
 
@@ -260,7 +272,7 @@ mod tests {
         FuturesQuoteDataWrapper,
     };
     use secrecy::SecretString;
-    use wiremock::matchers::{header, method, path};
+    use wiremock::matchers::{header, method, path, query_param, query_param_is_missing};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     async fn client_for_server(server: &MockServer) -> (tempfile::TempDir, RobinhoodClient) {
@@ -580,6 +592,50 @@ mod tests {
         let positions = client.get_futures_positions().await.unwrap();
 
         assert!(positions.is_empty());
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn futures_orders_filter_since_locally_without_unsupported_query() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/ceres/v1/accounts/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [{"id": "futures-account", "accountType": "FUTURES"}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/ceres/v1/accounts/futures-account/orders"))
+            .and(query_param("contractType", "OUTRIGHT"))
+            .and(query_param_is_missing("updated_at[gte]"))
+            .and(query_param_is_missing("updatedAt[gte]"))
+            .and(query_param_is_missing("createdAt[gte]"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [
+                    {"orderId": "old", "updatedAt": "2025-01-01T00:00:00Z"},
+                    {"orderId": "boundary", "updatedAt": "2025-08-21T00:00:00Z"},
+                    {"orderId": "new", "updatedAt": "2026-01-01T00:00:00Z"},
+                    {"orderId": "unknown"}
+                ],
+                "next": null
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (_dir, client) = client_for_server(&server).await;
+
+        let orders = client
+            .get_all_futures_orders(Some("2025-08-21"))
+            .await
+            .unwrap();
+
+        let ids: Vec<_> = orders
+            .iter()
+            .filter_map(|order| order.order_id.as_deref())
+            .collect();
+        assert_eq!(ids, vec!["boundary", "new"]);
         server.verify().await;
     }
 

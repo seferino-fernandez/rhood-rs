@@ -2,6 +2,23 @@ use crate::common::{cli, parse_json};
 
 #[test]
 #[ignore = "requires live Robinhood credentials"]
+fn account_list_returns_canonical_selectors() {
+    let output = cli().args(["account", "list"]).assert().success();
+    let body = parse_json(&output);
+    let accounts = body.as_array().expect("account list should be an array");
+    assert!(
+        !accounts.is_empty(),
+        "live account discovery returned no accounts"
+    );
+    assert!(accounts.iter().all(|account| {
+        account["account_number"]
+            .as_str()
+            .is_some_and(|number| !number.is_empty())
+    }));
+}
+
+#[test]
+#[ignore = "requires live Robinhood credentials"]
 fn positions_returns_array() {
     let output = cli().args(["account", "positions"]).assert().success();
     assert!(parse_json(&output).is_array());
