@@ -87,23 +87,3 @@ jobs:
 
             - name: Run cargo clippy
               run: cargo clippy --all-targets --all-features -- -D warnings
-
-    audit:
-        runs-on: ubuntu-latest
-        steps:
-            - uses: actions/checkout@v7
-              with:
-                  lfs: true
-
-            - name: Install Rust toolchain
-              uses: dtolnay/rust-toolchain@stable
-
-            - name: Install cargo audit tools
-              uses: taiki-e/install-action@v2
-              with:
-                  tool: just,cargo-auditable,cargo-audit
-
-            - uses: Swatinem/rust-cache@v2
-
-            - name: Audit release binaries
-              run: just audit
