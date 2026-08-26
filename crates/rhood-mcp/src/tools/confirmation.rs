@@ -61,7 +61,8 @@ pub(super) fn process_order_confirmation() -> Arc<OrderConfirmation> {
         key.extend_from_slice(Uuid::new_v4().as_bytes());
         key.extend_from_slice(Uuid::new_v4().as_bytes());
         Arc::new(OrderConfirmation {
-            codec: RequestStateCodec::new(key),
+            // Two UUID byte arrays provide exactly the required 32-byte key.
+            codec: RequestStateCodec::new_unchecked(key),
             redemptions: Arc::new(OrderRedemptionStore::new(ORDER_REDEMPTION_RETENTION)),
             ttl: ORDER_CONFIRMATION_TTL,
         })
@@ -378,7 +379,7 @@ mod tests {
 
     fn confirmation(ttl: Duration) -> Arc<OrderConfirmation> {
         Arc::new(OrderConfirmation {
-            codec: RequestStateCodec::new(b"confirmation-test-key"),
+            codec: RequestStateCodec::new_unchecked([b'x'; RequestStateCodec::MIN_KEY_LENGTH]),
             redemptions: Arc::new(OrderRedemptionStore::new(Duration::from_secs(1_200))),
             ttl,
         })

@@ -25,15 +25,15 @@ secrecy = { version = "0.10.3", features = ["serde"] }
 totp-rs = { version = "6.0.0", default-features = false, features = ["std", "zeroize"] }
 dirs = "6.0.0"
 jiff = { version = "0.2.35", default-features = false, features = ["std"] }
-uuid = { version = "1.24.0", features = ["v4", "serde"] }
+uuid = { version = "1.25.0", features = ["v4", "serde"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 anyhow = "1.0.104"
 toml = "1.1.4"
 schemars = { version = "1.2.2", features = ["rust_decimal1", "uuid1"] }
 rust_decimal = { version = "1.42.1", features = ["serde"] }
-moka = { version = "0.12.15", features = ["future"] }
-futures = { version = "0.3.33", default-features = false, features = ["std"] }
+moka = { version = "0.12.16", features = ["future"] }
+futures = { version = "0.3.34", default-features = false, features = ["std"] }
 
 
 [workspace.lints.clippy]
