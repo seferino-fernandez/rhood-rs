@@ -17,3 +17,6 @@ target/
 .env.development
 .env.production
 config.toml
+
+# Local backlog
+docs/BACKLOG.md
