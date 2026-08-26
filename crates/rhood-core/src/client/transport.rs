@@ -863,29 +863,61 @@ mod tests {
     }
 
     async fn wait_for_request_count(server: &MockServer, expected: usize) {
-        for _ in 0..100 {
-            if request_count(server).await == expected {
-                return;
+        let wait = async {
+            loop {
+                if request_count(server).await == expected {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
             }
-            tokio::task::yield_now().await;
+        };
+        if tokio::time::timeout(std::time::Duration::from_secs(5), wait)
+            .await
+            .is_err()
+        {
+            panic!(
+                "expected {expected} requests, observed {}",
+                request_count(server).await
+            );
         }
-        panic!(
-            "expected {expected} requests, observed {}",
-            request_count(server).await
-        );
     }
 
     async fn wait_for_policy_sleepers(clock: &ManualClock, expected: usize) {
-        for _ in 0..100 {
-            if clock.pending_sleepers() >= expected {
-                return;
+        let wait = async {
+            loop {
+                if clock.pending_sleepers() >= expected {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
             }
-            tokio::task::yield_now().await;
+        };
+        if tokio::time::timeout(std::time::Duration::from_secs(5), wait)
+            .await
+            .is_err()
+        {
+            panic!(
+                "expected at least {expected} policy sleepers, observed {}",
+                clock.pending_sleepers()
+            );
         }
-        panic!(
-            "expected at least {expected} policy sleepers, observed {}",
-            clock.pending_sleepers()
-        );
+    }
+
+    #[tokio::test]
+    async fn request_count_wait_tolerates_scheduler_delay() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/delayed"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let url = format!("{}/delayed", server.uri());
+
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            reqwest::get(url).await.unwrap();
+        });
+
+        wait_for_request_count(&server, 1).await;
     }
 
     #[test]
